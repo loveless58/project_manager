@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Project Manager Agent - Tool Schema",
+  "description": "20 个工具的 schema 契约。校验注册到 ToolRegistry 的工具参数与文档一致。",
+  "version": "1.0.0",
+  "tools": {
+    "scan_projects": {
+      "domain": "project",
+      "description": "扫描三阶段目录，返回项目列表",
+      "params": {},
+      "required": []
+    },
+    "read_project_record": {
+      "domain": "project",
+      "description": "读取项目记录.md",
+      "params": {
+        "project_name": {"type": "string", "description": "项目名称"}
+      },
+      "required": ["project_name"]
+    },
+    "check_milestones": {
+      "domain": "project",
+      "description": "检查里程碑状态(逾期/到期)",
+      "params": {
+        "project_name": {"type": "string"},
+        "days": {"type": "integer", "default": 7}
+      },
+      "required": []
+    },
+    "check_deliverables": {
+      "domain": "project",
+      "description": "核对交付物",
+      "params": {
+        "project_name": {"type": "string"}
+      },
+      "required": ["project_name"]
+    },
+    "archive_files": {
+      "domain": "project",
+      "description": "智能归档文件",
+      "params": {
+        "source_dir": {"type": "string"}
+      },
+      "required": []
+    },
+    "migrate_project": {
+      "domain": "project",
+      "description": "迁移项目阶段",
+      "params": {
+        "project_name": {"type": "string"},
+        "to_phase": {"type": "string"},
+        "update_status": {"type": "string"}
+      },
+      "required": ["project_name"]
+    },
+    "generate_bid_overview": {
+      "domain": "project",
+      "description": "生成投标进度总览",
+      "params": {
+        "output_file": {"type": "string"}
+      },
+      "required": []
+    },
+    "generate_project_overview": {
+      "domain": "project",
+      "description": "生成全局项目总览",
+      "params": {
+        "phase": {"type": "string"}
+      },
+      "required": []
+    },
+    "generate_report": {
+      "domain": "project",
+      "description": "生成项目报告",
+      "params": {
+        "project_name": {"type": "string"},
+        "report_type": {"type": "string"}
+      },
+      "required": ["project_name"]
+    },
+    "write_response": {
+      "domain": "project",
+      "description": "写入响应文件",
+      "params": {
+        "content": {"type": "string"},
+        "filename": {"type": "string"}
+      },
+      "required": ["content", "filename"]
+    },
+    "scan_raw_files": {
+      "domain": "data_cleaning",
+      "description": "扫描原始文件目录",
+      "params": {},
+      "required": []
+    },
+    "extract_pdf": {
+      "domain": "data_cleaning",
+      "description": "提取PDF结构化数据",
+      "params": {
+        "file_path": {"type": "string"}
+      },
+      "required": ["file_path"]
+    },
+    "classify_document": {
+      "domain": "data_cleaning",
+      "description": "根据文件名/内容分类文档",
+      "params": {
+        "file_path": {"type": "string"}
+      },
+      "required": ["file_path"]
+    },
+    "batch_process": {
+      "domain": "data_cleaning",
+      "description": "批量处理目录文件",
+      "params": {
+        "source_dir": {"type": "string"}
+      },
+      "required": []
+    },
+    "save_structured": {
+      "domain": "data_cleaning",
+      "description": "保存结构化数据",
+      "params": {
+        "data": {"type": "object"},
+        "output_path": {"type": "string"}
+      },
+      "required": ["data", "output_path"]
+    },
+    "scan_bid_notices": {
+      "domain": "opportunity",
+      "description": "扫描招标公告目录",
+      "params": {},
+      "required": []
+    },
+    "parse_bid_notice": {
+      "domain": "opportunity",
+      "description": "解析招标公告提取关键字段",
+      "params": {
+        "file_path": {"type": "string"}
+      },
+      "required": ["file_path"]
+    },
+    "check_duplicate": {
+      "domain": "opportunity",
+      "description": "检测商机是否重复",
+      "params": {
+        "project_code": {"type": "string"}
+      },
+      "required": ["project_code"]
+    },
+    "generate_bid_context": {
+      "domain": "opportunity",
+      "description": "生成 bid_context.json",
+      "params": {
+        "parsed_data": {"type": "object"}
+      },
+      "required": ["parsed_data"]
+    },
+    "create_crm_suggestion": {
+      "domain": "opportunity",
+      "description": "生成 CRM 录入建议",
+      "params": {
+        "bid_context": {"type": "object"}
+      },
+      "required": ["bid_context"]
+    }
+  },
+  "validation_rules": [
+    {
+      "id": "TOOL-001",
+      "level": "error",
+      "check": "所有 20 个工具必须注册到 ToolRegistry",
+      "expected_count": 20
+    },
+    {
+      "id": "TOOL-002",
+      "level": "error",
+      "check": "required 参数必须在 ToolRegistry.register() 的 required 列表里",
+      "fix": "在 main.py 的 _build_registry() 中检查 required 参数"
+    },
+    {
+      "id": "TOOL-003",
+      "level": "warning",
+      "check": "description 应该跟 references/project_tools.md 一致",
+      "fix": "同步更新文档或代码"
+    }
+  ]
+}
