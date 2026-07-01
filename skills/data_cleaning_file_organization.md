@@ -21,6 +21,12 @@ state/project_ledgers/<项目名称>/
 └── decision_log.jsonl
 ```
 
+展示类产物默认从账本派生，例如：
+
+```text
+state/投标进度总览.html
+```
+
 ## 当前工具
 
 | 工具 | 职责 |
@@ -32,14 +38,16 @@ state/project_ledgers/<项目名称>/
 | `batch_process` | 批量处理目录文件 |
 | `save_structured` | 保存结构化数据 |
 | `process_documents_to_ledger` | 读取多个源文件，输出结构化 JSON，并更新项目总览账本 |
+| `import_project_detail_workbook` | 读取项目明细表.xlsx，标准化多项目字段，并更新多个项目总览账本 |
+| `generate_bid_progress_html` | 从项目账本汇总生成投标进度总览 HTML 展示页 |
 | `update_project_ledger` | 将候选事实、证据和来源类型写入项目账本 |
 
 ## 最小循环
 
 ```text
-扫描文件 / 接收文件路径
+扫描文件 / 接收文件路径 / 接收项目明细表
   ↓
-extract_document / process_documents_to_ledger 提取候选字段
+extract_document / process_documents_to_ledger / import_project_detail_workbook 提取候选字段
   ↓
 记录证据引用
   ↓
@@ -47,14 +55,39 @@ update_project_ledger
   ↓
 ProjectLedger 规则决议
   ↓
+BidProjectRuleEngine 业务判断
+  ↓
 项目总览.md / project_ledger.json / decision_log.jsonl
+  ↓
+generate_bid_progress_html 派生展示页
 ```
+
+## 业务判断输出
+
+项目账本每次更新后都会生成 `business_judgement`：
+
+```json
+{
+  "business_stage": "bidding | won_pending_contract | execution | closed_lost | pending_registration | unknown",
+  "display_status": "参与中 | 已中标 | 已弃标",
+  "risk_level": "low | medium | high | unknown",
+  "risk_reasons": [],
+  "next_actions": [],
+  "missing_fields": [],
+  "human_review_required": false,
+  "crm_required": false,
+  "bpm_required": false
+}
+```
+
+第一版只使用确定性规则：报名/开标截止、保证金支付、中标未签约、关键字段缺失、冲突字段和低置信度字段。LLM、RAG、CRM/BPM 回读属于后续增强来源，不在本规则层里直接调用。
 
 ## 写入边界
 
 - 本 skill 不直接覆盖高风险事实。
 - 本 skill 不静默移动、重命名、覆盖、删除原始文件。
 - 文件归档、汇总表更新和外部系统写入必须在后续工具中显式执行。
+- HTML、汇总表、看板是派生产物，不作为覆盖项目事实的权威来源。
 - 低置信度、冲突字段和高风险字段必须进入冲突队列或人工确认。
 
 ## 和其他能力的关系

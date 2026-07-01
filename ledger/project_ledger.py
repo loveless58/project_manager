@@ -4,6 +4,8 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from business_rules import BidProjectRuleEngine
+
 
 SOURCE_WEIGHTS = {
     "human_correction": 1.00,
@@ -69,6 +71,12 @@ class ProjectLedger:
         for item in evidence:
             state["evidence_index"].append(self._normalize_evidence(item, source_type, submitted_at))
 
+        state["business_judgement"] = BidProjectRuleEngine().evaluate(
+            state["current_facts"],
+            fact_meta=state["fact_meta"],
+            conflicts=state["conflicts"],
+            evidence_index=state["evidence_index"],
+        )
         state["updated_at"] = submitted_at
         state["change_log"].append({
             "timestamp": submitted_at,
@@ -92,6 +100,7 @@ class ProjectLedger:
             "state_path": state_path,
             "markdown_path": markdown_path,
             "current_facts": state["current_facts"],
+            "business_judgement": state["business_judgement"],
             "decisions": decisions,
             "conflicts": state["conflicts"],
         }
@@ -119,6 +128,7 @@ class ProjectLedger:
             "candidate_facts": [],
             "evidence_index": [],
             "conflicts": [],
+            "business_judgement": {},
             "change_log": [],
         }
 
@@ -290,6 +300,19 @@ class ProjectLedger:
         lines.extend(["", "## 5. 变更日志", "| 时间 | Skill | 来源类型 | 字段 |", "|---|---|---|---|"])
         for item in state["change_log"]:
             lines.append(f"| {item['timestamp']} | {item.get('skill', '')} | {item.get('source_type', '')} | {', '.join(item.get('fields', []))} |")
+
+        judgement = state.get("business_judgement") or {}
+        lines.extend(["", "## 6. 业务判断", "| 项 | 值 |", "|---|---|"])
+        lines.append(f"| 业务阶段 | {judgement.get('business_stage', '')} |")
+        lines.append(f"| 展示状态 | {judgement.get('display_status', '')} |")
+        lines.append(f"| 风险等级 | {judgement.get('risk_level', '')} |")
+        lines.append(f"| 需要人工复核 | {'是' if judgement.get('human_review_required') else '否'} |")
+        lines.append(f"| 需要 CRM 同步 | {'是' if judgement.get('crm_required') else '否'} |")
+        lines.append(f"| 需要 BPM 补充 | {'是' if judgement.get('bpm_required') else '否'} |")
+        lines.append(f"| 风险原因 | {', '.join(judgement.get('risk_reasons', []))} |")
+        lines.append(f"| 下一步动作 | {', '.join(judgement.get('next_actions', []))} |")
+        lines.append(f"| 缺失字段 | {', '.join(judgement.get('missing_fields', []))} |")
+        lines.append(f"| 数据质量标记 | {', '.join(judgement.get('data_quality_flags', []))} |")
 
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")

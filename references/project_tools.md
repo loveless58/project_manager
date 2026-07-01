@@ -1,9 +1,9 @@
 # 工具层详细 API
 
-本文件描述 29 个工具的完整 API。分四个受控工具域：
+本文件描述 31 个工具的完整 API。分四个受控工具域：
 
 - **ProjectTools**（10 个）：项目管理
-- **DataCleaningTools**（8 个）：数据清洗及文件整理
+- **DataCleaningTools**（10 个）：数据清洗及文件整理
 - **OpportunityManagerTools**（5 个）：商机检测
 - **CloudCCCrmTools**（6 个）：CloudCC/CRM 只读查重、草稿准备、提交前确认
 
@@ -227,6 +227,29 @@
 }
 ```
 
+### extract_document(file_path)
+
+提取 Word/PDF/图片文件的文本、表格和候选业务字段。当前 Word 路径使用 `python-docx` 读取段落和表格，不移动源文件。
+
+**参数**：
+- `file_path` (str, required): 源文件绝对路径
+
+**返回**：
+```json
+{
+  "schema_version": "document.extract.v1",
+  "file": "...",
+  "document_type": "采购公告|投标文件|未分类",
+  "paragraph_count": 96,
+  "table_count": 4,
+  "fields": {
+    "project_name": "...",
+    "customer_name": "...",
+    "supplier_name": "..."
+  }
+}
+```
+
 ### classify_document(file_path)
 
 根据文件名/内容分类文档（投标/合同/发票/报告）。
@@ -271,6 +294,84 @@
 **返回**：
 ```json
 {"saved": true, "path": "..."}
+```
+
+### process_documents_to_ledger(file_paths, project_name="")
+
+读取多个源文档，保存每个文件的结构化 JSON，并把候选事实写入项目账本。
+
+**参数**：
+- `file_paths` (array, required): 源文件绝对路径列表
+- `project_name` (str, optional): 手工指定项目名；为空时从文件中推断
+
+**返回**：
+```json
+{
+  "schema_version": "data_cleaning.documents_to_ledger.v1",
+  "status": "success|partial|failed",
+  "processed": 2,
+  "project_name": "...",
+  "structured_outputs": ["..."],
+  "artifacts": {
+    "project_overview_md": "...",
+    "project_ledger_json": "..."
+  }
+}
+```
+
+### import_project_detail_workbook(file_path)
+
+读取 `项目明细表.xlsx`，将 `项目明细表` 和 `项目执行` sheet 标准化为项目级字段，并按项目写入多个项目账本。
+
+**参数**：
+- `file_path` (str, required): `项目明细表.xlsx` 绝对路径
+
+**返回**：
+```json
+{
+  "schema_version": "project_detail_workbook.import.v1",
+  "status": "success|partial|failed",
+  "processed_projects": 27,
+  "execution_rows": 3,
+  "projects": [
+    {
+      "project_name": "...",
+      "facts": {
+        "project_code": "C000027902",
+        "customer_name": "...",
+        "bid_status": "已中标",
+        "lifecycle_stage": "execution"
+      },
+      "artifacts": {
+        "project_overview_md": "...",
+        "project_ledger_json": "..."
+      }
+    }
+  ]
+}
+```
+
+### generate_bid_progress_html(output_file="")
+
+从 `project_ledgers/*/project_ledger.json` 汇总当前事实，生成 `投标进度总览.html`。这是展示层派生产物；项目事实仍以每个项目的 `项目总览.md` 和 `project_ledger.json` 为准。
+
+**参数**：
+- `output_file` (str, optional): 输出 HTML 路径，默认 `<workspace_dir>/投标进度总览.html`
+
+**返回**：
+```json
+{
+  "schema_version": "bid_progress_html.v1",
+  "status": "success",
+  "source_dir": ".../project_ledgers",
+  "output_file": ".../投标进度总览.html",
+  "total_projects": 27,
+  "counts": {
+    "已中标": 3,
+    "已弃标": 4,
+    "参与中": 20
+  }
+}
 ```
 
 ---

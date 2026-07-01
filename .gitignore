@@ -11,3 +11,4 @@ build/
 logs/project_manager_*.json
 state/project_ledgers/
 state/structured_documents/
+state/structured_workbooks/

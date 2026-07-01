@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Project Manager Agent - Tool Schema",
-  "description": "29 个工具的 schema 契约。校验注册到 ToolRegistry 的工具参数与文档一致。",
+  "description": "31 个工具的 schema 契约。校验注册到 ToolRegistry 的工具参数与文档一致。",
   "version": "1.0.0",
   "tools": {
     "scan_projects": {
@@ -143,6 +143,22 @@
       },
       "required": ["file_paths"]
     },
+    "import_project_detail_workbook": {
+      "domain": "data_cleaning",
+      "description": "读取项目明细表.xlsx，标准化项目字段并更新多个项目总览账本",
+      "params": {
+        "file_path": {"type": "string"}
+      },
+      "required": ["file_path"]
+    },
+    "generate_bid_progress_html": {
+      "domain": "data_cleaning",
+      "description": "从项目账本生成投标进度总览 HTML 展示页",
+      "params": {
+        "output_file": {"type": "string"}
+      },
+      "required": []
+    },
     "update_project_ledger": {
       "domain": "data_cleaning",
       "description": "数据清洗及文件整理：将候选事实写入项目总览.md账本并执行规则决议",
@@ -248,7 +264,7 @@
       "id": "TOOL-001",
       "level": "error",
       "check": "schema 声明的工具必须可注册到 debug_all_tools ToolRegistry；运行时只暴露 active skill 的工具子集",
-      "expected_count": 29
+      "expected_count": 31
     },
     {
       "id": "TOOL-002",

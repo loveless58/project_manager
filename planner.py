@@ -261,6 +261,24 @@ class RuleBasedPlanner(BasePlanner):
 
     def _plan_project_ledger(self, executed: List[str], last_obs: Optional[str]) -> str:
         paths = self._extract_file_paths()
+        workbook_paths = [path for path in paths if path.lower().endswith((".xlsx", ".xls"))]
+        wants_html = any(k in self.goal.lower() for k in ["html", "展示", "总览", "投标进度"])
+        if workbook_paths and "import_project_detail_workbook" not in executed:
+            payload = {"file_path": workbook_paths[0]}
+            return (
+                "Thought: 用户提供了项目明细表类 Excel，先读取工作簿、标准化项目字段，并写入多个项目总览账本。\n"
+                "Action: import_project_detail_workbook\n"
+                f"Action Input: {json.dumps(payload, ensure_ascii=False)}"
+            )
+        if (wants_html or "import_project_detail_workbook" in executed) and "generate_bid_progress_html" not in executed:
+            return (
+                "Thought: 项目账本已经具备汇总事实，继续从 project_ledgers 派生投标进度总览 HTML。\n"
+                "Action: generate_bid_progress_html\n"
+                "Action Input: {}"
+            )
+        if "generate_bid_progress_html" in executed:
+            return "Final Answer: 项目明细表 Excel 已导入项目账本，并已从项目账本生成投标进度总览 HTML。"
+
         if paths and "process_documents_to_ledger" not in executed:
             payload = {
                 "file_paths": paths,

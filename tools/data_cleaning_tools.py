@@ -20,6 +20,7 @@ import os
 import json
 import shutil
 import re
+import html
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 
@@ -371,6 +372,696 @@ class DataCleaningTools:
                 "project_dir": ledger_result["project_dir"] if ledger_result else "",
             },
         }
+
+    def import_project_detail_workbook(self, file_path: str) -> Dict[str, Any]:
+        """Import 项目明细表.xlsx and update one ledger per project.
+
+        The workbook is treated as an xlsx_summary source. It can seed and
+        update project master data, but higher-weight evidence such as CRM/BPM
+        readback, contracts, and human corrections can override it later.
+        """
+        if not os.path.exists(file_path):
+            return {"error": f"File not found: {file_path}"}
+
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            return {"error": "openpyxl not installed. Run: pip install openpyxl"}
+
+        wb = load_workbook(file_path, data_only=True)
+        if "项目明细表" not in wb.sheetnames:
+            return {"error": "Workbook missing required sheet: 项目明细表"}
+
+        detail_rows = self._worksheet_records(wb["项目明细表"])
+        execution_rows = self._worksheet_records(wb["项目执行"]) if "项目执行" in wb.sheetnames else []
+        execution_by_key = self._execution_rows_by_project(execution_rows)
+
+        ledger = ProjectLedger(base_dir=os.path.join(self.workspace_dir, "project_ledgers"))
+        structured_dir = os.path.join(self.workspace_dir, "structured_workbooks", self._safe_name(os.path.basename(file_path)))
+        os.makedirs(structured_dir, exist_ok=True)
+
+        projects = []
+        failed = []
+        for row_index, row in enumerate(detail_rows, start=2):
+            facts = self._project_detail_facts(row)
+            project_name = facts.get("project_name")
+            if not project_name:
+                failed.append({"row": row_index, "error": "missing project_name"})
+                continue
+
+            exec_row = self._match_execution_row(facts, execution_by_key)
+            if exec_row:
+                facts.update(self._project_execution_facts(exec_row))
+            facts["lifecycle_stage"] = self._infer_lifecycle_stage(facts)
+            facts["risk_level"] = self._infer_risk_level(facts)
+
+            evidence = [
+                {
+                    "field": field,
+                    "source_type": "xlsx_summary",
+                    "source_ref": f"{file_path}#项目明细表!row={row_index}",
+                    "extract_method": "xlsx_row",
+                    "confidence": 0.90 if field in {"project_name", "project_code", "bid_status"} else 0.82,
+                    "summary": "项目明细表导入",
+                }
+                for field in facts.keys()
+            ]
+            if exec_row:
+                evidence.extend([
+                    {
+                        "field": field,
+                        "source_type": "xlsx_summary",
+                        "source_ref": f"{file_path}#项目执行",
+                        "extract_method": "xlsx_row",
+                        "confidence": 0.82,
+                        "summary": "项目执行表补充",
+                    }
+                    for field in self._project_execution_facts(exec_row).keys()
+                ])
+
+            ledger_result = ledger.apply_patch({
+                "project_name": project_name,
+                "source_type": "xlsx_summary",
+                "facts": facts,
+                "evidence": evidence,
+                "skill": "data_cleaning_file_organization",
+                "actor": "data_cleaning_file_organization",
+            })
+
+            structured_path = os.path.join(structured_dir, f"{self._safe_name(project_name)}.json")
+            self._save_structured_json(structured_path, {
+                "schema_version": "project_detail.row.v1",
+                "source_file": file_path,
+                "source_row": row_index,
+                "facts": facts,
+                "raw_row": row,
+                "execution_row": exec_row or {},
+                "artifacts": {
+                    "project_overview_md": ledger_result["markdown_path"],
+                    "project_ledger_json": ledger_result["state_path"],
+                },
+                "processed_at": datetime.now().isoformat(),
+            })
+
+            projects.append({
+                "project_name": project_name,
+                "facts": facts,
+                "structured_output": structured_path,
+                "artifacts": {
+                    "project_overview_md": ledger_result["markdown_path"],
+                    "project_ledger_json": ledger_result["state_path"],
+                    "project_dir": ledger_result["project_dir"],
+                },
+            })
+
+        return {
+            "schema_version": "project_detail_workbook.import.v1",
+            "status": "success" if projects and not failed else ("partial" if projects else "failed"),
+            "source_file": file_path,
+            "processed_projects": len(projects),
+            "failed": len(failed),
+            "execution_rows": len(execution_rows),
+            "projects": projects,
+            "failures": failed,
+            "structured_dir": structured_dir,
+        }
+
+    def generate_bid_progress_html(self, output_file: str = "") -> Dict[str, Any]:
+        """Generate 投标进度总览.html from project ledger facts.
+
+        The HTML is a derived view. The authoritative evidence remains each
+        project's project_ledger.json and 项目总览.md.
+        """
+        ledger_dir = os.path.join(self.workspace_dir, "project_ledgers")
+        if not os.path.exists(ledger_dir):
+            return {"error": f"Project ledger directory not found: {ledger_dir}"}
+
+        projects = self._load_project_ledger_summaries(ledger_dir)
+        if not projects:
+            return {"error": f"No project ledgers found in: {ledger_dir}"}
+
+        groups = {
+            "已中标": [p for p in projects if p["overview_status"] == "已中标"],
+            "已弃标": [p for p in projects if p["overview_status"] == "已弃标"],
+            "参与中": [p for p in projects if p["overview_status"] == "参与中"],
+        }
+        output = output_file or os.path.join(self.workspace_dir, "投标进度总览.html")
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        with open(output, "w", encoding="utf-8") as f:
+            f.write(self._render_bid_progress_html(projects, groups))
+
+        return {
+            "schema_version": "bid_progress_html.v1",
+            "status": "success",
+            "source_dir": ledger_dir,
+            "output_file": output,
+            "total_projects": len(projects),
+            "counts": {name: len(items) for name, items in groups.items()},
+        }
+
+    def _worksheet_records(self, ws) -> List[Dict[str, Any]]:
+        headers = [self._cell_text(cell.value) for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+        records = []
+        for row in ws.iter_rows(min_row=2):
+            record = {}
+            has_value = False
+            for idx, cell in enumerate(row):
+                if idx >= len(headers) or not headers[idx]:
+                    continue
+                value = self._normalize_cell_value(cell.value)
+                if value not in (None, ""):
+                    has_value = True
+                record[headers[idx]] = value
+            if has_value:
+                records.append(record)
+        return records
+
+    def _project_detail_facts(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        mapping = {
+            "项目名称": "project_name",
+            "项目编号": "project_code",
+            "招标人/客户": "customer_name",
+            "负责销售": "sales_owner",
+            "报名截止": "registration_deadline",
+            "开标时间": "bid_open_time",
+            "投标保证金": "bid_bond_amount",
+            "保证金已支付": "bid_bond_paid",
+            "项目类型": "project_type",
+            "报名状态": "registration_status",
+            "中标状态": "bid_status",
+            "签约状态": "contract_status",
+            "备注": "note",
+            "立项金额": "project_amount",
+            "招标编号": "bid_code",
+        }
+        facts = {}
+        for source_field, target_field in mapping.items():
+            value = row.get(source_field)
+            if value in (None, ""):
+                continue
+            facts[target_field] = value
+        return facts
+
+    def _project_execution_facts(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        mapping = {
+            "客户": "customer_name",
+            "合同金额": "contract_amount",
+            "合同编号": "contract_code",
+            "签订日期": "contract_signed_date",
+            "签约状态": "contract_status",
+            "里程碑节点": "milestone_name",
+            "预计完成": "planned_finish_date",
+            "实际完成": "actual_finish_date",
+            "备注": "execution_note",
+        }
+        facts = {}
+        for source_field, target_field in mapping.items():
+            value = row.get(source_field)
+            if value in (None, ""):
+                continue
+            facts[target_field] = value
+        return facts
+
+    def _execution_rows_by_project(self, rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            for key in [row.get("项目编号"), row.get("项目名称")]:
+                if key:
+                    grouped.setdefault(str(key), []).append(row)
+        return grouped
+
+    def _match_execution_row(self, facts: Dict[str, Any], grouped: Dict[str, List[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+        for key in [facts.get("project_code"), facts.get("project_name")]:
+            if key and str(key) in grouped:
+                return grouped[str(key)][0]
+        return None
+
+    def _infer_lifecycle_stage(self, facts: Dict[str, Any]) -> str:
+        bid_status = str(facts.get("bid_status", ""))
+        contract_status = str(facts.get("contract_status", ""))
+        registration_status = str(facts.get("registration_status", ""))
+        if "弃标" in bid_status:
+            return "closed_lost"
+        if "已签" in contract_status or facts.get("contract_code"):
+            return "execution"
+        if "已中标" in bid_status:
+            return "won_pending_contract"
+        if "已报名" in registration_status or "待开标" in bid_status:
+            return "bidding"
+        if "待报名" in registration_status:
+            return "lead_or_pending_registration"
+        return "unknown"
+
+    def _infer_risk_level(self, facts: Dict[str, Any]) -> str:
+        if facts.get("lifecycle_stage") == "closed_lost":
+            return "low"
+        if facts.get("bid_bond_amount") and str(facts.get("bid_bond_paid", "")) not in {"是", "已支付", "✅ 已支付"}:
+            return "medium"
+        if facts.get("bid_status") == "已中标" and "未签" in str(facts.get("contract_status", "")):
+            return "medium"
+        if not facts.get("customer_name") or not facts.get("sales_owner"):
+            return "unknown"
+        return "low"
+
+    def _load_project_ledger_summaries(self, ledger_dir: str) -> List[Dict[str, Any]]:
+        projects = []
+        for name in sorted(os.listdir(ledger_dir)):
+            state_path = os.path.join(ledger_dir, name, "project_ledger.json")
+            if not os.path.exists(state_path):
+                continue
+            try:
+                with open(state_path, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            facts = state.get("current_facts") or {}
+            judgement = state.get("business_judgement") or {}
+            project_name = str(facts.get("project_name") or state.get("project_name") or name)
+            row = {
+                "project_name": project_name,
+                "project_code": facts.get("project_code", ""),
+                "bpm_contract_code": facts.get("bpm_contract_code", ""),
+                "business_type": facts.get("business_type", ""),
+                "customer_name": facts.get("customer_name", ""),
+                "sales_owner": facts.get("sales_owner", ""),
+                "registration_deadline": facts.get("registration_deadline", ""),
+                "bid_open_time": facts.get("bid_open_time", ""),
+                "bid_bond_amount": facts.get("bid_bond_amount", ""),
+                "bid_bond_paid": facts.get("bid_bond_paid", ""),
+                "project_type": facts.get("project_type", ""),
+                "registration_status": facts.get("registration_status", ""),
+                "bid_status": facts.get("bid_status", ""),
+                "contract_status": facts.get("contract_status", ""),
+                "note": facts.get("note") or facts.get("execution_note", ""),
+                "project_amount": facts.get("project_amount") or facts.get("contract_amount", ""),
+                "lifecycle_stage": facts.get("lifecycle_stage", ""),
+                "business_stage": judgement.get("business_stage", facts.get("lifecycle_stage", "")),
+                "risk_level": judgement.get("risk_level", facts.get("risk_level", "")),
+                "next_actions": judgement.get("next_actions", []),
+                "human_review_required": judgement.get("human_review_required", False),
+                "ledger_path": state_path,
+            }
+            row["overview_status"] = judgement.get("display_status") or self._overview_status(row)
+            projects.append(row)
+        return sorted(projects, key=lambda p: (p["overview_status"], str(p.get("bid_open_time") or ""), p["project_name"]))
+
+    def _overview_status(self, facts: Dict[str, Any]) -> str:
+        bid_status = str(facts.get("bid_status", ""))
+        contract_status = str(facts.get("contract_status", ""))
+        lifecycle_stage = str(facts.get("lifecycle_stage", ""))
+        if "弃标" in bid_status or lifecycle_stage == "closed_lost":
+            return "已弃标"
+        if "已中标" in bid_status or "已签" in contract_status or lifecycle_stage in {"execution", "won_pending_contract"}:
+            return "已中标"
+        return "参与中"
+
+    def _render_bid_progress_html(self, projects: List[Dict[str, Any]], groups: Dict[str, List[Dict[str, Any]]]) -> str:
+        generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+        stat_cards = [
+            ("总项目", len(projects), "全部账本项目", "neutral"),
+            ("已中标", len(groups["已中标"]), "进入签约或执行", "success"),
+            ("已弃标", len(groups["已弃标"]), "已关闭机会", "danger"),
+            ("参与中", len(groups["参与中"]), "报名、投标、待开标", "info"),
+            (
+                "保证金待确认",
+                sum(1 for p in projects if p.get("bid_bond_amount") and str(p.get("bid_bond_paid")) not in {"是", "已支付"}),
+                "有金额但未标记支付",
+                "warning",
+            ),
+        ]
+        cards_html = "\n".join(
+            (
+                f'<article class="metric-card {cls}">'
+                f'<div class="metric-label">{html.escape(label)}</div>'
+                f'<div class="metric-row"><span class="metric-value">{count}</span><span class="metric-dot"></span></div>'
+                f'<div class="metric-hint">{html.escape(hint)}</div>'
+                f'</article>'
+            )
+            for label, count, hint, cls in stat_cards
+        )
+        tabs_html = "\n".join(
+            f'<button class="tab-btn" data-tab="{html.escape(name)}"><span>{html.escape(name)}</span><strong>{len(items)}</strong></button>'
+            for name, items in groups.items()
+        )
+        sections_html = "\n".join(
+            (
+                f'<section class="tab-content" data-tab="{html.escape(name)}">'
+                f'<div class="section-head"><div><h2>{html.escape(name)}</h2><p>{self._section_hint(name)}</p></div><span class="section-count">{len(items)} 项</span></div>'
+                f'{self._render_bid_progress_table(items)}'
+                f'</section>'
+            )
+            for name, items in groups.items()
+        )
+        sales_rows = self._render_sales_stats(projects)
+        return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>投标进度总览</title>
+  <style>
+    :root {{
+      --page: #f6f7f9;
+      --surface: #ffffff;
+      --surface-soft: #fafbfc;
+      --border: #e6e8ec;
+      --border-strong: #d4d8df;
+      --text: #1d2433;
+      --muted: #667085;
+      --muted-soft: #98a2b3;
+      --blue: #2563eb;
+      --green: #16a34a;
+      --red: #dc2626;
+      --amber: #d97706;
+      --violet: #7c3aed;
+      --shadow: 0 10px 26px rgba(15, 23, 42, 0.06);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: var(--page);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+      font-size: 14px;
+    }}
+    .app-shell {{ max-width: 1720px; margin: 0 auto; padding: 28px; }}
+    .topbar {{
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      align-items: flex-start;
+      margin-bottom: 20px;
+    }}
+    .eyebrow {{ color: var(--blue); font-size: 12px; font-weight: 700; letter-spacing: 0; text-transform: uppercase; margin-bottom: 6px; }}
+    h1 {{ margin: 0; font-size: 30px; line-height: 1.18; letter-spacing: 0; }}
+    .meta {{ color: var(--muted); margin-top: 8px; }}
+    .source-pill {{
+      border: 1px solid var(--border);
+      background: var(--surface);
+      border-radius: 999px;
+      padding: 8px 12px;
+      color: var(--muted);
+      white-space: nowrap;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }}
+    .metrics-grid {{ display: grid; grid-template-columns: repeat(5, minmax(160px, 1fr)); gap: 12px; margin-bottom: 18px; }}
+    .metric-card {{
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+    }}
+    .metric-label {{ color: var(--muted); font-weight: 650; }}
+    .metric-row {{ display: flex; justify-content: space-between; align-items: center; margin: 10px 0 6px; }}
+    .metric-value {{ font-size: 30px; line-height: 1; font-weight: 760; }}
+    .metric-dot {{ width: 9px; height: 9px; border-radius: 99px; background: var(--muted-soft); }}
+    .metric-hint {{ color: var(--muted-soft); font-size: 12px; }}
+    .success .metric-value, .success .metric-dot {{ color: var(--green); background: var(--green); }}
+    .danger .metric-value, .danger .metric-dot {{ color: var(--red); background: var(--red); }}
+    .info .metric-value, .info .metric-dot {{ color: var(--blue); background: var(--blue); }}
+    .warning .metric-value, .warning .metric-dot {{ color: var(--amber); background: var(--amber); }}
+    .workspace {{
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }}
+    .toolbar {{
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+      padding: 14px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
+    }}
+    .tab-nav {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+    .tab-btn {{
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 34px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      border-radius: 7px;
+      padding: 0 10px;
+      cursor: pointer;
+      color: #344054;
+      font-weight: 650;
+    }}
+    .tab-btn strong {{
+      min-width: 24px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      color: var(--muted);
+      background: #f2f4f7;
+      font-size: 12px;
+      text-align: center;
+    }}
+    .tab-btn.active {{ border-color: #9db7ff; color: var(--blue); background: #f5f8ff; }}
+    .tab-btn.active strong {{ color: var(--blue); background: #e6eeff; }}
+    .search-box {{
+      min-width: 280px;
+      height: 34px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 0 12px;
+      color: var(--text);
+      background: var(--surface);
+      outline: none;
+    }}
+    .search-box:focus {{ border-color: #9db7ff; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.10); }}
+    .tab-content {{ display: none; padding: 16px; }}
+    .tab-content.active {{ display: block; }}
+    .section-head {{ display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 12px; }}
+    h2 {{ margin: 0; font-size: 18px; line-height: 1.3; }}
+    .section-head p {{ margin: 4px 0 0; color: var(--muted); font-size: 13px; }}
+    .section-count {{ color: var(--muted); background: #f8fafc; border: 1px solid var(--border); border-radius: 999px; padding: 5px 10px; }}
+    .table-wrap {{ overflow: auto; border: 1px solid var(--border); border-radius: 8px; max-height: 68vh; }}
+    table {{ width: 100%; min-width: 1520px; border-collapse: separate; border-spacing: 0; font-size: 13px; }}
+    th, td {{ border-bottom: 1px solid var(--border); padding: 10px 12px; text-align: left; vertical-align: top; background: var(--surface); }}
+    th {{
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--surface-soft);
+      color: #475467;
+      font-weight: 700;
+      white-space: nowrap;
+      box-shadow: inset 0 -1px 0 var(--border);
+    }}
+    tr:hover td {{ background: #fbfdff; }}
+    td.index {{ width: 56px; text-align: center; color: var(--muted); }}
+    td.project-name {{ min-width: 260px; font-weight: 650; color: #111827; }}
+    td.note {{ min-width: 220px; color: #475467; }}
+    .muted {{ color: var(--muted-soft); }}
+    .badge {{
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }}
+    .badge-success {{ color: #067647; background: #ecfdf3; }}
+    .badge-danger {{ color: #b42318; background: #fef3f2; }}
+    .badge-info {{ color: #175cd3; background: #eff8ff; }}
+    .badge-warning {{ color: #b54708; background: #fffaeb; }}
+    .badge-neutral {{ color: #475467; background: #f2f4f7; }}
+    .sales table {{ min-width: 620px; }}
+    .empty-state {{ color: var(--muted); border: 1px dashed var(--border-strong); border-radius: 8px; padding: 22px; background: #fcfcfd; }}
+    @media (max-width: 960px) {{
+      .app-shell {{ padding: 18px; }}
+      .topbar, .toolbar {{ flex-direction: column; align-items: stretch; }}
+      .metrics-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      .search-box {{ min-width: 0; width: 100%; }}
+    }}
+  </style>
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">Project Bid Operations</div>
+        <h1>投标进度总览</h1>
+        <div class="meta">生成时间：{html.escape(generated_at)}</div>
+      </div>
+      <div class="source-pill">来源：project_ledgers / project_ledger.json</div>
+    </header>
+    <section class="metrics-grid">{cards_html}</section>
+    <section class="workspace">
+      <div class="toolbar">
+        <nav class="tab-nav">{tabs_html}<button class="tab-btn" data-tab="销售统计"><span>销售统计</span><strong>{len(set(str(p.get("sales_owner") or "未指定") for p in projects))}</strong></button></nav>
+        <input class="search-box" id="tableSearch" type="search" placeholder="搜索项目、客户、销售、编号">
+      </div>
+      {sections_html}
+      <section class="tab-content sales" data-tab="销售统计">
+        <div class="section-head"><div><h2>销售统计</h2><p>按负责销售聚合当前项目状态。</p></div></div>
+        {sales_rows}
+      </section>
+    </section>
+  </main>
+  <script>
+    const tabs = document.querySelectorAll('.tab-btn');
+    const contents = document.querySelectorAll('.tab-content');
+    const search = document.getElementById('tableSearch');
+    function activateTab(name) {{
+      tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+      contents.forEach(c => c.classList.toggle('active', c.dataset.tab === name));
+      if (search) search.value = '';
+      filterRows('');
+    }}
+    tabs.forEach(btn => btn.addEventListener('click', () => activateTab(btn.dataset.tab)));
+    function filterRows(term) {{
+      const active = document.querySelector('.tab-content.active');
+      if (!active) return;
+      active.querySelectorAll('tbody tr').forEach(row => {{
+        row.style.display = row.innerText.toLowerCase().includes(term.toLowerCase()) ? '' : 'none';
+      }});
+    }}
+    if (search) search.addEventListener('input', event => filterRows(event.target.value));
+    activateTab(tabs[0]?.dataset.tab || '已中标');
+  </script>
+</body>
+</html>
+"""
+
+    def _section_hint(self, name: str) -> str:
+        hints = {
+            "已中标": "需要继续跟踪合同、归档和执行节点。",
+            "已弃标": "已关闭机会，保留原因和证据便于复盘。",
+            "参与中": "重点关注报名、保证金、开标和状态回填。",
+        }
+        return hints.get(name, "当前项目列表。")
+
+    def _render_bid_progress_table(self, rows: List[Dict[str, Any]]) -> str:
+        headers = [
+            "序号", "项目名称", "项目编号", "BPM销售合同号/非订单编号", "业务类型", "招标人/客户",
+            "负责销售", "报名截止", "开标时间", "投标保证金", "保证金已支付", "项目类型",
+            "报名状态", "中标状态", "签约状态", "风险等级", "下一步动作", "人工复核", "备注", "立项金额", "状态",
+        ]
+        if not rows:
+            return '<div class="empty-state">暂无项目</div>'
+        body = []
+        empty_cell = '<span class="muted">-</span>'
+        for idx, row in enumerate(rows, start=1):
+            values = [
+                ("index", idx, ""),
+                ("project-name", row.get("project_name", ""), ""),
+                ("", row.get("project_code", ""), ""),
+                ("", row.get("bpm_contract_code", ""), ""),
+                ("", row.get("business_type", ""), "neutral"),
+                ("", row.get("customer_name", ""), ""),
+                ("", row.get("sales_owner", ""), ""),
+                ("", row.get("registration_deadline", ""), ""),
+                ("", row.get("bid_open_time", ""), ""),
+                ("", row.get("bid_bond_amount", ""), ""),
+                ("", row.get("bid_bond_paid", ""), "paid"),
+                ("", row.get("project_type", ""), "neutral"),
+                ("", row.get("registration_status", ""), "registration"),
+                ("", row.get("bid_status", ""), "bid"),
+                ("", row.get("contract_status", ""), "contract"),
+                ("", row.get("risk_level", ""), "risk"),
+                ("note", "；".join(row.get("next_actions") or []), ""),
+                ("", "是" if row.get("human_review_required") else "否", "review"),
+                ("note", row.get("note", ""), ""),
+                ("", row.get("project_amount", ""), ""),
+                ("", row.get("overview_status", ""), "overview"),
+            ]
+            cells = "".join(
+                f'<td class="{css_class}">{self._format_table_cell(value, badge_type, empty_cell)}</td>'
+                for css_class, value, badge_type in values
+            )
+            body.append(f"<tr>{cells}</tr>")
+        head = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
+        return f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
+
+    def _format_table_cell(self, value: Any, badge_type: str, empty_cell: str) -> str:
+        if value in (None, ""):
+            return empty_cell
+        text = str(value)
+        if badge_type:
+            return f'<span class="badge {self._badge_class(text, badge_type)}">{html.escape(text)}</span>'
+        return html.escape(text)
+
+    def _badge_class(self, value: str, badge_type: str) -> str:
+        if badge_type == "overview":
+            if "中标" in value:
+                return "badge-success"
+            if "弃标" in value:
+                return "badge-danger"
+            return "badge-info"
+        if badge_type == "paid":
+            return "badge-success" if value in {"是", "已支付"} else "badge-warning"
+        if badge_type == "risk":
+            if value == "high":
+                return "badge-danger"
+            if value == "medium":
+                return "badge-warning"
+            if value == "low":
+                return "badge-success"
+            return "badge-neutral"
+        if badge_type == "review":
+            return "badge-warning" if value == "是" else "badge-success"
+        if badge_type == "bid":
+            if "中标" in value:
+                return "badge-success"
+            if "弃标" in value:
+                return "badge-danger"
+            if "待" in value:
+                return "badge-warning"
+            return "badge-info"
+        if badge_type == "contract":
+            if "已签" in value:
+                return "badge-success"
+            if "未签" in value or "待" in value:
+                return "badge-warning"
+            return "badge-neutral"
+        if badge_type == "registration":
+            if "已报名" in value:
+                return "badge-info"
+            if "待" in value:
+                return "badge-warning"
+            return "badge-neutral"
+        return "badge-neutral"
+
+    def _render_sales_stats(self, projects: List[Dict[str, Any]]) -> str:
+        stats: Dict[str, Dict[str, int]] = {}
+        for row in projects:
+            owner = str(row.get("sales_owner") or "未指定")
+            status = row.get("overview_status", "参与中")
+            stats.setdefault(owner, {"total": 0, "已中标": 0, "已弃标": 0, "参与中": 0})
+            stats[owner]["total"] += 1
+            stats[owner][status] += 1
+        rows = []
+        for owner, item in sorted(stats.items(), key=lambda pair: (-pair[1]["total"], pair[0])):
+            rows.append(
+                "<tr>"
+                f"<td>{html.escape(owner)}</td><td>{item['total']}</td><td>{item['已中标']}</td>"
+                f"<td>{item['已弃标']}</td><td>{item['参与中']}</td>"
+                "</tr>"
+            )
+        return '<div class="table-wrap"><table><thead><tr><th>负责销售</th><th>项目数</th><th>已中标</th><th>已弃标</th><th>参与中</th></tr></thead><tbody>' + "".join(rows) + "</tbody></table></div>"
+
+    def _cell_text(self, value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+    def _normalize_cell_value(self, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped in {"待录入", "待确认", "待补充", "（待补充）", "(待补充)", "nan", "NaN"}:
+                return None
+            return stripped if stripped else None
+        return value
 
     def _first_field(self, items: List[Dict[str, Any]], field: str) -> str:
         for item in items:

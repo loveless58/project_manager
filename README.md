@@ -64,9 +64,11 @@ project_manager/
 │   ├── tool_registry.py            # 工具注册系统
 │   ├── state_manager.py            # 状态管理
 │   └── llm_adapter.py              # LLM 适配层
-├── tools/                          # 业务工具层（29 个工具）
+├── business_rules/                 # 业务判断规则层
+│   └── bid_project_rules.py        # 投标项目阶段、风险、下一步动作判断
+├── tools/                          # 业务工具层（31 个工具）
 │   ├── project_tools.py            # 项目管理工具（10）
-│   ├── data_cleaning_tools.py      # 数据清洗及文件整理工具（8）
+│   ├── data_cleaning_tools.py      # 数据清洗及文件整理工具（10）
 │   ├── opportunity_tools.py        # 商机管理工具（5）
 │   └── cloudcc_crm_tools.py        # CloudCC/CRM 受控工具（6）
 ├── planner.py                      # 规划器（LLM / RuleBased）
@@ -86,7 +88,7 @@ project_manager/
 └── README.md
 ```
 
-## 核心能力（29 个工具）
+## 核心能力（31 个工具）
 
 ### 项目管理（10 个）
 
@@ -103,15 +105,20 @@ project_manager/
 | `generate_report` | 生成项目报告 | 周报、简报 |
 | `write_response` | 写入响应文件 | 内部使用 |
 
-### 数据清洗（5 个）
+### 数据清洗及文件整理（10 个）
 
 | 工具 | 说明 | 触发场景 |
 |------|------|---------|
 | `scan_raw_files` | 扫描原始文件目录 | 查看有哪些文件 |
 | `extract_pdf` | 提取 PDF 结构化数据 | 解析单个文件 |
+| `extract_document` | 提取 Word/PDF/图片文件的结构化数据 | 真实文件抽取 |
 | `classify_document` | 文档分类 | 分类归档 |
 | `batch_process` | 批量处理 | 批量处理所有文件 |
 | `save_structured` | 保存结构化数据 | 内部使用 |
+| `process_documents_to_ledger` | 多文件抽取并更新项目账本 | Word/PDF 到项目总览 |
+| `import_project_detail_workbook` | 导入项目明细表并更新多个项目账本 | Excel 到项目账本 |
+| `generate_bid_progress_html` | 从项目账本生成投标进度总览 HTML | 展示层派生产物 |
+| `update_project_ledger` | 写入候选事实、证据和冲突决议 | 账本治理入口 |
 
 ### 商机管理（5 个）
 
@@ -140,6 +147,19 @@ project_manager/
 - **数据互通**：直接复用 `项目文件/` 目录结构和 `index.json`
 - **渐进式**：当前通过脚本调用 bid-files 功能，未来可内联化
 - **不替代**：`bid-files` 脚本体系继续保留，Agent 提供自然语言入口
+
+## 业务判断层
+
+`business_rules/BidProjectRuleEngine` 在项目账本每次更新后运行，输出 `business_judgement`，包括：
+
+- `business_stage`：投标项目业务阶段
+- `display_status`：HTML 总览使用的展示状态
+- `risk_level` / `risk_reasons`：风险等级和原因
+- `next_actions`：下一步动作建议
+- `missing_fields` / `data_quality_flags`：数据质量问题
+- `human_review_required` / `crm_required` / `bpm_required`：人工、CRM、BPM 后续动作标记
+
+第一版只做确定性规则判断，不直接调用 LLM、CRM 或 BPM。
 
 ## 依赖
 

@@ -4,7 +4,7 @@ Project Manager Loop 测试套件
 
 验证内容：
 1. 模块导入（common/ 已内联）
-2. 工具注册（29个工具）
+2. 工具注册（31个工具）
 3. LoopEngine 在 RuleBasedPlanner 下的完整运行
 4. 各场景的典型路径验证
 5. 状态管理（sliding_window）
@@ -154,12 +154,14 @@ class TestToolRegistry(unittest.TestCase):
 
         reg = main._build_registry()
         tools = set(reg.list_tools())
-        self.assertEqual(len(tools), 29)
+        self.assertEqual(len(tools), 31)
         self.assertIn("cloudcc_session_probe", tools)
         self.assertIn("cloudcc_duplicate_check", tools)
         self.assertIn("cloudcc_fill_draft_gated", tools)
         self.assertIn("update_project_ledger", tools)
         self.assertIn("process_documents_to_ledger", tools)
+        self.assertIn("import_project_detail_workbook", tools)
+        self.assertIn("generate_bid_progress_html", tools)
 
     def test_data_cleaning_skill_registry_exposes_only_its_tools(self):
         """渐进式披露：激活数据清洗及文件整理 skill 时只暴露本 skill 工具"""
@@ -174,6 +176,8 @@ class TestToolRegistry(unittest.TestCase):
             "batch_process",
             "save_structured",
             "process_documents_to_ledger",
+            "import_project_detail_workbook",
+            "generate_bid_progress_html",
             "update_project_ledger",
         })
 
@@ -313,6 +317,199 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
                 content = f.read()
             self.assertIn("打印刻录系统采购项目", content)
             self.assertIn("customer_name", content)
+
+    def test_business_rules_identify_won_pending_contract_actions(self):
+        from business_rules import BidProjectRuleEngine
+
+        result = BidProjectRuleEngine().evaluate({
+            "project_name": "中标待签约项目",
+            "bid_status": "已中标",
+            "contract_status": "未签约",
+            "customer_name": "测试客户",
+            "sales_owner": "张三",
+        })
+
+        self.assertEqual(result["schema_version"], "bid_project.business_judgement.v1")
+        self.assertEqual(result["business_stage"], "won_pending_contract")
+        self.assertEqual(result["display_status"], "已中标")
+        self.assertEqual(result["risk_level"], "medium")
+        self.assertTrue(result["bpm_required"])
+        self.assertIn("准备合同签约", result["next_actions"])
+        self.assertIn("补充 BPM 合同号", result["next_actions"])
+
+    def test_business_rules_flag_overdue_registration_and_missing_fields(self):
+        from business_rules import BidProjectRuleEngine
+
+        result = BidProjectRuleEngine(today="2026-07-02").evaluate({
+            "project_name": "逾期待报名项目",
+            "registration_status": "待报名",
+            "registration_deadline": "2026-07-01",
+            "bid_status": "待开标",
+            "bid_bond_amount": 50000,
+            "bid_bond_paid": "否",
+        })
+
+        self.assertEqual(result["business_stage"], "pending_registration")
+        self.assertEqual(result["risk_level"], "high")
+        self.assertTrue(result["human_review_required"])
+        self.assertIn("报名截止已过但状态仍为待报名", result["risk_reasons"])
+        self.assertIn("投标保证金存在但未确认支付", result["risk_reasons"])
+        self.assertIn("customer_name", result["missing_fields"])
+        self.assertIn("sales_owner", result["missing_fields"])
+        self.assertIn("确认报名是否完成", result["next_actions"])
+
+    def test_project_ledger_writes_business_judgement_to_state_and_markdown(self):
+        import tempfile
+        from ledger import ProjectLedger
+
+        with tempfile.TemporaryDirectory() as td:
+            ledger = ProjectLedger(base_dir=td)
+            result = ledger.apply_patch({
+                "project_name": "业务判断项目",
+                "source_type": "xlsx_summary",
+                "facts": {
+                    "project_name": "业务判断项目",
+                    "bid_status": "已中标",
+                    "contract_status": "未签约",
+                    "customer_name": "测试客户",
+                    "sales_owner": "张三",
+                },
+                "evidence": [{"field": "bid_status", "source_ref": "项目明细表.xlsx", "confidence": 0.9}],
+            })
+
+            self.assertIn("business_judgement", result)
+            self.assertEqual(result["business_judgement"]["business_stage"], "won_pending_contract")
+            self.assertIn("准备合同签约", result["business_judgement"]["next_actions"])
+
+            with open(result["state_path"], "r", encoding="utf-8") as f:
+                state = json.load(f)
+            self.assertEqual(state["business_judgement"]["display_status"], "已中标")
+
+            with open(result["markdown_path"], "r", encoding="utf-8") as f:
+                md = f.read()
+            self.assertIn("## 6. 业务判断", md)
+            self.assertIn("准备合同签约", md)
+
+    def test_import_project_detail_workbook_updates_multiple_ledgers(self):
+        import tempfile
+        from openpyxl import Workbook
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            xlsx_path = os.path.join(td, "项目明细表.xlsx")
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "项目明细表"
+            ws.append([
+                "序号", "项目名称", "项目编号", "招标人/客户", "负责销售", "报名截止", "开标时间",
+                "投标保证金", "保证金已支付", "项目类型", "报名状态", "中标状态", "签约状态",
+                "备注", "立项金额", "招标编号",
+            ])
+            ws.append([
+                1, "工业互联网网络基础条件项目", "C000027902", "首都航天机械有限公司", "邹迅",
+                "2026-05-12", "2026-05-12", 50000, "是", "产品", "已报名", "已中标", "未签约",
+                "中标通知书已归档", 3438800, "BID-001",
+            ])
+            ws.append([
+                2, "台式电脑采购", "C000028118", "XXZYBDCGFW", "陈丞",
+                "2026-05-13", "2026-05-22", None, "否", "产品", "已报名", "已弃标", "未签约",
+                "已弃标", None, "BID-002",
+            ])
+            exec_ws = wb.create_sheet("项目执行")
+            exec_ws.append([
+                "序号", "项目名称", "项目编号", "客户", "负责销售", "合同金额", "合同编号",
+                "签订日期", "签约状态", "里程碑节点", "预计完成", "实际完成", "备注",
+            ])
+            exec_ws.append([
+                1, "工业互联网网络基础条件项目", "C000027902", "首都航天机械有限公司", "邹迅",
+                3438800, "HT-001", "2026-05-29", "已签合同", "合同签订", "2026-05", "2026-05",
+                "合同已归档",
+            ])
+            wb.save(xlsx_path)
+
+            tools = DataCleaningTools(workspace_dir=td)
+            result = tools.import_project_detail_workbook(xlsx_path)
+
+            self.assertEqual(result["schema_version"], "project_detail_workbook.import.v1")
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["processed_projects"], 2)
+            self.assertEqual(result["execution_rows"], 1)
+            self.assertEqual(result["projects"][0]["facts"]["project_code"], "C000027902")
+            self.assertEqual(result["projects"][0]["facts"]["bid_status"], "已中标")
+            self.assertEqual(result["projects"][0]["facts"]["lifecycle_stage"], "execution")
+            self.assertEqual(result["projects"][0]["facts"]["contract_code"], "HT-001")
+            self.assertEqual(result["projects"][1]["facts"]["lifecycle_stage"], "closed_lost")
+            self.assertTrue(os.path.exists(result["projects"][0]["artifacts"]["project_overview_md"]))
+
+    def test_import_project_detail_workbook_skips_placeholder_values(self):
+        import tempfile
+        from openpyxl import Workbook
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            xlsx_path = os.path.join(td, "项目明细表.xlsx")
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "项目明细表"
+            ws.append(["序号", "项目名称", "项目编号", "招标人/客户", "负责销售", "项目类型", "报名状态", "中标状态", "签约状态"])
+            ws.append([1, "占位字段项目", "待录入", "待确认", "待确认", "服务", "待报名", "待开标", "未签约"])
+            exec_ws = wb.create_sheet("项目执行")
+            exec_ws.append(["序号", "项目名称", "合同编号", "签订日期"])
+            exec_ws.append([1, "占位字段项目", "（待补充）", "（待补充）"])
+            wb.save(xlsx_path)
+
+            tools = DataCleaningTools(workspace_dir=td)
+            result = tools.import_project_detail_workbook(xlsx_path)
+            facts = result["projects"][0]["facts"]
+
+            self.assertNotIn("project_code", facts)
+            self.assertNotIn("customer_name", facts)
+            self.assertNotIn("sales_owner", facts)
+            self.assertNotIn("contract_code", facts)
+            self.assertNotIn("contract_signed_date", facts)
+
+    def test_generate_bid_progress_html_from_project_ledgers(self):
+        import tempfile
+        from openpyxl import Workbook
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            xlsx_path = os.path.join(td, "项目明细表.xlsx")
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "项目明细表"
+            ws.append([
+                "序号", "项目名称", "项目编号", "招标人/客户", "负责销售", "报名截止", "开标时间",
+                "投标保证金", "保证金已支付", "项目类型", "报名状态", "中标状态", "签约状态",
+                "备注", "立项金额", "招标编号",
+            ])
+            ws.append([
+                1, "工业互联网网络基础条件项目", "C000027902", "首都航天机械有限公司", "邹迅",
+                "2026-05-12", "2026-05-12", 50000, "是", "产品", "已报名", "已中标", "已签合同",
+                "中标通知书已归档", 3438800, "BID-001",
+            ])
+            ws.append([
+                2, "服务器区防火墙系统升级采购", "C000028121", "北京外企数字科技有限责任公司", "邹迅",
+                "", "", "", "否", "产品", "待报名", "待开标", "未签约", "", "", "",
+            ])
+            wb.save(xlsx_path)
+
+            tools = DataCleaningTools(workspace_dir=td)
+            tools.import_project_detail_workbook(xlsx_path)
+            result = tools.generate_bid_progress_html()
+
+            self.assertEqual(result["schema_version"], "bid_progress_html.v1")
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["total_projects"], 2)
+            self.assertEqual(result["counts"]["已中标"], 1)
+            self.assertEqual(result["counts"]["参与中"], 1)
+            self.assertTrue(os.path.exists(result["output_file"]))
+            with open(result["output_file"], "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("投标进度总览", content)
+            self.assertIn("BPM销售合同号/非订单编号", content)
+            self.assertIn("工业互联网网络基础条件项目", content)
+            self.assertIn("服务器区防火墙系统升级采购", content)
 
 
 # ────────────────────────────────────────────

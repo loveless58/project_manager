@@ -33,6 +33,8 @@ SKILL_TOOL_MAP = {
         "batch_process",
         "save_structured",
         "process_documents_to_ledger",
+        "import_project_detail_workbook",
+        "generate_bid_progress_html",
         "update_project_ledger",
     ],
     "project_management": [
@@ -162,6 +164,12 @@ def _register_data_cleaning_file_organization_tools(reg: ToolRegistry) -> None:
                      "file_paths": {"type": "array"},
                      "project_name": {"type": "string"},
                  }, ["file_paths"])
+    reg.register("import_project_detail_workbook", "读取项目明细表.xlsx，标准化项目字段并更新多个项目总览账本",
+                 dt.import_project_detail_workbook,
+                 {"file_path": {"type": "string"}}, ["file_path"])
+    reg.register("generate_bid_progress_html", "从项目账本生成投标进度总览 HTML 展示页",
+                 dt.generate_bid_progress_html,
+                 {"output_file": {"type": "string"}}, [])
     reg.register("update_project_ledger", "数据清洗及文件整理：将候选事实写入项目总览.md账本并执行规则决议",
                  dt.update_project_ledger,
                  {
