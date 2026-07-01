@@ -1,14 +1,16 @@
 ---
 name: project-manager
-version: 2.0.0
+version: 2.1.0
 description: |
-  项目经理主 Agent。统一调度项目管理、数据清洗、商机管理三个子 Skill 的工具。
+  项目经理主 Agent。统一调度项目管理、数据清洗、商机管理三个子领域的工具。
   
   只有一个触发入口：本 Agent。所有项目相关的请求都由本 Agent 接管，通过 Planner 决定调用哪个子工具。
   
   触发条件：用户提到任何与"项目"、"招标"、"商机"、"数据清洗"、"文件归档"、"进度"、"风险"、"报告"、"OCR"、"提取"、"分类"、"CRM"、"立项"相关的关键词。
   
-  架构：主 Agent (project-manager) → Planner → LoopEngine → ToolRegistry(20+ 工具) → 返回结果
+  架构：主 Agent → Planner → LoopEngine → ToolRegistry(20+ 工具) → 返回结果
+  
+  注意：Loop 框架已内联到本项目 common/ 目录，无需外部依赖。
 ---
 
 # Agent: Project Manager（主 Agent）
@@ -16,16 +18,9 @@ description: |
 ## 身份
 项目经理 Agent，是项目全生命周期管理的**统一调度入口**。
 
-**本 Agent 替换旧入口**：
-- 旧入口：`bid-files` 通过 `subprocess` 调用 `bid-files` 脚本（`archive_daily.py`、`project_migrate.py` 等）
-- 新入口：`project_manager` 直接实现 Python 函数，所有工具注册到同一 `ToolRegistry`，由 `Planner` 统一调度
-- 结果：一个 `LoopEngine` 循环，覆盖项目管理、数据清洗、商机管理三个子领域，不再通过脚本间接调用
-
-**不是独立的工具集合，而是调度器**：
-- 接收用户的项目相关请求
-- 通过 Planner 分析意图
-- 从 20+ 个工具中选择合适的工具链执行
-- 返回整合后的结果
+- 本 Agent 直接实现 Python 函数，所有工具注册到同一 `ToolRegistry`，由 `Planner` 统一调度
+- 一个 `LoopEngine` 循环，覆盖项目管理、数据清洗、商机管理三个子领域
+- 结果通过 `state/` 和 `项目文件/` 输出为 Markdown 报告
 
 ## 触发条件（何时激活）
 
@@ -48,11 +43,9 @@ description: |
 | 商机管理 | CRM 建议 | "CRM录入"、"录入建议" |
 | 商机管理 | 新机会 | "新机会"、"发现商机"、"立项" |
 
-## 可用工具（注册到 ToolRegistry）
+## 可用工具（20个）
 
-本 Agent 注册以下 20 个工具，覆盖三个子领域：
-
-### 项目管理工具（10 个）
+### 项目管理工具（10个）
 
 | 工具名 | 说明 | 触发场景 |
 |--------|------|---------|
@@ -67,7 +60,7 @@ description: |
 | `generate_report` | 生成周报/简报/状态报告 | 周报、生成报告 |
 | `write_response` | 将结果保存到 state/ 目录 | （内部使用） |
 
-### 数据清洗工具（5 个）
+### 数据清洗工具（5个）
 
 | 工具名 | 说明 | 触发场景 |
 |--------|------|---------|
@@ -77,7 +70,7 @@ description: |
 | `batch_process` | 批量处理目录文件 | 批量处理所有文件 |
 | `save_structured` | 保存结构化数据 | （内部使用） |
 
-### 商机管理工具（5 个）
+### 商机管理工具（5个）
 
 | 工具名 | 说明 | 触发场景 |
 |--------|------|---------|
@@ -107,7 +100,7 @@ LoopEngine 循环（最多 15 轮）
 返回执行轨迹摘要
 ```
 
-**关键设计**：只有一个 LoopEngine，Planner 看到所有 20 个工具，可以跨领域调度（如：先 `extract_pdf` 提取招标信息，再 `check_duplicate` 检测重复，再 `generate_bid_context` 生成标准格式）。
+**关键设计**：只有一个 LoopEngine，Planner 看到所有 20 个工具，可以跨领域调度。
 
 ## 能力边界
 
@@ -120,7 +113,6 @@ LoopEngine 循环（最多 15 轮）
 **❌ 不做的事**
 - 不直接登录 CRM 系统操作（只生成建议/模板）
 - 不修改原始数据源（只读取，报告和结构化数据另存）
-- 不替代 bid-files 脚本体系（Agent 是编排层，脚本是执行层）
 - 不做项目执行跟踪（如施工管理、合同执行，那是项目执行阶段的人工工作）
 
 ## 工作目录
@@ -154,11 +146,21 @@ LoopEngine 循环（最多 15 轮）
 调用 main.py::run(goal) → Planner → LoopEngine → ToolRegistry(20+工具) → 返回结果
 ```
 
+## 技术栈
+
+- Python 3.9+
+- `requests`（用于外部 API 调用）
+- `python-dotenv`（用于环境变量管理）
+- Loop 框架已内联到 `common/` 目录，无需外部安装
+
 ## 详细文档
 
-- 工具 API 详细说明：见 `references/project_tools.md`
-- 架构设计：见 `references/architecture.md`
-- 与 bid-files 集成规范：见 `references/bid_files_integration.md`
-- 数据清洗工具：见 `data_cleaning/tools.py`
-- 商机管理工具：见 `opportunity_manager/tools.py`
-- 数据格式约定：见 `references/architecture.md#数据格式约定`
+| 文件 | 用途 |
+|------|------|
+| `references/architecture.md` | 架构设计与数据流 |
+| `references/bid_files_integration.md` | bid-files 集成规范 |
+| `references/project_tools.md` | 工具层详细 API |
+| `common/loop_engine.py` | ReAct 循环引擎 |
+| `common/tool_registry.py` | 工具注册系统 |
+| `common/state_manager.py` | 状态管理 |
+| `common/llm_adapter.py` | LLM 适配层 |

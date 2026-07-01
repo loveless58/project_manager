@@ -1,14 +1,19 @@
 ---
 name: loop-project-lifecycle
+version: 2.1.0
 description: |
-  项目全生命周期管理 Loop Agent 的工具注册表与工作流索引。
+  项目全生命周期管理 Loop Agent 的工具索引与场景速查。
   
-  本文件是 agent.md 的配套文件，不单独触发。被激活后由 Kimi Work 加载，为 LoopEngine 提供工具契约和场景执行路径参考。
+  本文件是 agent.md 的配套速查，不单独触发。被激活后由 Kimi Work 加载，为 LoopEngine 提供工具契约和场景执行路径参考。
+  
+  注意：Loop 框架已内联到 common/ 目录，无需外部依赖。
 ---
 
-# Loop Project Lifecycle — 工具与工作流
+# Loop Project Lifecycle — 工具与场景速查
 
-## 工具注册表
+## 工具注册表（20个）
+
+### 项目管理（10个）
 
 | 工具名 | 说明 | 必需参数 | 触发场景 |
 |--------|------|----------|---------|
@@ -22,6 +27,26 @@ description: |
 | `generate_project_overview` | 生成全局项目总览 | — | 项目总览、全局状态 |
 | `generate_report` | 生成周报/简报/状态报告 | `project_name` | 周报、生成报告 |
 | `write_response` | 将结果保存到 state/ 目录 | `content`, `filename` | （内部使用） |
+
+### 数据清洗（5个）
+
+| 工具名 | 说明 | 必需参数 | 触发场景 |
+|--------|------|----------|---------|
+| `scan_raw_files` | 扫描原始文件目录 | — | 查看有哪些文件 |
+| `extract_pdf` | 提取PDF结构化数据 | `file_path` | 解析单个文件 |
+| `classify_document` | 根据文件名/内容分类文档 | `file_path` | 分类归档 |
+| `batch_process` | 批量处理目录文件 | — | 批量处理所有文件 |
+| `save_structured` | 保存结构化数据 | `data`, `output_path` | （内部使用） |
+
+### 商机管理（5个）
+
+| 工具名 | 说明 | 必需参数 | 触发场景 |
+|--------|------|----------|---------|
+| `scan_bid_notices` | 扫描招标公告目录 | — | 查看有哪些招标公告 |
+| `parse_bid_notice` | 解析招标公告提取关键字段 | `file_path` | 解析单个公告 |
+| `check_duplicate` | 检测商机是否重复 | `project_code` | 检测是否已有商机 |
+| `generate_bid_context` | 生成 bid_context.json | `parsed_data` | 标准化输出 |
+| `create_crm_suggestion` | 生成 CRM 录入建议 | `bid_context` | 准备录入 CRM |
 
 ## 典型场景执行路径
 
@@ -50,6 +75,22 @@ generate_bid_overview → write_response → Final Answer
 generate_project_overview → write_response → Final Answer
 ```
 
+### 场景 6：数据清洗
+```
+scan_raw_files → extract_pdf → classify_document → save_structured → Final Answer
+```
+
+### 场景 7：商机检测
+```
+scan_bid_notices → parse_bid_notice → check_duplicate → generate_bid_context → Final Answer
+```
+
+## 状态管理策略
+
+- **模式**: `sliding_window`
+- **保留**: 系统提示 + 初始请求 + 最近 3 轮交互
+- **自动丢弃**: 中间历史，防止长循环 token 超支
+
 ## 工作目录约定
 
 ```
@@ -66,13 +107,18 @@ generate_project_overview → write_response → Final Answer
 │       └── ...
 ├── 项目执行/
 └── 项目归档/
+
+数据清洗工作台/
+├── 00-原始文件（待处理）
+├── 01-OCR输出（待清洗）
+└── 02-已清洗（结构化数据）
+
+新机会与线索/
+├── 招标公告/
+├── bid_contexts/
+├── 商机列表.md
+└── 重复检测记录.md
 ```
-
-## 状态管理策略
-
-- **模式**: `sliding_window`
-- **保留**: 系统提示 + 初始请求 + 最近 3 轮交互
-- **自动丢弃**: 中间历史，防止长循环 token 超支
 
 ## 详细文档索引
 
@@ -82,3 +128,7 @@ generate_project_overview → write_response → Final Answer
 | `references/architecture.md` | 架构设计与数据流 | 调试/扩展时 |
 | `references/bid_files_integration.md` | bid-files 集成规范 | 理解数据格式时 |
 | `references/project_tools.md` | 工具层详细 API | 扩展工具时 |
+| `common/loop_engine.py` | ReAct 循环引擎 | 调试循环时 |
+| `common/tool_registry.py` | 工具注册系统 | 调试工具时 |
+| `common/state_manager.py` | 状态管理 | 调试状态裁剪时 |
+| `common/llm_adapter.py` | LLM 适配层 | 调试 LLM 调用时 |

@@ -143,6 +143,10 @@ class LoopEngine:
                            tools: Dict[str, Callable]) -> tuple[str, bool]:
         """
         带重试的工具执行 + 错误恢复
+        
+        retry_max 表示失败后额外重试的最大次数。
+        总尝试次数 = 1（初始）+ retry_max（重试）
+        
         返回: (observation, success)
         """
         tool_func = tools.get(action_name)
@@ -150,19 +154,19 @@ class LoopEngine:
             return f"[ERROR] Tool '{action_name}' not found.", False
         
         last_error = None
-        for attempt in range(1, self.retry_max + 1):
+        max_attempts = self.retry_max + 1  # 初始 1 次 + retry_max 次重试
+        for attempt in range(max_attempts):
             try:
                 result = tool_func(**action_input)
                 return str(result), True
             except Exception as e:
                 last_error = e
-                error_msg = f"[Attempt {attempt}/{self.retry_max}] Error: {str(e)}"
                 if attempt < self.retry_max:
                     time.sleep(0.5)  # 短暂重试间隔
         
         # 所有重试失败，返回结构化错误信息
         structured_error = (
-            f"[TOOL FAILED after {self.retry_max} retries]\n"
+            f"[TOOL FAILED after {self.retry_max} retries ({max_attempts} attempts total)]\n"
             f"Tool: {action_name}\n"
             f"Input: {action_input}\n"
             f"Error: {str(last_error)}\n"
