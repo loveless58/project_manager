@@ -38,6 +38,9 @@ state/投标进度总览.html
 | `batch_process` | 批量处理目录文件 |
 | `save_structured` | 保存结构化数据 |
 | `process_documents_to_ledger` | 读取多个源文件，输出结构化 JSON，并更新项目总览账本 |
+| `prepare_file_organization_run` | 准备文件整理闭环运行包，输出结构化数据、复核队列、归档计划和运行报告 |
+| `apply_human_review` | 应用人工复核修正，写回项目账本并生成规则候选 |
+| `execute_archive_plan` | 在显式确认后执行重命名归档，并更新项目总览账本 |
 | `import_project_detail_workbook` | 读取项目明细表.xlsx，标准化多项目字段，并更新多个项目总览账本 |
 | `generate_bid_progress_html` | 从项目账本汇总生成投标进度总览 HTML 展示页 |
 | `update_project_ledger` | 将候选事实、证据和来源类型写入项目账本 |
@@ -47,7 +50,7 @@ state/投标进度总览.html
 ```text
 扫描文件 / 接收文件路径 / 接收项目明细表
   ↓
-extract_document / process_documents_to_ledger / import_project_detail_workbook 提取候选字段
+prepare_file_organization_run / process_documents_to_ledger / import_project_detail_workbook 提取候选字段
   ↓
 记录证据引用
   ↓
@@ -59,8 +62,16 @@ BidProjectRuleEngine 业务判断
   ↓
 项目总览.md / project_ledger.json / decision_log.jsonl
   ↓
+review_queue.json / planned_archive_actions.json / run_report.md
+  ↓
+apply_human_review 写入人工修正和规则候选
+  ↓
+execute_archive_plan(confirmed=True) 重命名并移动源文件
+  ↓
 generate_bid_progress_html 派生展示页
 ```
+
+`prepare_file_organization_run` 是面向 agent-loop 的首选入口。它会先输出运行包，不移动源文件；中间即使有文件不可读，也会把已成功处理的结构化数据、项目总览、失败项和复核队列落盘。只有显式调用 `execute_archive_plan` 且 `confirmed=True` 时，才会实际重命名和移动原文件。
 
 ## 业务判断输出
 
@@ -87,6 +98,7 @@ generate_bid_progress_html 派生展示页
 - 本 skill 不直接覆盖高风险事实。
 - 本 skill 不静默移动、重命名、覆盖、删除原始文件。
 - 文件归档、汇总表更新和外部系统写入必须在后续工具中显式执行。
+- `execute_archive_plan` 默认返回 `needs_confirmation`，不会静默移动原文件。
 - HTML、汇总表、看板是派生产物，不作为覆盖项目事实的权威来源。
 - 低置信度、冲突字段和高风险字段必须进入冲突队列或人工确认。
 

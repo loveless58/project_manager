@@ -125,7 +125,7 @@ class RuleBasedPlanner(BasePlanner):
         goal = self.goal
         
         # ─── 意图 B：数据清洗 ───
-        if any(k in goal for k in ["数据清洗及文件整理", "项目总览", "项目账本", "ledger"]):
+        if any(k in goal for k in ["数据清洗及文件整理", "项目总览", "项目账本", "ledger", "整理文件", "文件整理", "归档文件", "人工复核"]):
             return self._plan_project_ledger(executed, last_obs)
 
         if any(k in goal for k in ["提取", "OCR", "解析文档", "PDF", "扫描文件", "查看有哪些文件"]):
@@ -263,6 +263,22 @@ class RuleBasedPlanner(BasePlanner):
         paths = self._extract_file_paths()
         workbook_paths = [path for path in paths if path.lower().endswith((".xlsx", ".xls"))]
         wants_html = any(k in self.goal.lower() for k in ["html", "展示", "总览", "投标进度"])
+        wants_file_organization = any(k in self.goal for k in ["整理文件", "文件整理", "归档", "重命名", "人工复核", "复核"])
+        if paths and wants_file_organization and "prepare_file_organization_run" not in executed:
+            payload = {
+                "file_paths": paths,
+                "project_name": "",
+            }
+            return (
+                "Thought: 用户要求整理和归档真实文件，先准备文件整理运行包：清洗结构化、业务判断、人工复核队列和归档计划；此步不移动源文件。\n"
+                "Action: prepare_file_organization_run\n"
+                f"Action Input: {json.dumps(payload, ensure_ascii=False)}"
+            )
+        if "prepare_file_organization_run" in executed and "execute_archive_plan" not in executed:
+            return (
+                "Final Answer: 文件整理运行包已生成，包含结构化提取结果、项目总览账本、人工复核队列、归档计划和运行报告。"
+                " 为避免误移动原文件，归档执行需要人工确认后调用 execute_archive_plan(run_id, confirmed=true)。"
+            )
         if workbook_paths and "import_project_detail_workbook" not in executed:
             payload = {"file_path": workbook_paths[0]}
             return (

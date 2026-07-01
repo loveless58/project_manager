@@ -10,5 +10,11 @@ dist/
 build/
 logs/project_manager_*.json
 state/project_ledgers/
+state/runs/
+state/full_loop_simulation_workspace/
+state/real_file_simulation_workspace/
+state/simulation_inputs/
+state/subagent_check_*/
+state/subagent_check_*.md
 state/structured_documents/
 state/structured_workbooks/

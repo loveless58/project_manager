@@ -33,6 +33,9 @@ SKILL_TOOL_MAP = {
         "batch_process",
         "save_structured",
         "process_documents_to_ledger",
+        "prepare_file_organization_run",
+        "apply_human_review",
+        "execute_archive_plan",
         "import_project_detail_workbook",
         "generate_bid_progress_html",
         "update_project_ledger",
@@ -163,7 +166,25 @@ def _register_data_cleaning_file_organization_tools(reg: ToolRegistry) -> None:
                  {
                      "file_paths": {"type": "array"},
                      "project_name": {"type": "string"},
+                  }, ["file_paths"])
+    reg.register("prepare_file_organization_run", "准备文件整理闭环运行包：结构化提取、业务判断、复核队列和归档计划",
+                 dt.prepare_file_organization_run,
+                 {
+                     "file_paths": {"type": "array"},
+                     "project_name": {"type": "string"},
                  }, ["file_paths"])
+    reg.register("apply_human_review", "应用人工复核修正，将复核结果写入项目总览账本并生成规则候选",
+                 dt.apply_human_review,
+                 {
+                     "review_decisions": {"type": "array"},
+                     "run_id": {"type": "string"},
+                 }, ["review_decisions"])
+    reg.register("execute_archive_plan", "确认后执行归档计划：重命名移动原文件并更新项目总览账本",
+                 dt.execute_archive_plan,
+                 {
+                     "run_id": {"type": "string"},
+                     "confirmed": {"type": "boolean"},
+                 }, ["run_id"])
     reg.register("import_project_detail_workbook", "读取项目明细表.xlsx，标准化项目字段并更新多个项目总览账本",
                  dt.import_project_detail_workbook,
                  {"file_path": {"type": "string"}}, ["file_path"])
@@ -239,7 +260,7 @@ def _build_registry() -> ToolRegistry:
 
 def _route_skill(goal: str) -> str:
     """Level 0 progressive disclosure: choose the active skill from the user goal."""
-    if any(k in goal for k in ["数据清洗及文件整理", "项目总览", "项目账本", "ledger", "扫描文件", "解析文档", "PDF", "OCR"]):
+    if any(k in goal for k in ["数据清洗及文件整理", "项目总览", "项目账本", "ledger", "扫描文件", "解析文档", "整理文件", "文件整理", "归档文件", "人工复核", "PDF", "OCR"]):
         return "data_cleaning_file_organization"
     if any(k in goal for k in ["CloudCC", "cloudcc", "CRM", "crm"]):
         return "cloudcc_crm"

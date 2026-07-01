@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Project Manager Agent - Tool Schema",
-  "description": "31 个工具的 schema 契约。校验注册到 ToolRegistry 的工具参数与文档一致。",
+  "description": "34 个工具的 schema 契约。校验注册到 ToolRegistry 的工具参数与文档一致。",
   "version": "1.0.0",
   "tools": {
     "scan_projects": {
@@ -143,6 +143,33 @@
       },
       "required": ["file_paths"]
     },
+    "prepare_file_organization_run": {
+      "domain": "data_cleaning",
+      "description": "准备文件整理闭环运行包：结构化提取、业务判断、复核队列和归档计划",
+      "params": {
+        "file_paths": {"type": "array"},
+        "project_name": {"type": "string"}
+      },
+      "required": ["file_paths"]
+    },
+    "apply_human_review": {
+      "domain": "data_cleaning",
+      "description": "应用人工复核修正，将复核结果写入项目总览账本并生成规则候选",
+      "params": {
+        "review_decisions": {"type": "array"},
+        "run_id": {"type": "string"}
+      },
+      "required": ["review_decisions"]
+    },
+    "execute_archive_plan": {
+      "domain": "data_cleaning",
+      "description": "确认后执行归档计划：重命名移动原文件并更新项目总览账本",
+      "params": {
+        "run_id": {"type": "string"},
+        "confirmed": {"type": "boolean"}
+      },
+      "required": ["run_id"]
+    },
     "import_project_detail_workbook": {
       "domain": "data_cleaning",
       "description": "读取项目明细表.xlsx，标准化项目字段并更新多个项目总览账本",
@@ -264,7 +291,7 @@
       "id": "TOOL-001",
       "level": "error",
       "check": "schema 声明的工具必须可注册到 debug_all_tools ToolRegistry；运行时只暴露 active skill 的工具子集",
-      "expected_count": 31
+      "expected_count": 34
     },
     {
       "id": "TOOL-002",

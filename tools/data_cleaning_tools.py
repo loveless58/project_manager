@@ -373,6 +373,461 @@ class DataCleaningTools:
             },
         }
 
+    def prepare_file_organization_run(self, file_paths: List[str], project_name: str = "") -> Dict[str, Any]:
+        """Prepare a full file-organization run package without moving source files."""
+        if isinstance(file_paths, str):
+            file_paths = [file_paths]
+
+        run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")
+        run_dir = os.path.join(self.workspace_dir, "runs", run_id)
+        extracted_dir = os.path.join(run_dir, "extracted")
+        patches_dir = os.path.join(run_dir, "project_patches")
+        os.makedirs(extracted_dir, exist_ok=True)
+        os.makedirs(patches_dir, exist_ok=True)
+
+        input_manifest = {
+            "schema_version": "file_organization.input_manifest.v1",
+            "run_id": run_id,
+            "created_at": datetime.now().isoformat(),
+            "files": [
+                {
+                    "path": path,
+                    "name": os.path.basename(path),
+                    "exists": os.path.exists(path),
+                    "size": os.path.getsize(path) if os.path.exists(path) else None,
+                }
+                for path in file_paths
+            ],
+        }
+
+        extracted_items: List[Dict[str, Any]] = []
+        failures: List[Dict[str, Any]] = []
+        structured_outputs: List[str] = []
+        ledger_results: List[Dict[str, Any]] = []
+        archive_actions: List[Dict[str, Any]] = []
+        trace: List[Dict[str, Any]] = []
+
+        ledger = ProjectLedger(base_dir=os.path.join(self.workspace_dir, "project_ledgers"))
+
+        for path in file_paths:
+            extracted = self.extract_document(path)
+            if "error" in extracted:
+                failure = {"file": path, "stage": "extract_document", "error": extracted["error"]}
+                failures.append(failure)
+                trace.append({"stage": "extract_document", "file": path, "status": "failed", "error": extracted["error"]})
+                continue
+
+            extracted_items.append(extracted)
+            fields = extracted.get("fields") or {}
+            inferred_project_name = project_name or fields.get("project_name") or "未命名项目"
+            facts = {key: value for key, value in fields.items() if key not in {"document_type", "source_filename"}}
+            facts.setdefault("project_name", inferred_project_name)
+            source_type = self._source_type_for_document(extracted.get("document_type", ""), extracted.get("filename", ""))
+            evidence = [
+                {
+                    "field": field,
+                    "source_type": source_type,
+                    "source_ref": path,
+                    "extract_method": "docx_text_table" if extracted.get("file_type") == ".docx" else "document_text",
+                    "confidence": 0.86 if field in {"project_name", "document_type"} else 0.78,
+                    "summary": f"{extracted.get('filename', '')} extracted as {extracted.get('document_type', '')}",
+                }
+                for field in facts.keys()
+            ]
+
+            ledger_result = ledger.apply_patch({
+                "project_name": inferred_project_name,
+                "source_type": source_type,
+                "facts": facts,
+                "evidence": evidence,
+                "skill": "data_cleaning_file_organization",
+                "actor": "data_cleaning_file_organization",
+            })
+            ledger_results.append(ledger_result)
+
+            extracted_path = os.path.join(extracted_dir, f"{self._safe_name(os.path.basename(path))}_extracted.json")
+            self._save_structured_json(extracted_path, {
+                "schema_version": "file_organization.extracted_document.v1",
+                "run_id": run_id,
+                "project_name": inferred_project_name,
+                "source_file": path,
+                "source_type": source_type,
+                "extraction": extracted,
+                "business_judgement": ledger_result.get("business_judgement", {}),
+                "ledger_artifacts": {
+                    "project_overview_md": ledger_result["markdown_path"],
+                    "project_ledger_json": ledger_result["state_path"],
+                },
+                "processed_at": datetime.now().isoformat(),
+            })
+            structured_outputs.append(extracted_path)
+
+            patch_path = os.path.join(patches_dir, f"{self._safe_name(inferred_project_name)}_{self._safe_name(os.path.basename(path))}.json")
+            self._save_structured_json(patch_path, {
+                "schema_version": "project_patch.v1",
+                "project_name": inferred_project_name,
+                "source_type": source_type,
+                "facts": facts,
+                "evidence": evidence,
+            })
+
+            action = self._build_archive_action(run_id, path, inferred_project_name, extracted, ledger_result)
+            archive_actions.append(action)
+            trace.append({"stage": "process_file", "file": path, "status": "success", "project_name": inferred_project_name})
+
+        review_queue = self._build_review_queue(run_id, failures, archive_actions, ledger_results)
+
+        artifacts = {
+            "input_manifest": os.path.join(run_dir, "input_manifest.json"),
+            "review_queue": os.path.join(run_dir, "review_queue.json"),
+            "planned_archive_actions": os.path.join(run_dir, "planned_archive_actions.json"),
+            "run_report": os.path.join(run_dir, "run_report.md"),
+            "trace": os.path.join(run_dir, "trace.json"),
+            "run_dir": run_dir,
+        }
+        self._save_structured_json(artifacts["input_manifest"], input_manifest)
+        self._save_structured_json(artifacts["review_queue"], review_queue)
+        self._save_structured_json(artifacts["planned_archive_actions"], {
+            "schema_version": "archive_plan.v1",
+            "run_id": run_id,
+            "actions": archive_actions,
+        })
+        self._save_structured_json(artifacts["trace"], {
+            "schema_version": "file_organization.trace.v1",
+            "run_id": run_id,
+            "events": trace,
+        })
+        self._write_run_report(artifacts["run_report"], run_id, len(file_paths), len(extracted_items), failures, review_queue, archive_actions)
+
+        return {
+            "schema_version": "file_organization.run.v1",
+            "run_id": run_id,
+            "status": "success" if extracted_items and not failures else ("partial" if extracted_items else "failed"),
+            "processed": len(extracted_items),
+            "failed": len(failures),
+            "structured_outputs": structured_outputs,
+            "failures": failures,
+            "review_queue": review_queue,
+            "archive_actions": archive_actions,
+            "artifacts": artifacts,
+        }
+
+    def apply_human_review(self, review_decisions: List[Dict[str, Any]], run_id: str = "") -> Dict[str, Any]:
+        """Apply human review decisions as highest-weight ledger corrections."""
+        if isinstance(review_decisions, dict):
+            review_decisions = [review_decisions]
+
+        ledger = ProjectLedger(base_dir=os.path.join(self.workspace_dir, "project_ledgers"))
+        results = []
+        rule_candidates = []
+        for decision in review_decisions:
+            project_name = decision.get("project_name") or (decision.get("facts") or {}).get("project_name")
+            facts = decision.get("facts") or {}
+            if not project_name:
+                results.append({"status": "failed", "error": "missing project_name", "decision": decision})
+                continue
+            facts.setdefault("project_name", project_name)
+            evidence = [
+                {
+                    "field": field,
+                    "source_type": "human_correction",
+                    "source_ref": f"human_review:{run_id or 'ad_hoc'}",
+                    "extract_method": "manual_review",
+                    "confidence": 1.0,
+                    "summary": decision.get("reason", "人工复核修正"),
+                }
+                for field in facts.keys()
+            ]
+            ledger_result = ledger.apply_patch({
+                "project_name": project_name,
+                "source_type": "human_correction",
+                "facts": facts,
+                "evidence": evidence,
+                "skill": "data_cleaning_file_organization",
+                "actor": "human_review",
+            })
+            results.append({
+                "status": "success",
+                "project_name": project_name,
+                "facts": facts,
+                "business_judgement": ledger_result.get("business_judgement", {}),
+                "artifacts": {
+                    "project_overview_md": ledger_result["markdown_path"],
+                    "project_ledger_json": ledger_result["state_path"],
+                },
+            })
+            if any(field in facts for field in ["bid_status", "contract_status", "registration_status"]):
+                rule_candidates.append({
+                    "schema_version": "rule_candidate.v1",
+                    "project_name": project_name,
+                    "reviewed_fields": sorted(facts.keys()),
+                    "reason": decision.get("reason", ""),
+                    "status": "pending_rule_approval",
+                    "requires_test": True,
+                })
+
+        artifacts = {}
+        if run_id:
+            run_dir = os.path.join(self.workspace_dir, "runs", run_id)
+            os.makedirs(run_dir, exist_ok=True)
+            artifacts["review_decisions"] = os.path.join(run_dir, "review_decisions.json")
+            artifacts["rule_candidates"] = os.path.join(run_dir, "rule_candidates.json")
+            self._save_structured_json(artifacts["review_decisions"], {
+                "schema_version": "human_review.decisions.v1",
+                "run_id": run_id,
+                "decisions": review_decisions,
+                "results": results,
+            })
+            self._save_structured_json(artifacts["rule_candidates"], {
+                "schema_version": "rule_candidates.v1",
+                "run_id": run_id,
+                "items": rule_candidates,
+            })
+
+        return {
+            "schema_version": "human_review.apply.v1",
+            "status": "success" if results and all(r["status"] == "success" for r in results) else "partial",
+            "reviewed": len([r for r in results if r["status"] == "success"]),
+            "failed": len([r for r in results if r["status"] != "success"]),
+            "results": results,
+            "rule_candidates": rule_candidates,
+            "artifacts": artifacts,
+        }
+
+    def execute_archive_plan(self, run_id: str, confirmed: bool = False) -> Dict[str, Any]:
+        """Execute a prepared archive plan only after explicit confirmation."""
+        run_dir = os.path.join(self.workspace_dir, "runs", run_id)
+        plan_path = os.path.join(run_dir, "planned_archive_actions.json")
+        if not os.path.exists(plan_path):
+            return {"error": f"Archive plan not found for run_id: {run_id}"}
+        with open(plan_path, "r", encoding="utf-8") as f:
+            plan = json.load(f)
+        actions = plan.get("actions", [])
+        if not confirmed:
+            return {
+                "schema_version": "archive_plan.execute.v1",
+                "status": "needs_confirmation",
+                "run_id": run_id,
+                "planned": len(actions),
+                "message": "Archive plan prepared but not executed. Call with confirmed=True to move files.",
+            }
+
+        results = []
+        ledger = ProjectLedger(base_dir=os.path.join(self.workspace_dir, "project_ledgers"))
+        review_decisions_path = os.path.join(run_dir, "review_decisions.json")
+        has_human_review = os.path.exists(review_decisions_path)
+        for action in actions:
+            source = action.get("source_file", "")
+            target = action.get("target_path", "")
+            hard_blockers = [b for b in action.get("blockers", []) if b in {"source_missing", "target_exists", "unknown_project"}]
+            if hard_blockers:
+                results.append({"status": "blocked", "source_file": source, "blockers": hard_blockers})
+                continue
+            if "human_review_recommended" in action.get("blockers", []) and not has_human_review:
+                results.append({
+                    "status": "blocked",
+                    "source_file": source,
+                    "blockers": ["human_review_required"],
+                    "message": "Archive action requires apply_human_review before confirmed execution.",
+                })
+                continue
+            if not os.path.exists(source):
+                results.append({"status": "failed", "source_file": source, "error": "source_missing"})
+                continue
+            if os.path.exists(target):
+                results.append({"status": "blocked", "source_file": source, "blockers": ["target_exists"]})
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.move(source, target)
+            archive_record = {
+                "original_path": source,
+                "archived_path": target,
+                "document_type": action.get("document_type", ""),
+                "archived_at": datetime.now().isoformat(),
+                "run_id": run_id,
+            }
+            ledger_result = ledger.apply_patch({
+                "project_name": action.get("project_name") or "未命名项目",
+                "source_type": "system_export",
+                "facts": {"last_archived_file": target, "archive_status": "archived"},
+                "evidence": [{
+                    "field": "archive_status",
+                    "source_type": "system_export",
+                    "source_ref": target,
+                    "extract_method": "archive_plan_execute",
+                    "confidence": 1.0,
+                    "summary": "确认后执行文件归档",
+                }],
+                "skill": "data_cleaning_file_organization",
+                "actor": "archive_executor",
+            })
+            results.append({
+                "status": "success",
+                "source_file": source,
+                "archived_path": target,
+                "archive_record": archive_record,
+                "project_overview_md": ledger_result["markdown_path"],
+            })
+
+        artifacts = {
+            "archive_result": os.path.join(run_dir, "archive_result.json"),
+            "run_report": os.path.join(run_dir, "run_report.md"),
+        }
+        self._save_structured_json(artifacts["archive_result"], {
+            "schema_version": "archive_result.v1",
+            "run_id": run_id,
+            "results": results,
+        })
+        self._append_archive_report(artifacts["run_report"], results)
+        moved = len([item for item in results if item["status"] == "success"])
+        failed = len([item for item in results if item["status"] != "success"])
+        return {
+            "schema_version": "archive_plan.execute.v1",
+            "status": "success" if moved and not failed else ("partial" if moved else "failed"),
+            "run_id": run_id,
+            "moved": moved,
+            "failed": failed,
+            "results": results,
+            "artifacts": artifacts,
+        }
+
+    def _build_archive_action(
+        self,
+        run_id: str,
+        source_file: str,
+        project_name: str,
+        extracted: Dict[str, Any],
+        ledger_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        document_type = extracted.get("document_type") or (extracted.get("fields") or {}).get("document_type") or "未分类"
+        ext = os.path.splitext(source_file)[1]
+        proposed_name = f"{self._safe_name(project_name)}_{self._safe_name(document_type)}_{datetime.now().strftime('%Y%m%d')}{ext}"
+        target_dir = os.path.join(self.workspace_dir, "project_ledgers", self._safe_name(project_name), "source_files")
+        target_path = os.path.join(target_dir, proposed_name)
+        judgement = ledger_result.get("business_judgement", {})
+        blockers = []
+        if not os.path.exists(source_file):
+            blockers.append("source_missing")
+        if project_name in {"", "未命名项目"}:
+            blockers.append("unknown_project")
+        if os.path.exists(target_path):
+            blockers.append("target_exists")
+        if judgement.get("human_review_required"):
+            blockers.append("human_review_recommended")
+        return {
+            "schema_version": "archive_action.v1",
+            "run_id": run_id,
+            "status": "ready" if not blockers else "needs_review",
+            "source_file": source_file,
+            "project_name": project_name,
+            "document_type": document_type,
+            "proposed_name": proposed_name,
+            "target_dir": target_dir,
+            "target_path": target_path,
+            "blockers": blockers,
+            "business_judgement": judgement,
+        }
+
+    def _build_review_queue(
+        self,
+        run_id: str,
+        failures: List[Dict[str, Any]],
+        archive_actions: List[Dict[str, Any]],
+        ledger_results: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        items = []
+        for failure in failures:
+            items.append({
+                "type": "extraction_failure",
+                "severity": "high",
+                "file": failure.get("file"),
+                "reason": failure.get("error"),
+                "recommended_action": "人工检查文件是否可读或转换格式后重试",
+            })
+        for result in ledger_results:
+            judgement = result.get("business_judgement", {})
+            if judgement.get("human_review_required"):
+                items.append({
+                    "type": "business_judgement_review",
+                    "severity": judgement.get("risk_level", "unknown"),
+                    "project_name": result.get("project_name"),
+                    "missing_fields": judgement.get("missing_fields", []),
+                    "risk_reasons": judgement.get("risk_reasons", []),
+                    "recommended_actions": judgement.get("next_actions", []),
+                    "project_overview_md": result.get("markdown_path"),
+                })
+        for action in archive_actions:
+            if action.get("status") != "ready":
+                items.append({
+                    "type": "archive_action_review",
+                    "severity": "medium",
+                    "project_name": action.get("project_name"),
+                    "source_file": action.get("source_file"),
+                    "target_path": action.get("target_path"),
+                    "blockers": action.get("blockers", []),
+                    "recommended_action": "确认归档计划后再执行 execute_archive_plan",
+                })
+        return {
+            "schema_version": "review_queue.v1",
+            "run_id": run_id,
+            "status": "needs_review" if items else "clear",
+            "items": items,
+        }
+
+    def _write_run_report(
+        self,
+        report_path: str,
+        run_id: str,
+        total: int,
+        processed: int,
+        failures: List[Dict[str, Any]],
+        review_queue: Dict[str, Any],
+        archive_actions: List[Dict[str, Any]],
+    ) -> None:
+        lines = [
+            f"# 文件整理运行报告：{run_id}",
+            "",
+            f"- 输入文件数：{total}",
+            f"- 结构化成功：{processed}",
+            f"- 失败：{len(failures)}",
+            f"- 复核项：{len(review_queue.get('items', []))}",
+            f"- 归档计划：{len(archive_actions)}",
+            "",
+            "## 失败项",
+        ]
+        if failures:
+            for failure in failures:
+                lines.append(f"- {failure.get('file')}: {failure.get('error')}")
+        else:
+            lines.append("- 无")
+        lines.extend(["", "## 人工复核队列"])
+        if review_queue.get("items"):
+            for item in review_queue.get("items", []):
+                title = item.get("project_name") or item.get("file")
+                detail = item.get("reason") or item.get("recommended_action") or ", ".join(item.get("recommended_actions", []))
+                lines.append(f"- [{item.get('type')}] {title}: {detail}")
+        else:
+            lines.append("- 无")
+        lines.extend(["", "## 归档计划"])
+        if archive_actions:
+            for action in archive_actions:
+                lines.append(f"- {action.get('status')}: {action.get('source_file')} -> {action.get('target_path')}")
+        else:
+            lines.append("- 无")
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+    def _append_archive_report(self, report_path: str, results: List[Dict[str, Any]]) -> None:
+        lines = ["", "## 归档执行结果"]
+        for item in results:
+            if item.get("status") == "success":
+                lines.append(f"- success: {item.get('source_file')} -> {item.get('archived_path')}")
+            else:
+                lines.append(f"- {item.get('status')}: {item.get('source_file')} {item.get('error') or item.get('blockers')}")
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
     def import_project_detail_workbook(self, file_path: str) -> Dict[str, Any]:
         """Import 项目明细表.xlsx and update one ledger per project.
 
@@ -682,41 +1137,55 @@ class DataCleaningTools:
         generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
         win_rate_denominator = len(groups["已中标"]) + len(groups["已弃标"])
         win_rate = f"{(len(groups['已中标']) / win_rate_denominator * 100):.1f}%" if win_rate_denominator else "0%"
+        review_count = len([p for p in projects if p.get("human_review_required")])
+        risk_count = len([p for p in projects if p.get("risk_level") in {"high", "medium"}])
         stat_cards = [
+            ("全部项目", len(projects), "slate", "项目账本总量"),
             ("已中标", len(groups["已中标"]), "green"),
             ("已弃标", len(groups["已弃标"]), "red"),
-            ("中标率", win_rate, "red-outline"),
             ("参与中", len(groups["参与中"]), "blue"),
-            ("已丢标", 0, "gray"),
+            ("中标率", win_rate, "amber", "按已中标/已弃标计算"),
+            ("需复核", review_count, "violet", f"中高风险 {risk_count} 个"),
         ]
         cards_html = "\n".join(
-            f'<div class="stat-card {cls}"><div class="number">{count}</div><div class="label">{html.escape(label)}</div></div>'
-            for label, count, cls in stat_cards
+            (
+                f'<div class="stat-card {cls}">'
+                f'<div class="label">{html.escape(label)}</div>'
+                f'<div class="number">{count}</div>'
+                f'<div class="hint">{html.escape(hint)}</div>'
+                f'</div>'
+            )
+            for label, count, cls, *hint_parts in stat_cards
+            for hint in [hint_parts[0] if hint_parts else "当前筛选口径"]
         )
         tab_styles = {
+            "全部项目": ("#334155", "#f1f5f9"),
             "已中标": ("#16a34a", "#dcfce7"),
             "已弃标": ("#dc2626", "#fee2e2"),
             "参与中": ("#2563eb", "#dbeafe"),
         }
+        display_groups = {"全部项目": projects, **groups}
         tabs_html = "\n".join(
             (
                 f'<button class="tab-btn" data-tab="{html.escape(name)}" '
                 f'style="--active-color: {tab_styles[name][0]}; --active-bg: {tab_styles[name][1]}">'
                 f'{html.escape(name)} <span class="tab-count">{len(items)}</span></button>'
             )
-            for name, items in groups.items()
+            for name, items in display_groups.items()
         )
         sections_html = "\n".join(
             (
                 f'<div class="tab-content" data-tab="{html.escape(name)}">'
                 f'<div class="section">'
-                f'<h2 style="color: {tab_styles[name][0]}; border-left: 4px solid {tab_styles[name][0]}; padding-left: 12px;">'
-                f'{html.escape(name)} <span class="count-badge" style="background: {tab_styles[name][1]}; color: {tab_styles[name][0]}">{len(items)}</span></h2>'
+                f'<div class="section-title" style="--section-color: {tab_styles[name][0]}; --section-bg: {tab_styles[name][1]}">'
+                f'<h2>{html.escape(name)} <span class="count-badge">{len(items)}</span></h2>'
+                f'<span class="section-desc">明细表、业务判断、下一步动作、复核标记均来自项目账本</span>'
+                f'</div>'
                 f'{self._render_bid_progress_table(items)}'
                 f'<div class="detail-subsection"><h3>项目详情</h3>{self._render_project_detail_cards(items)}</div>'
                 f'</div></div>'
             )
-            for name, items in groups.items()
+            for name, items in display_groups.items()
         )
         sales_rows = self._render_sales_stats(projects)
         return f"""<!DOCTYPE html>
@@ -727,34 +1196,48 @@ class DataCleaningTools:
   <title>投标进度总览</title>
   <style>
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; color: #333; line-height: 1.6; padding: 20px; }}
-    .container {{ max-width: 1680px; margin: 0 auto; }}
-    h1 {{ font-size: 28px; color: #111827; margin-bottom: 8px; }}
-    .meta {{ color: #667085; font-size: 14px; margin-bottom: 20px; }}
-    .stats-bar {{ display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }}
-    .stat-card {{ background: #fff; border-radius: 8px; padding: 16px 24px; box-shadow: 0 1px 3px rgba(15, 23, 42, .08); min-width: 120px; flex: 1; border: 1px solid #eef0f4; }}
-    .stat-card.red-outline {{ border: 2px solid #dc2626; }}
-    .stat-card .number {{ font-size: 28px; font-weight: 750; color: #1a1a1a; }}
-    .stat-card .label {{ font-size: 13px; color: #667085; margin-top: 4px; }}
-    .stat-card.green .number {{ color: #16a34a; }} .stat-card.red .number, .stat-card.red-outline .number {{ color: #dc2626; }} .stat-card.blue .number {{ color: #2563eb; }} .stat-card.gray .number {{ color: #6b7280; }}
-    .tab-nav {{ display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; background: #fff; padding: 12px; border-radius: 8px; box-shadow: 0 1px 3px rgba(15, 23, 42, .08); border: 1px solid #eef0f4; }}
-    .tab-btn {{ padding: 10px 18px; border: 1px solid #e5e7eb; border-radius: 7px; background: #fff; font-size: 14px; font-weight: 600; cursor: pointer; transition: all .2s; color: #4b5563; display: flex; align-items: center; gap: 6px; }}
-    .tab-btn:hover {{ border-color: #cfd4dc; background: #f9fafb; }}
+    :root {{ color-scheme: light; --border: #d9e0ea; --muted: #64748b; --ink: #0f172a; --panel: #ffffff; --bg: #f6f8fb; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--ink); line-height: 1.55; padding: 20px; }}
+    .container {{ max-width: 1760px; margin: 0 auto; }}
+    .hero {{ background: linear-gradient(135deg, #0f172a 0%, #1f2937 56%, #0b7667 100%); color: #fff; border-radius: 8px; padding: 22px 26px; margin-bottom: 16px; box-shadow: 0 14px 30px rgba(15, 23, 42, .14); }}
+    .hero-row {{ display: flex; justify-content: space-between; gap: 20px; align-items: flex-end; flex-wrap: wrap; }}
+    h1 {{ font-size: 30px; line-height: 1.2; font-weight: 800; margin-bottom: 8px; }}
+    .meta {{ color: #dbeafe; font-size: 13px; }}
+    .source-note {{ color: #cbd5e1; font-size: 12px; max-width: 520px; }}
+    .stats-bar {{ display: grid; grid-template-columns: repeat(6, minmax(145px, 1fr)); gap: 12px; margin-bottom: 16px; }}
+    .stat-card {{ background: var(--panel); border-radius: 8px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(15, 23, 42, .07); border: 1px solid var(--border); border-top: 4px solid #64748b; min-height: 106px; }}
+    .stat-card .label {{ font-size: 12px; color: var(--muted); font-weight: 700; }}
+    .stat-card .number {{ font-size: 30px; line-height: 1.1; font-weight: 800; margin: 8px 0 6px; color: #111827; }}
+    .stat-card .hint {{ font-size: 12px; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+    .stat-card.green {{ border-top-color: #16a34a; }} .stat-card.green .number {{ color: #15803d; }}
+    .stat-card.red {{ border-top-color: #dc2626; }} .stat-card.red .number {{ color: #b91c1c; }}
+    .stat-card.blue {{ border-top-color: #2563eb; }} .stat-card.blue .number {{ color: #1d4ed8; }}
+    .stat-card.amber {{ border-top-color: #d97706; }} .stat-card.amber .number {{ color: #b45309; }}
+    .stat-card.violet {{ border-top-color: #7c3aed; }} .stat-card.violet .number {{ color: #6d28d9; }}
+    .stat-card.slate {{ border-top-color: #334155; }} .stat-card.slate .number {{ color: #0f172a; }}
+    .tab-nav {{ position: sticky; top: 0; z-index: 20; display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; background: rgba(255,255,255,.94); padding: 10px; border-radius: 8px; box-shadow: 0 8px 22px rgba(15, 23, 42, .08); border: 1px solid var(--border); backdrop-filter: blur(10px); }}
+    .tab-btn {{ min-height: 38px; padding: 8px 14px; border: 1px solid #d7dde6; border-radius: 7px; background: #fff; font-size: 13px; font-weight: 700; cursor: pointer; transition: all .16s; color: #334155; display: flex; align-items: center; gap: 6px; }}
+    .tab-btn:hover {{ border-color: #aab4c2; background: #f8fafc; }}
     .tab-btn.active {{ border-color: var(--active-color); background: var(--active-bg); color: var(--active-color); }}
     .tab-count {{ font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #f3f4f6; color: #6b7280; }}
     .tab-btn.active .tab-count {{ background: #fff; color: var(--active-color); }}
-    .search-box {{ min-width: 280px; flex: 1; max-width: 420px; border: 1px solid #e5e7eb; border-radius: 7px; padding: 0 12px; color: #111827; outline: none; }}
+    .search-box {{ min-width: 280px; flex: 1; max-width: 460px; min-height: 38px; border: 1px solid #d7dde6; border-radius: 7px; padding: 0 12px; color: #111827; outline: none; background: #fff; }}
+    .search-box:focus {{ border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, .12); }}
     .tab-content {{ display: none; }}
     .tab-content.active {{ display: block; }}
-    .section {{ background: #fff; border-radius: 8px; padding: 24px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(15, 23, 42, .08); border: 1px solid #eef0f4; overflow-x: auto; }}
-    .section h2 {{ font-size: 18px; margin-bottom: 16px; color: #1a1a1a; display: flex; align-items: center; gap: 8px; }}
-    .count-badge {{ font-size: 13px; padding: 2px 10px; border-radius: 12px; font-weight: 700; }}
-    table {{ width: 100%; border-collapse: collapse; font-size: 13px; min-width: 1280px; }}
-    th {{ position: sticky; top: 0; z-index: 1; background: #f8fafc; padding: 10px 12px; text-align: left; font-weight: 700; color: #667085; border-bottom: 2px solid #e5e7eb; white-space: nowrap; font-size: 12px; }}
-    td {{ padding: 10px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; background: transparent; }}
-    tr:hover {{ background: #f8fafc !important; }}
+    .section {{ background: var(--panel); border-radius: 8px; padding: 18px; margin-bottom: 22px; box-shadow: 0 1px 3px rgba(15, 23, 42, .08); border: 1px solid var(--border); }}
+    .section-title {{ border-left: 4px solid var(--section-color); padding: 2px 0 2px 12px; margin-bottom: 14px; display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }}
+    .section-title h2 {{ font-size: 18px; color: #111827; display: flex; align-items: center; gap: 8px; }}
+    .section-desc {{ font-size: 12px; color: var(--muted); }}
+    .count-badge {{ font-size: 12px; padding: 2px 10px; border-radius: 999px; font-weight: 800; background: var(--section-bg); color: var(--section-color); }}
+    .table-wrap {{ width: 100%; overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 8px; }}
+    table {{ width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; min-width: 1460px; background: #fff; }}
+    th {{ position: sticky; top: 59px; z-index: 10; background: #eef3f8; padding: 9px 10px; text-align: left; font-weight: 800; color: #475569; border-bottom: 1px solid #cbd5e1; white-space: nowrap; font-size: 12px; }}
+    td {{ padding: 9px 10px; border-bottom: 1px solid #edf1f5; vertical-align: top; background: transparent; }}
+    tbody tr:hover {{ background: #f1f5f9 !important; }}
     .center {{ text-align: center; }}
-    .name-cell {{ font-weight: 650; color: #111827; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .name-cell {{ font-weight: 750; color: #111827; min-width: 260px; max-width: 340px; white-space: normal; line-height: 1.35; }}
+    .note {{ min-width: 220px; max-width: 360px; color: #334155; line-height: 1.4; }}
     .badge {{ display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; white-space: nowrap; }}
     .badge-red, .badge-danger {{ background: #fee2e2; color: #dc2626; }}
     .badge-yellow, .badge-warning {{ background: #fef3c7; color: #d97706; }}
@@ -762,13 +1245,14 @@ class DataCleaningTools:
     .badge-blue, .badge-info {{ background: #dbeafe; color: #2563eb; }}
     .badge-gray, .badge-neutral {{ background: #f3f4f6; color: #6b7280; }}
     .text-red {{ color: #dc2626; font-weight: 700; }} .text-yellow {{ color: #d97706; font-weight: 700; }}
-    .muted {{ color: #98a2b3; font-style: italic; }}
-    .detail-subsection {{ margin-top: 24px; padding-top: 24px; border-top: 2px solid #f0f0f0; }}
-    .detail-subsection h3 {{ font-size: 16px; margin-bottom: 16px; color: #1a1a1a; }}
-    .detail-card {{ background: #fafbfc; border-radius: 8px; padding: 18px; margin-bottom: 12px; border: 1px solid #e5e7eb; }}
+    .muted {{ color: #94a3b8; font-style: italic; }}
+    .empty-state {{ padding: 28px; color: var(--muted); border: 1px dashed #cbd5e1; border-radius: 8px; background: #f8fafc; }}
+    .detail-subsection {{ margin-top: 18px; padding-top: 18px; border-top: 1px solid #e2e8f0; }}
+    .detail-subsection h3 {{ font-size: 16px; margin-bottom: 14px; color: #1a1a1a; }}
+    .detail-card {{ background: #fafbfc; border-radius: 8px; padding: 16px; margin-bottom: 12px; border: 1px solid #e2e8f0; }}
     .detail-card.warning {{ border-left: 4px solid #f59e0b; background: #fffbeb; }}
-    .detail-card h3 {{ font-size: 15px; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
-    .info-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 14px; }}
+    .detail-card h3 {{ font-size: 15px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
+    .info-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 12px; margin-bottom: 12px; }}
     .info-item {{ display: flex; flex-direction: column; }}
     .info-item .label {{ font-size: 12px; color: #667085; margin-bottom: 2px; }}
     .info-item .value {{ font-size: 13px; font-weight: 550; color: #111827; }}
@@ -781,22 +1265,30 @@ class DataCleaningTools:
     .task-item {{ font-size: 12px; padding: 3px 0; }}
     .risk-item {{ font-size: 12px; padding: 6px 10px; border-radius: 6px; margin-bottom: 3px; }}
     .risk-high {{ background: #fee2e2; }} .risk-medium {{ background: #fef3c7; }} .risk-low {{ background: #dcfce7; }}
-    .weekly-content {{ font-size: 12px; color: #555; padding: 10px; background: #f8fafc; border-radius: 8px; }}
+    .weekly-content {{ font-size: 12px; color: #334155; padding: 10px; background: #f8fafc; border-radius: 8px; }}
     .stats-table th {{ background: #7c3aed; color: #fff; font-size: 13px; }}
     .stats-table td {{ padding: 12px; }}
-    @media print {{ body {{ background: #fff; padding: 0; }} .section, .detail-card {{ box-shadow: none; border: 1px solid #e5e7eb; }} .tab-nav {{ display: none; }} .tab-content {{ display: block !important; }} }}
+    @media (max-width: 1080px) {{ body {{ padding: 12px; }} .stats-bar {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} .hero {{ padding: 18px; }} th {{ top: 0; }} .tab-nav {{ position: static; }} }}
+    @media print {{ body {{ background: #fff; padding: 0; }} .hero {{ color: #111827; background: #fff; box-shadow: none; border: 1px solid #e5e7eb; }} .section, .detail-card {{ box-shadow: none; border: 1px solid #e5e7eb; }} .tab-nav {{ display: none; }} .tab-content {{ display: block !important; }} }}
   </style>
 </head>
 <body>
   <main class="container">
-    <h1>投标进度总览</h1>
-    <div class="meta">生成时间: {html.escape(generated_at)} | 投标项目总数: {len(projects)} | 来源: project_ledgers / project_ledger.json</div>
+    <section class="hero">
+      <div class="hero-row">
+        <div>
+          <h1>投标进度总览</h1>
+          <div class="meta">生成时间: {html.escape(generated_at)} | 投标项目总数: {len(projects)}</div>
+        </div>
+        <div class="source-note">展示页是派生产物；事实来源以 project_ledgers / project_ledger.json 和项目总览.md 为准。</div>
+      </div>
+    </section>
     <div class="stats-bar">{cards_html}</div>
     <div class="tab-nav">{tabs_html}<button class="tab-btn" data-tab="stats" style="--active-color: #7c3aed; --active-bg: #ede9fe">销售统计</button><input class="search-box" id="tableSearch" type="search" placeholder="搜索项目、客户、销售、编号"></div>
     {sections_html}
     <div class="tab-content" data-tab="stats">
       <div class="section">
-        <h2 style="border-left: 4px solid #7c3aed; padding-left: 12px;">销售统计</h2>
+        <div class="section-title" style="--section-color: #7c3aed; --section-bg: #ede9fe"><h2>销售统计</h2><span class="section-desc">按负责销售汇总项目数和状态分布</span></div>
         <div class="stats-bar" style="margin-bottom: 20px;">{cards_html}</div>
         {sales_rows}
       </div>
@@ -867,7 +1359,7 @@ class DataCleaningTools:
             )
             body.append(f'<tr style="background-color: {self._row_background(row)}">{cells}</tr>')
         head = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
-        return f'<table><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table>'
+        return f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
 
     def _render_project_detail_cards(self, rows: List[Dict[str, Any]]) -> str:
         if not rows:

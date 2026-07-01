@@ -1,9 +1,9 @@
 # 工具层详细 API
 
-本文件描述 31 个工具的完整 API。分四个受控工具域：
+本文件描述 34 个工具的完整 API。分四个受控工具域：
 
 - **ProjectTools**（10 个）：项目管理
-- **DataCleaningTools**（10 个）：数据清洗及文件整理
+- **DataCleaningTools**（13 个）：数据清洗及文件整理
 - **OpportunityManagerTools**（5 个）：商机检测
 - **CloudCCCrmTools**（6 个）：CloudCC/CRM 只读查重、草稿准备、提交前确认
 
@@ -315,6 +315,111 @@
   "artifacts": {
     "project_overview_md": "...",
     "project_ledger_json": "..."
+  }
+}
+```
+
+### prepare_file_organization_run(file_paths, project_name="")
+
+准备一次文件整理闭环运行包。该工具会提取源文件结构化字段，写入项目账本并触发业务判断，生成复核队列、归档计划和运行报告，但不会移动源文件。
+
+**参数**：
+- `file_paths` (array, required): 源文件绝对路径列表
+- `project_name` (str, optional): 手工指定项目名；为空时从文件中推断
+
+**返回**：
+```json
+{
+  "schema_version": "file_organization.run.v1",
+  "run_id": "run_20260702_120000_000000",
+  "status": "success|partial|failed",
+  "processed": 2,
+  "failed": 1,
+  "structured_outputs": [".../runs/<run_id>/extracted/..._extracted.json"],
+  "review_queue": {
+    "schema_version": "review_queue.v1",
+    "status": "clear|needs_review",
+    "items": []
+  },
+  "archive_actions": [
+    {
+      "schema_version": "archive_action.v1",
+      "status": "ready|needs_review",
+      "source_file": "...",
+      "project_name": "...",
+      "target_path": ".../project_ledgers/<项目>/source_files/<重命名文件>",
+      "blockers": []
+    }
+  ],
+  "artifacts": {
+    "input_manifest": ".../input_manifest.json",
+    "review_queue": ".../review_queue.json",
+    "planned_archive_actions": ".../planned_archive_actions.json",
+    "run_report": ".../run_report.md",
+    "trace": ".../trace.json"
+  }
+}
+```
+
+### apply_human_review(review_decisions, run_id="")
+
+应用人工复核修正。人工修正以 `human_correction` 来源写入项目账本，权重高于自动抽取事实；涉及报名、中标、签约状态的修正会生成待审批的规则候选。
+
+**参数**：
+- `review_decisions` (array, required): 复核决策列表
+- `run_id` (str, optional): 关联运行包 ID；提供后会把复核记录写入该 run 目录
+
+**返回**：
+```json
+{
+  "schema_version": "human_review.apply.v1",
+  "status": "success|partial",
+  "reviewed": 1,
+  "failed": 0,
+  "results": [
+    {
+      "status": "success",
+      "project_name": "...",
+      "facts": {"bid_status": "已中标", "contract_status": "未签约"},
+      "business_judgement": {"business_stage": "won_pending_contract"}
+    }
+  ],
+  "rule_candidates": [
+    {
+      "schema_version": "rule_candidate.v1",
+      "status": "pending_rule_approval",
+      "requires_test": true
+    }
+  ]
+}
+```
+
+### execute_archive_plan(run_id, confirmed=false)
+
+执行 `prepare_file_organization_run` 生成的归档计划。默认 `confirmed=false` 时只返回 `needs_confirmation`，不会移动文件；只有 `confirmed=true` 时才会重命名并移动源文件，同时把归档结果写入项目账本。
+
+**参数**：
+- `run_id` (str, required): 运行包 ID
+- `confirmed` (bool, optional): 是否确认执行物理归档
+
+**返回**：
+```json
+{
+  "schema_version": "archive_plan.execute.v1",
+  "status": "needs_confirmation|success|partial|failed",
+  "run_id": "run_...",
+  "moved": 2,
+  "failed": 0,
+  "results": [
+    {
+      "status": "success",
+      "source_file": "...",
+      "archived_path": ".../source_files/..."
+    }
+  ],
+  "artifacts": {
+    "archive_result": ".../archive_result.json",
+    "run_report": ".../run_report.md"
   }
 }
 ```

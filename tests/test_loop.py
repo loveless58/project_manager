@@ -4,7 +4,7 @@ Project Manager Loop 测试套件
 
 验证内容：
 1. 模块导入（common/ 已内联）
-2. 工具注册（31个工具）
+2. 工具注册（34个工具）
 3. LoopEngine 在 RuleBasedPlanner 下的完整运行
 4. 各场景的典型路径验证
 5. 状态管理（sliding_window）
@@ -154,12 +154,15 @@ class TestToolRegistry(unittest.TestCase):
 
         reg = main._build_registry()
         tools = set(reg.list_tools())
-        self.assertEqual(len(tools), 31)
+        self.assertEqual(len(tools), 34)
         self.assertIn("cloudcc_session_probe", tools)
         self.assertIn("cloudcc_duplicate_check", tools)
         self.assertIn("cloudcc_fill_draft_gated", tools)
         self.assertIn("update_project_ledger", tools)
         self.assertIn("process_documents_to_ledger", tools)
+        self.assertIn("prepare_file_organization_run", tools)
+        self.assertIn("apply_human_review", tools)
+        self.assertIn("execute_archive_plan", tools)
         self.assertIn("import_project_detail_workbook", tools)
         self.assertIn("generate_bid_progress_html", tools)
 
@@ -176,6 +179,9 @@ class TestToolRegistry(unittest.TestCase):
             "batch_process",
             "save_structured",
             "process_documents_to_ledger",
+            "prepare_file_organization_run",
+            "apply_human_review",
+            "execute_archive_plan",
             "import_project_detail_workbook",
             "generate_bid_progress_html",
             "update_project_ledger",
@@ -189,6 +195,21 @@ class TestToolRegistry(unittest.TestCase):
             main._route_skill("跑通数据清洗及文件整理项目总览账本循环"),
             "data_cleaning_file_organization",
         )
+        self.assertEqual(
+            main._route_skill("帮我整理文件并归档 C:\\tmp\\demo.docx"),
+            "data_cleaning_file_organization",
+        )
+
+    def test_rule_planner_routes_file_organization_to_prepare_run(self):
+        """整理/归档类文件目标应优先准备文件整理运行包，而不是直接移动文件"""
+        from planner import RuleBasedPlanner
+
+        planner = RuleBasedPlanner("帮我整理文件并归档 C:\\tmp\\demo.docx")
+        response, _ = planner.get_response([])
+
+        self.assertIn("Action: prepare_file_organization_run", response)
+        payload = json.loads(response.split("Action Input: ", 1)[1])
+        self.assertEqual(payload["file_paths"], ["C:\\tmp\\demo.docx"])
 
 
 class TestCloudCCCrmTools(unittest.TestCase):
@@ -515,6 +536,120 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertIn("任务跟踪", content)
             self.assertIn("风险与问题", content)
             self.assertIn("最新进展", content)
+
+    def test_prepare_file_organization_run_outputs_partial_package_and_archive_plan(self):
+        import tempfile
+        from docx import Document
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            doc_path = os.path.join(td, "采购公告.docx")
+            doc = Document()
+            doc.add_paragraph("航天时代飞鸿技术有限公司")
+            doc.add_paragraph("《采购公告》")
+            doc.add_paragraph("项目名称：")
+            doc.add_paragraph("打印刻录系统采购项目")
+            doc.save(doc_path)
+            missing_path = os.path.join(td, "不存在.pdf")
+
+            tools = DataCleaningTools(workspace_dir=td)
+            result = tools.prepare_file_organization_run([doc_path, missing_path])
+
+            self.assertEqual(result["schema_version"], "file_organization.run.v1")
+            self.assertEqual(result["status"], "partial")
+            self.assertEqual(result["processed"], 1)
+            self.assertEqual(result["failed"], 1)
+            self.assertTrue(os.path.exists(result["artifacts"]["input_manifest"]))
+            self.assertTrue(os.path.exists(result["artifacts"]["review_queue"]))
+            self.assertTrue(os.path.exists(result["artifacts"]["planned_archive_actions"]))
+            self.assertTrue(os.path.exists(result["artifacts"]["run_report"]))
+            self.assertEqual(len(result["archive_actions"]), 1)
+            self.assertIn(result["archive_actions"][0]["status"], {"ready", "needs_review"})
+            self.assertTrue(os.path.exists(result["structured_outputs"][0]))
+            self.assertTrue(os.path.exists(doc_path), "prepare step must not move source files")
+
+    def test_apply_human_review_corrects_ledger_business_judgement(self):
+        import tempfile
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            tools = DataCleaningTools(workspace_dir=td)
+            tools.update_project_ledger(
+                project_name="人工复核项目",
+                facts={
+                    "project_name": "人工复核项目",
+                    "bid_status": "待开标",
+                    "contract_status": "未签约",
+                    "customer_name": "测试客户",
+                    "sales_owner": "张三",
+                },
+                evidence=[],
+                source_type="xlsx_summary",
+            )
+
+            result = tools.apply_human_review([
+                {
+                    "project_name": "人工复核项目",
+                    "facts": {"bid_status": "已中标", "contract_status": "未签约"},
+                    "reason": "人工确认已中标，Excel 状态滞后",
+                }
+            ])
+
+            self.assertEqual(result["schema_version"], "human_review.apply.v1")
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["reviewed"], 1)
+            judgement = result["results"][0]["business_judgement"]
+            self.assertEqual(judgement["business_stage"], "won_pending_contract")
+            self.assertIn("准备合同签约", judgement["next_actions"])
+            self.assertTrue(result["rule_candidates"])
+
+    def test_execute_archive_plan_requires_confirmation_then_moves_and_updates_ledger(self):
+        import tempfile
+        from docx import Document
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            source_dir = os.path.join(td, "source")
+            os.makedirs(source_dir)
+            doc_path = os.path.join(source_dir, "采购公告.docx")
+            doc = Document()
+            doc.add_paragraph("航天时代飞鸿技术有限公司")
+            doc.add_paragraph("《采购公告》")
+            doc.add_paragraph("项目名称：")
+            doc.add_paragraph("打印刻录系统采购项目")
+            doc.save(doc_path)
+
+            tools = DataCleaningTools(workspace_dir=td)
+            prepared = tools.prepare_file_organization_run([doc_path])
+            blocked = tools.execute_archive_plan(prepared["run_id"], confirmed=False)
+
+            self.assertEqual(blocked["status"], "needs_confirmation")
+            self.assertTrue(os.path.exists(doc_path))
+
+            review_blocked = tools.execute_archive_plan(prepared["run_id"], confirmed=True)
+
+            self.assertEqual(review_blocked["status"], "failed")
+            self.assertEqual(review_blocked["results"][0]["status"], "blocked")
+            self.assertIn("human_review_required", review_blocked["results"][0]["blockers"])
+            self.assertTrue(os.path.exists(doc_path))
+
+            tools.apply_human_review([
+                {
+                    "project_name": "打印刻录系统采购项目",
+                    "facts": {"bid_status": "待开标"},
+                    "reason": "测试确认归档计划可以执行",
+                }
+            ], run_id=prepared["run_id"])
+            executed = tools.execute_archive_plan(prepared["run_id"], confirmed=True)
+
+            self.assertEqual(executed["schema_version"], "archive_plan.execute.v1")
+            self.assertEqual(executed["status"], "success")
+            self.assertEqual(executed["moved"], 1)
+            self.assertFalse(os.path.exists(doc_path))
+            archived_path = executed["results"][0]["archived_path"]
+            self.assertTrue(os.path.exists(archived_path))
+            self.assertTrue(os.path.exists(executed["artifacts"]["archive_result"]))
+            self.assertTrue(os.path.exists(executed["artifacts"]["run_report"]))
 
 
 # ────────────────────────────────────────────

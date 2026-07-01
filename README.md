@@ -88,7 +88,7 @@ project_manager/
 └── README.md
 ```
 
-## 核心能力（31 个工具）
+## 核心能力（34 个工具）
 
 ### 项目管理（10 个）
 
@@ -105,7 +105,7 @@ project_manager/
 | `generate_report` | 生成项目报告 | 周报、简报 |
 | `write_response` | 写入响应文件 | 内部使用 |
 
-### 数据清洗及文件整理（10 个）
+### 数据清洗及文件整理（13 个）
 
 | 工具 | 说明 | 触发场景 |
 |------|------|---------|
@@ -116,6 +116,9 @@ project_manager/
 | `batch_process` | 批量处理 | 批量处理所有文件 |
 | `save_structured` | 保存结构化数据 | 内部使用 |
 | `process_documents_to_ledger` | 多文件抽取并更新项目账本 | Word/PDF 到项目总览 |
+| `prepare_file_organization_run` | 准备完整文件整理运行包 | 清洗、结构化、业务判断、复核队列、归档计划 |
+| `apply_human_review` | 应用人工复核修正 | 人工确认事实、修正规则判断 |
+| `execute_archive_plan` | 确认后执行归档计划 | 重命名、移动原文件、更新项目总览 |
 | `import_project_detail_workbook` | 导入项目明细表并更新多个项目账本 | Excel 到项目账本 |
 | `generate_bid_progress_html` | 从项目账本生成投标进度总览 HTML | 展示层派生产物 |
 | `update_project_ledger` | 写入候选事实、证据和冲突决议 | 账本治理入口 |
@@ -160,6 +163,22 @@ project_manager/
 - `human_review_required` / `crm_required` / `bpm_required`：人工、CRM、BPM 后续动作标记
 
 第一版只做确定性规则判断，不直接调用 LLM、CRM 或 BPM。
+
+## 文件整理闭环
+
+文件整理不再直接等同于传统项目归档。数据清洗及文件整理 skill 的完整闭环是：
+
+```text
+prepare_file_organization_run
+  -> 提取结构化字段
+  -> 写入项目账本并触发业务判断
+  -> 输出 review_queue / planned_archive_actions / run_report
+  -> apply_human_review 写入人工修正和规则候选
+  -> execute_archive_plan(confirmed=True) 重命名并移动原文件
+  -> generate_bid_progress_html 更新投标进度总览
+```
+
+如果中间文件不可读或字段不足，运行包仍会保留已经成功提取的结构化 JSON、项目总览、失败项、复核队列和归档计划。真正移动原文件必须显式调用 `execute_archive_plan(..., confirmed=True)`。
 
 ## 依赖
 
