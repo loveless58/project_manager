@@ -1,24 +1,24 @@
 ---
-name: loop-project-lifecycle
-version: 2.1.0
+name: project_manager
+version: 3.0.0
 description: |
-  项目全生命周期管理 Loop Agent 的工具索引与场景速查。
-  
+  Project Manager Agent 的工具索引与场景速查。
+
   本文件是 agent.md 的配套速查，不单独触发。被激活后由 Kimi Work 加载，为 LoopEngine 提供工具契约和场景执行路径参考。
-  
+
   注意：Loop 框架已内联到 common/ 目录，无需外部依赖。
 ---
 
-# Loop Project Lifecycle — 工具与场景速查
+# Project Manager Agent — 工具与场景速查
 
-## 工具注册表（20个）
+## 工具注册表（20 个）
 
-### 项目管理（10个）
+### 项目管理（10 个）
 
 | 工具名 | 说明 | 必需参数 | 触发场景 |
 |--------|------|----------|---------|
 | `scan_projects` | 扫描三阶段目录，返回项目列表+状态 | — | 项目列表、查看所有项目 |
-| `read_project_record` | 解析项目记录.md 为结构化数据 | `project_name` | XX项目进度 |
+| `read_project_record` | 解析项目记录.md 为结构化数据 | `project_name` | XX 项目进度 |
 | `check_milestones` | 检查里程碑状态（逾期/到期） | — | 风险预警、到期检查 |
 | `check_deliverables` | 扫描子目录与交付物清单对比 | `project_name` | 交付物核对 |
 | `archive_files` | 内容匹配→归档到子目录→删除源文件 | — | 文件归档、文件整理 |
@@ -28,17 +28,17 @@ description: |
 | `generate_report` | 生成周报/简报/状态报告 | `project_name` | 周报、生成报告 |
 | `write_response` | 将结果保存到 state/ 目录 | `content`, `filename` | （内部使用） |
 
-### 数据清洗（5个）
+### 数据清洗（5 个）
 
 | 工具名 | 说明 | 必需参数 | 触发场景 |
 |--------|------|----------|---------|
 | `scan_raw_files` | 扫描原始文件目录 | — | 查看有哪些文件 |
-| `extract_pdf` | 提取PDF结构化数据 | `file_path` | 解析单个文件 |
+| `extract_pdf` | 提取 PDF 结构化数据 | `file_path` | 解析单个文件 |
 | `classify_document` | 根据文件名/内容分类文档 | `file_path` | 分类归档 |
 | `batch_process` | 批量处理目录文件 | — | 批量处理所有文件 |
 | `save_structured` | 保存结构化数据 | `data`, `output_path` | （内部使用） |
 
-### 商机管理（5个）
+### 商机管理（5 个）
 
 | 工具名 | 说明 | 必需参数 | 触发场景 |
 |--------|------|----------|---------|
@@ -132,3 +132,8 @@ scan_bid_notices → parse_bid_notice → check_duplicate → generate_bid_conte
 | `common/tool_registry.py` | 工具注册系统 | 调试工具时 |
 | `common/state_manager.py` | 状态管理 | 调试状态裁剪时 |
 | `common/llm_adapter.py` | LLM 适配层 | 调试 LLM 调用时 |
+
+## 版本变更
+
+- **v3.0.0**：项目名从 `loop-project-lifecycle` 改为 `project_manager`；新增数据清洗与商机管理 10 个工具；主入口改为不接受命令行参数
+- **v2.1.0**：内联 Loop 框架，移除外部依赖
