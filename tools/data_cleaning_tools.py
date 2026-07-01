@@ -657,8 +657,11 @@ class DataCleaningTools:
                 "lifecycle_stage": facts.get("lifecycle_stage", ""),
                 "business_stage": judgement.get("business_stage", facts.get("lifecycle_stage", "")),
                 "risk_level": judgement.get("risk_level", facts.get("risk_level", "")),
+                "risk_reasons": judgement.get("risk_reasons", []),
                 "next_actions": judgement.get("next_actions", []),
                 "human_review_required": judgement.get("human_review_required", False),
+                "planned_finish_date": facts.get("planned_finish_date", ""),
+                "actual_finish_date": facts.get("actual_finish_date", ""),
                 "ledger_path": state_path,
             }
             row["overview_status"] = judgement.get("display_status") or self._overview_status(row)
@@ -677,38 +680,41 @@ class DataCleaningTools:
 
     def _render_bid_progress_html(self, projects: List[Dict[str, Any]], groups: Dict[str, List[Dict[str, Any]]]) -> str:
         generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+        win_rate_denominator = len(groups["已中标"]) + len(groups["已弃标"])
+        win_rate = f"{(len(groups['已中标']) / win_rate_denominator * 100):.1f}%" if win_rate_denominator else "0%"
         stat_cards = [
-            ("总项目", len(projects), "全部账本项目", "neutral"),
-            ("已中标", len(groups["已中标"]), "进入签约或执行", "success"),
-            ("已弃标", len(groups["已弃标"]), "已关闭机会", "danger"),
-            ("参与中", len(groups["参与中"]), "报名、投标、待开标", "info"),
-            (
-                "保证金待确认",
-                sum(1 for p in projects if p.get("bid_bond_amount") and str(p.get("bid_bond_paid")) not in {"是", "已支付"}),
-                "有金额但未标记支付",
-                "warning",
-            ),
+            ("已中标", len(groups["已中标"]), "green"),
+            ("已弃标", len(groups["已弃标"]), "red"),
+            ("中标率", win_rate, "red-outline"),
+            ("参与中", len(groups["参与中"]), "blue"),
+            ("已丢标", 0, "gray"),
         ]
         cards_html = "\n".join(
-            (
-                f'<article class="metric-card {cls}">'
-                f'<div class="metric-label">{html.escape(label)}</div>'
-                f'<div class="metric-row"><span class="metric-value">{count}</span><span class="metric-dot"></span></div>'
-                f'<div class="metric-hint">{html.escape(hint)}</div>'
-                f'</article>'
-            )
-            for label, count, hint, cls in stat_cards
+            f'<div class="stat-card {cls}"><div class="number">{count}</div><div class="label">{html.escape(label)}</div></div>'
+            for label, count, cls in stat_cards
         )
+        tab_styles = {
+            "已中标": ("#16a34a", "#dcfce7"),
+            "已弃标": ("#dc2626", "#fee2e2"),
+            "参与中": ("#2563eb", "#dbeafe"),
+        }
         tabs_html = "\n".join(
-            f'<button class="tab-btn" data-tab="{html.escape(name)}"><span>{html.escape(name)}</span><strong>{len(items)}</strong></button>'
+            (
+                f'<button class="tab-btn" data-tab="{html.escape(name)}" '
+                f'style="--active-color: {tab_styles[name][0]}; --active-bg: {tab_styles[name][1]}">'
+                f'{html.escape(name)} <span class="tab-count">{len(items)}</span></button>'
+            )
             for name, items in groups.items()
         )
         sections_html = "\n".join(
             (
-                f'<section class="tab-content" data-tab="{html.escape(name)}">'
-                f'<div class="section-head"><div><h2>{html.escape(name)}</h2><p>{self._section_hint(name)}</p></div><span class="section-count">{len(items)} 项</span></div>'
+                f'<div class="tab-content" data-tab="{html.escape(name)}">'
+                f'<div class="section">'
+                f'<h2 style="color: {tab_styles[name][0]}; border-left: 4px solid {tab_styles[name][0]}; padding-left: 12px;">'
+                f'{html.escape(name)} <span class="count-badge" style="background: {tab_styles[name][1]}; color: {tab_styles[name][0]}">{len(items)}</span></h2>'
                 f'{self._render_bid_progress_table(items)}'
-                f'</section>'
+                f'<div class="detail-subsection"><h3>项目详情</h3>{self._render_project_detail_cards(items)}</div>'
+                f'</div></div>'
             )
             for name, items in groups.items()
         )
@@ -720,189 +726,81 @@ class DataCleaningTools:
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>投标进度总览</title>
   <style>
-    :root {{
-      --page: #f6f7f9;
-      --surface: #ffffff;
-      --surface-soft: #fafbfc;
-      --border: #e6e8ec;
-      --border-strong: #d4d8df;
-      --text: #1d2433;
-      --muted: #667085;
-      --muted-soft: #98a2b3;
-      --blue: #2563eb;
-      --green: #16a34a;
-      --red: #dc2626;
-      --amber: #d97706;
-      --violet: #7c3aed;
-      --shadow: 0 10px 26px rgba(15, 23, 42, 0.06);
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      background: var(--page);
-      color: var(--text);
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
-      font-size: 14px;
-    }}
-    .app-shell {{ max-width: 1720px; margin: 0 auto; padding: 28px; }}
-    .topbar {{
-      display: flex;
-      justify-content: space-between;
-      gap: 20px;
-      align-items: flex-start;
-      margin-bottom: 20px;
-    }}
-    .eyebrow {{ color: var(--blue); font-size: 12px; font-weight: 700; letter-spacing: 0; text-transform: uppercase; margin-bottom: 6px; }}
-    h1 {{ margin: 0; font-size: 30px; line-height: 1.18; letter-spacing: 0; }}
-    .meta {{ color: var(--muted); margin-top: 8px; }}
-    .source-pill {{
-      border: 1px solid var(--border);
-      background: var(--surface);
-      border-radius: 999px;
-      padding: 8px 12px;
-      color: var(--muted);
-      white-space: nowrap;
-      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-    }}
-    .metrics-grid {{ display: grid; grid-template-columns: repeat(5, minmax(160px, 1fr)); gap: 12px; margin-bottom: 18px; }}
-    .metric-card {{
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 16px;
-      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
-    }}
-    .metric-label {{ color: var(--muted); font-weight: 650; }}
-    .metric-row {{ display: flex; justify-content: space-between; align-items: center; margin: 10px 0 6px; }}
-    .metric-value {{ font-size: 30px; line-height: 1; font-weight: 760; }}
-    .metric-dot {{ width: 9px; height: 9px; border-radius: 99px; background: var(--muted-soft); }}
-    .metric-hint {{ color: var(--muted-soft); font-size: 12px; }}
-    .success .metric-value, .success .metric-dot {{ color: var(--green); background: var(--green); }}
-    .danger .metric-value, .danger .metric-dot {{ color: var(--red); background: var(--red); }}
-    .info .metric-value, .info .metric-dot {{ color: var(--blue); background: var(--blue); }}
-    .warning .metric-value, .warning .metric-dot {{ color: var(--amber); background: var(--amber); }}
-    .workspace {{
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      box-shadow: var(--shadow);
-      overflow: hidden;
-    }}
-    .toolbar {{
-      display: flex;
-      justify-content: space-between;
-      gap: 14px;
-      align-items: center;
-      padding: 14px;
-      border-bottom: 1px solid var(--border);
-      background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
-    }}
-    .tab-nav {{ display: flex; flex-wrap: wrap; gap: 8px; }}
-    .tab-btn {{
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      height: 34px;
-      border: 1px solid var(--border);
-      background: var(--surface);
-      border-radius: 7px;
-      padding: 0 10px;
-      cursor: pointer;
-      color: #344054;
-      font-weight: 650;
-    }}
-    .tab-btn strong {{
-      min-width: 24px;
-      padding: 2px 7px;
-      border-radius: 999px;
-      color: var(--muted);
-      background: #f2f4f7;
-      font-size: 12px;
-      text-align: center;
-    }}
-    .tab-btn.active {{ border-color: #9db7ff; color: var(--blue); background: #f5f8ff; }}
-    .tab-btn.active strong {{ color: var(--blue); background: #e6eeff; }}
-    .search-box {{
-      min-width: 280px;
-      height: 34px;
-      border: 1px solid var(--border);
-      border-radius: 7px;
-      padding: 0 12px;
-      color: var(--text);
-      background: var(--surface);
-      outline: none;
-    }}
-    .search-box:focus {{ border-color: #9db7ff; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.10); }}
-    .tab-content {{ display: none; padding: 16px; }}
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; color: #333; line-height: 1.6; padding: 20px; }}
+    .container {{ max-width: 1680px; margin: 0 auto; }}
+    h1 {{ font-size: 28px; color: #111827; margin-bottom: 8px; }}
+    .meta {{ color: #667085; font-size: 14px; margin-bottom: 20px; }}
+    .stats-bar {{ display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }}
+    .stat-card {{ background: #fff; border-radius: 8px; padding: 16px 24px; box-shadow: 0 1px 3px rgba(15, 23, 42, .08); min-width: 120px; flex: 1; border: 1px solid #eef0f4; }}
+    .stat-card.red-outline {{ border: 2px solid #dc2626; }}
+    .stat-card .number {{ font-size: 28px; font-weight: 750; color: #1a1a1a; }}
+    .stat-card .label {{ font-size: 13px; color: #667085; margin-top: 4px; }}
+    .stat-card.green .number {{ color: #16a34a; }} .stat-card.red .number, .stat-card.red-outline .number {{ color: #dc2626; }} .stat-card.blue .number {{ color: #2563eb; }} .stat-card.gray .number {{ color: #6b7280; }}
+    .tab-nav {{ display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; background: #fff; padding: 12px; border-radius: 8px; box-shadow: 0 1px 3px rgba(15, 23, 42, .08); border: 1px solid #eef0f4; }}
+    .tab-btn {{ padding: 10px 18px; border: 1px solid #e5e7eb; border-radius: 7px; background: #fff; font-size: 14px; font-weight: 600; cursor: pointer; transition: all .2s; color: #4b5563; display: flex; align-items: center; gap: 6px; }}
+    .tab-btn:hover {{ border-color: #cfd4dc; background: #f9fafb; }}
+    .tab-btn.active {{ border-color: var(--active-color); background: var(--active-bg); color: var(--active-color); }}
+    .tab-count {{ font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #f3f4f6; color: #6b7280; }}
+    .tab-btn.active .tab-count {{ background: #fff; color: var(--active-color); }}
+    .search-box {{ min-width: 280px; flex: 1; max-width: 420px; border: 1px solid #e5e7eb; border-radius: 7px; padding: 0 12px; color: #111827; outline: none; }}
+    .tab-content {{ display: none; }}
     .tab-content.active {{ display: block; }}
-    .section-head {{ display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 12px; }}
-    h2 {{ margin: 0; font-size: 18px; line-height: 1.3; }}
-    .section-head p {{ margin: 4px 0 0; color: var(--muted); font-size: 13px; }}
-    .section-count {{ color: var(--muted); background: #f8fafc; border: 1px solid var(--border); border-radius: 999px; padding: 5px 10px; }}
-    .table-wrap {{ overflow: auto; border: 1px solid var(--border); border-radius: 8px; max-height: 68vh; }}
-    table {{ width: 100%; min-width: 1520px; border-collapse: separate; border-spacing: 0; font-size: 13px; }}
-    th, td {{ border-bottom: 1px solid var(--border); padding: 10px 12px; text-align: left; vertical-align: top; background: var(--surface); }}
-    th {{
-      position: sticky;
-      top: 0;
-      z-index: 1;
-      background: var(--surface-soft);
-      color: #475467;
-      font-weight: 700;
-      white-space: nowrap;
-      box-shadow: inset 0 -1px 0 var(--border);
-    }}
-    tr:hover td {{ background: #fbfdff; }}
-    td.index {{ width: 56px; text-align: center; color: var(--muted); }}
-    td.project-name {{ min-width: 260px; font-weight: 650; color: #111827; }}
-    td.note {{ min-width: 220px; color: #475467; }}
-    .muted {{ color: var(--muted-soft); }}
-    .badge {{
-      display: inline-flex;
-      align-items: center;
-      border-radius: 999px;
-      padding: 3px 8px;
-      font-size: 12px;
-      font-weight: 700;
-      white-space: nowrap;
-    }}
-    .badge-success {{ color: #067647; background: #ecfdf3; }}
-    .badge-danger {{ color: #b42318; background: #fef3f2; }}
-    .badge-info {{ color: #175cd3; background: #eff8ff; }}
-    .badge-warning {{ color: #b54708; background: #fffaeb; }}
-    .badge-neutral {{ color: #475467; background: #f2f4f7; }}
-    .sales table {{ min-width: 620px; }}
-    .empty-state {{ color: var(--muted); border: 1px dashed var(--border-strong); border-radius: 8px; padding: 22px; background: #fcfcfd; }}
-    @media (max-width: 960px) {{
-      .app-shell {{ padding: 18px; }}
-      .topbar, .toolbar {{ flex-direction: column; align-items: stretch; }}
-      .metrics-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-      .search-box {{ min-width: 0; width: 100%; }}
-    }}
+    .section {{ background: #fff; border-radius: 8px; padding: 24px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(15, 23, 42, .08); border: 1px solid #eef0f4; overflow-x: auto; }}
+    .section h2 {{ font-size: 18px; margin-bottom: 16px; color: #1a1a1a; display: flex; align-items: center; gap: 8px; }}
+    .count-badge {{ font-size: 13px; padding: 2px 10px; border-radius: 12px; font-weight: 700; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 13px; min-width: 1280px; }}
+    th {{ position: sticky; top: 0; z-index: 1; background: #f8fafc; padding: 10px 12px; text-align: left; font-weight: 700; color: #667085; border-bottom: 2px solid #e5e7eb; white-space: nowrap; font-size: 12px; }}
+    td {{ padding: 10px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; background: transparent; }}
+    tr:hover {{ background: #f8fafc !important; }}
+    .center {{ text-align: center; }}
+    .name-cell {{ font-weight: 650; color: #111827; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .badge {{ display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; white-space: nowrap; }}
+    .badge-red, .badge-danger {{ background: #fee2e2; color: #dc2626; }}
+    .badge-yellow, .badge-warning {{ background: #fef3c7; color: #d97706; }}
+    .badge-green, .badge-success {{ background: #dcfce7; color: #16a34a; }}
+    .badge-blue, .badge-info {{ background: #dbeafe; color: #2563eb; }}
+    .badge-gray, .badge-neutral {{ background: #f3f4f6; color: #6b7280; }}
+    .text-red {{ color: #dc2626; font-weight: 700; }} .text-yellow {{ color: #d97706; font-weight: 700; }}
+    .muted {{ color: #98a2b3; font-style: italic; }}
+    .detail-subsection {{ margin-top: 24px; padding-top: 24px; border-top: 2px solid #f0f0f0; }}
+    .detail-subsection h3 {{ font-size: 16px; margin-bottom: 16px; color: #1a1a1a; }}
+    .detail-card {{ background: #fafbfc; border-radius: 8px; padding: 18px; margin-bottom: 12px; border: 1px solid #e5e7eb; }}
+    .detail-card.warning {{ border-left: 4px solid #f59e0b; background: #fffbeb; }}
+    .detail-card h3 {{ font-size: 15px; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
+    .info-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 14px; }}
+    .info-item {{ display: flex; flex-direction: column; }}
+    .info-item .label {{ font-size: 12px; color: #667085; margin-bottom: 2px; }}
+    .info-item .value {{ font-size: 13px; font-weight: 550; color: #111827; }}
+    .subsection {{ margin-top: 14px; padding-top: 14px; border-top: 1px solid #e5e7eb; }}
+    .subsection h4 {{ font-size: 13px; color: #667085; margin-bottom: 10px; }}
+    .sub-table {{ font-size: 12px; min-width: 720px; }}
+    .sub-table th {{ padding: 6px 10px; font-size: 11px; }}
+    .sub-table td {{ padding: 6px 10px; }}
+    .task-list {{ display: flex; flex-direction: column; gap: 3px; }}
+    .task-item {{ font-size: 12px; padding: 3px 0; }}
+    .risk-item {{ font-size: 12px; padding: 6px 10px; border-radius: 6px; margin-bottom: 3px; }}
+    .risk-high {{ background: #fee2e2; }} .risk-medium {{ background: #fef3c7; }} .risk-low {{ background: #dcfce7; }}
+    .weekly-content {{ font-size: 12px; color: #555; padding: 10px; background: #f8fafc; border-radius: 8px; }}
+    .stats-table th {{ background: #7c3aed; color: #fff; font-size: 13px; }}
+    .stats-table td {{ padding: 12px; }}
+    @media print {{ body {{ background: #fff; padding: 0; }} .section, .detail-card {{ box-shadow: none; border: 1px solid #e5e7eb; }} .tab-nav {{ display: none; }} .tab-content {{ display: block !important; }} }}
   </style>
 </head>
 <body>
-  <main class="app-shell">
-    <header class="topbar">
-      <div>
-        <div class="eyebrow">Project Bid Operations</div>
-        <h1>投标进度总览</h1>
-        <div class="meta">生成时间：{html.escape(generated_at)}</div>
-      </div>
-      <div class="source-pill">来源：project_ledgers / project_ledger.json</div>
-    </header>
-    <section class="metrics-grid">{cards_html}</section>
-    <section class="workspace">
-      <div class="toolbar">
-        <nav class="tab-nav">{tabs_html}<button class="tab-btn" data-tab="销售统计"><span>销售统计</span><strong>{len(set(str(p.get("sales_owner") or "未指定") for p in projects))}</strong></button></nav>
-        <input class="search-box" id="tableSearch" type="search" placeholder="搜索项目、客户、销售、编号">
-      </div>
-      {sections_html}
-      <section class="tab-content sales" data-tab="销售统计">
-        <div class="section-head"><div><h2>销售统计</h2><p>按负责销售聚合当前项目状态。</p></div></div>
+  <main class="container">
+    <h1>投标进度总览</h1>
+    <div class="meta">生成时间: {html.escape(generated_at)} | 投标项目总数: {len(projects)} | 来源: project_ledgers / project_ledger.json</div>
+    <div class="stats-bar">{cards_html}</div>
+    <div class="tab-nav">{tabs_html}<button class="tab-btn" data-tab="stats" style="--active-color: #7c3aed; --active-bg: #ede9fe">销售统计</button><input class="search-box" id="tableSearch" type="search" placeholder="搜索项目、客户、销售、编号"></div>
+    {sections_html}
+    <div class="tab-content" data-tab="stats">
+      <div class="section">
+        <h2 style="border-left: 4px solid #7c3aed; padding-left: 12px;">销售统计</h2>
+        <div class="stats-bar" style="margin-bottom: 20px;">{cards_html}</div>
         {sales_rows}
-      </section>
-    </section>
+      </div>
+    </div>
   </main>
   <script>
     const tabs = document.querySelectorAll('.tab-btn');
@@ -929,14 +827,6 @@ class DataCleaningTools:
 </html>
 """
 
-    def _section_hint(self, name: str) -> str:
-        hints = {
-            "已中标": "需要继续跟踪合同、归档和执行节点。",
-            "已弃标": "已关闭机会，保留原因和证据便于复盘。",
-            "参与中": "重点关注报名、保证金、开标和状态回填。",
-        }
-        return hints.get(name, "当前项目列表。")
-
     def _render_bid_progress_table(self, rows: List[Dict[str, Any]]) -> str:
         headers = [
             "序号", "项目名称", "项目编号", "BPM销售合同号/非订单编号", "业务类型", "招标人/客户",
@@ -949,8 +839,8 @@ class DataCleaningTools:
         empty_cell = '<span class="muted">-</span>'
         for idx, row in enumerate(rows, start=1):
             values = [
-                ("index", idx, ""),
-                ("project-name", row.get("project_name", ""), ""),
+                ("center", idx, ""),
+                ("name-cell", row.get("project_name", ""), ""),
                 ("", row.get("project_code", ""), ""),
                 ("", row.get("bpm_contract_code", ""), ""),
                 ("", row.get("business_type", ""), "neutral"),
@@ -975,9 +865,102 @@ class DataCleaningTools:
                 f'<td class="{css_class}">{self._format_table_cell(value, badge_type, empty_cell)}</td>'
                 for css_class, value, badge_type in values
             )
-            body.append(f"<tr>{cells}</tr>")
+            body.append(f'<tr style="background-color: {self._row_background(row)}">{cells}</tr>')
         head = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
-        return f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
+        return f'<table><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table>'
+
+    def _render_project_detail_cards(self, rows: List[Dict[str, Any]]) -> str:
+        if not rows:
+            return '<div class="detail-card"><span class="muted">暂无项目详情</span></div>'
+        return "\n".join(self._render_project_detail_card(row) for row in rows)
+
+    def _render_project_detail_card(self, row: Dict[str, Any]) -> str:
+        warning_class = " warning" if row.get("human_review_required") or row.get("risk_level") in {"high", "medium"} else ""
+        info_items = [
+            ("CRM 编号", row.get("project_code", "")),
+            ("BPM销售合同号/非订单编号", row.get("bpm_contract_code", "")),
+            ("业务类型", row.get("business_type", "")),
+            ("招标人/客户", row.get("customer_name", "")),
+            ("负责销售", row.get("sales_owner", "")),
+            ("报名截止", row.get("registration_deadline", "")),
+            ("开标时间", row.get("bid_open_time", "")),
+            ("投标保证金", row.get("bid_bond_amount", "")),
+            ("保证金已支付", row.get("bid_bond_paid", "")),
+            ("项目类型", row.get("project_type", "")),
+            ("报名状态", row.get("registration_status", "")),
+            ("中标状态", row.get("bid_status", "")),
+            ("签约状态", row.get("contract_status", "")),
+            ("风险等级", row.get("risk_level", "")),
+            ("人工复核", "是" if row.get("human_review_required") else "否"),
+            ("备注", row.get("note", "")),
+            ("立项金额", row.get("project_amount", "")),
+        ]
+        info_html = "".join(
+            f'<div class="info-item"><span class="label">{html.escape(label)}</span><span class="value">{self._plain_or_empty(value)}</span></div>'
+            for label, value in info_items
+        )
+        tasks = row.get("next_actions") or ["等待更多证据后更新下一步动作"]
+        task_html = "".join(f'<div class="task-item">{"☑" if idx == 0 and row.get("overview_status") == "已中标" else "☐"} {html.escape(str(task))}</div>' for idx, task in enumerate(tasks))
+        risk_html = self._risk_items(row)
+        latest = row.get("note") or "项目账本已更新，待进一步跟进"
+        return (
+            f'<div class="detail-card{warning_class}">'
+            f'<h3>{html.escape(str(row.get("project_name") or ""))} {self._status_badge(row)}</h3>'
+            f'<div class="info-grid detail-grid">{info_html}</div>'
+            f'<div class="subsection"><h4>里程碑进度</h4>{self._milestone_table(row)}</div>'
+            f'<div class="subsection"><h4>任务跟踪（{len(tasks)}）</h4><div class="task-list">{task_html}</div></div>'
+            f'<div class="subsection"><h4>风险与问题</h4>{risk_html}</div>'
+            f'<div class="subsection"><h4>最新进展</h4><p class="weekly-content">{html.escape(str(latest))}</p></div>'
+            f'</div>'
+        )
+
+    def _milestone_table(self, row: Dict[str, Any]) -> str:
+        planned = [
+            ("报名截止", row.get("registration_deadline", ""), row.get("registration_status", ""), "", "来自项目账本"),
+            ("开标", row.get("bid_open_time", ""), row.get("bid_status", ""), "", "来自项目账本"),
+            ("签约", "", row.get("contract_status", ""), "", "需 CRM/BPM 或合同文件补充"),
+            ("执行跟踪", row.get("planned_finish_date", ""), row.get("business_stage", ""), row.get("actual_finish_date", ""), "业务判断派生"),
+        ]
+        rows = "".join(
+            f"<tr><td>{html.escape(str(name))}</td><td>{self._plain_or_empty(deadline)}</td><td>{self._plain_or_empty(status)}</td><td>{self._plain_or_empty(done)}</td><td>{self._plain_or_empty(note)}</td></tr>"
+            for name, deadline, status, done, note in planned
+        )
+        return '<table class="sub-table"><thead><tr><th>里程碑</th><th>截止日期</th><th>状态</th><th>完成日期</th><th>备注</th></tr></thead><tbody>' + rows + "</tbody></table>"
+
+    def _risk_items(self, row: Dict[str, Any]) -> str:
+        risk_level = row.get("risk_level") or "low"
+        reasons = row.get("risk_reasons") or []
+        if not reasons:
+            if risk_level == "low":
+                reasons = ["当前无高风险，按下一步动作继续推进"]
+            else:
+                reasons = ["需结合项目证据进一步复核"]
+        css = {"high": "risk-high", "medium": "risk-medium", "low": "risk-low"}.get(str(risk_level), "risk-medium")
+        return "".join(f'<div class="risk-item {css}">{html.escape(str(reason))}</div>' for reason in reasons)
+
+    def _status_badge(self, row: Dict[str, Any]) -> str:
+        status = str(row.get("overview_status") or "")
+        if status == "已中标":
+            return '<span class="badge badge-green">已中标</span>'
+        if status == "已弃标":
+            return '<span class="badge badge-red">已弃标</span>'
+        if row.get("risk_level") == "high":
+            return '<span class="badge badge-red">高风险</span>'
+        return '<span class="badge badge-blue">参与中</span>'
+
+    def _row_background(self, row: Dict[str, Any]) -> str:
+        if row.get("risk_level") == "high":
+            return "#fef2f2"
+        if row.get("overview_status") == "已中标":
+            return "#f0fdf4"
+        if row.get("overview_status") == "已弃标":
+            return "#fef2f2"
+        return "#f8fafc" if row.get("human_review_required") else "#ffffff"
+
+    def _plain_or_empty(self, value: Any) -> str:
+        if value in (None, ""):
+            return '<span class="muted">—</span>'
+        return html.escape(str(value))
 
     def _format_table_cell(self, value: Any, badge_type: str, empty_cell: str) -> str:
         if value in (None, ""):

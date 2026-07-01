@@ -510,6 +510,11 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertIn("BPM销售合同号/非订单编号", content)
             self.assertIn("工业互联网网络基础条件项目", content)
             self.assertIn("服务器区防火墙系统升级采购", content)
+            self.assertIn("项目详情", content)
+            self.assertIn("里程碑进度", content)
+            self.assertIn("任务跟踪", content)
+            self.assertIn("风险与问题", content)
+            self.assertIn("最新进展", content)
 
 
 # ────────────────────────────────────────────
