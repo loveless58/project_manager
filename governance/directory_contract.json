@@ -11,12 +11,14 @@
       "required_subdirs": ["项目投标", "项目执行", "项目归档"],
       "optional_subdirs": ["新机会与线索", "公司通用财务", "项目丢标"],
       "required_files": ["index.json"],
+      "validation_level": "error",
       "description": "项目数据根目录（三阶段目录 + index.json）"
     },
     "data_cleaning_workbench": {
       "path": "数据清洗工作台",
       "required_subdirs": ["00-原始文件（待处理）"],
       "optional_subdirs": ["01-OCR输出（待清洗）", "02-已清洗（结构化数据）"],
+      "validation_level": "warning",
       "description": "数据清洗工作台（三阶段：原始→OCR→已清洗）"
     },
     "new_opportunities": {
@@ -24,16 +26,19 @@
       "required_subdirs": ["招标公告"],
       "optional_subdirs": ["bid_contexts"],
       "optional_files": ["商机列表.md", "重复检测记录.md"],
+      "validation_level": "warning",
       "description": "新机会与线索（招标公告扫描 + 商机列表）"
     },
     "agent_state": {
       "path": "state",
       "scope": "project",
+      "validation_level": "warning",
       "description": "Agent 运行状态/输出（risk_summary.md、报告等）。路径相对项目根目录。"
     },
     "agent_logs": {
       "path": "logs",
       "scope": "project",
+      "validation_level": "warning",
       "description": "Agent 执行轨迹（project_manager_*.json）。路径相对项目根目录。"
     }
   },
