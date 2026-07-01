@@ -2,6 +2,8 @@
 
 本 Agent 与 bid-files 技能的集成方式——数据互通、格式兼容、渐进式替代。
 
+> 本 Agent 项目名为 `project_manager`（取代历史名 `loop-project-lifecycle`），但与 bid-files 的数据契约保持不变。
+
 ## 数据格式兼容
 
 ### 项目记录.md 区块解析
