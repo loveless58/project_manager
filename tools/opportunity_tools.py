@@ -38,8 +38,6 @@ class OpportunityManagerTools:
         self.opportunity_dir = opportunity_dir
         self.bid_notice_dir = os.path.join(opportunity_dir, "招标公告")
         self.bid_context_dir = os.path.join(opportunity_dir, "bid_contexts")
-        for d in [self.bid_notice_dir, self.bid_context_dir]:
-            os.makedirs(d, exist_ok=True)
 
     def scan_bid_notices(self, source_dir: Optional[str] = None) -> Dict:
         """扫描招标公告目录，返回文件列表"""

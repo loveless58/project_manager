@@ -1,10 +1,11 @@
 # 工具层详细 API
 
-本文件描述 20 个工具的完整 API。分三大领域：
+本文件描述 29 个工具的完整 API。分四个受控工具域：
 
 - **ProjectTools**（10 个）：项目管理
-- **DataCleaningTools**（5 个）：数据清洗
+- **DataCleaningTools**（8 个）：数据清洗及文件整理
 - **OpportunityManagerTools**（5 个）：商机检测
+- **CloudCCCrmTools**（6 个）：CloudCC/CRM 只读查重、草稿准备、提交前确认
 
 ---
 
@@ -369,3 +370,70 @@
   "save_to": "新机会与线索/CRM录入建议.md"
 }
 ```
+
+---
+
+## CloudCCCrmTools
+
+CloudCC/CRM 工具域是受控执行边界。默认使用 fake adapter，不访问真实浏览器、不提交 CRM。所有工具返回统一 envelope：
+
+```json
+{
+  "schema_version": "cloudcc.crm.result.v1",
+  "ok": false,
+  "status": "success|blocked|needs_confirmation|failed",
+  "operation": "...",
+  "object_type": "opportunity",
+  "data": {},
+  "evidence": {},
+  "pending_confirmation": null,
+  "blocked_reason": null,
+  "next_steps": [],
+  "secrets_included": false
+}
+```
+
+### cloudcc_session_probe()
+
+检查 CloudCC 登录态和浏览器适配器可用性。fake adapter 下返回 `blocked`。
+
+**返回重点**：
+- `status`: `success|blocked`
+- `blocked_reason`: `browser_adapter_unavailable|login_required|permission_denied`
+- `evidence.session_state`: 登录态证据
+
+### cloudcc_search_record(object_type, query)
+
+只读查询 CRM 对象记录。允许的对象包括 `opportunity`、`customer`、`contact`、`contract`。
+
+**安全规则**：如果登录态或浏览器不可用，返回 `blocked`，不能返回未查到。
+
+### cloudcc_duplicate_check(project_code="", project_name="", customer="")
+
+基于项目编号、项目名称、客户证据做 CRM 商机查重。
+
+**安全规则**：
+- `blocked` 不能解释为 `no_duplicate_found`
+- `customer` 必须来自客户/采购人/招标人证据，不能由销售负责人推断
+
+### cloudcc_prepare_opportunity_draft(bid_context)
+
+将 `bid_context` 转换成本地 CRM 商机草稿，不写入 CloudCC。
+
+**返回重点**：
+- `data.draft`: 建议字段
+- `data.missing_required_fields`: 缺失字段
+- `evidence.crm_write_performed`: 必须为 `false`
+
+### cloudcc_fill_draft_gated(draft)
+
+受控填充草稿并停在提交前。当前 fake adapter 不填真实页面，只返回 `needs_confirmation`。
+
+**返回重点**：
+- `status`: `needs_confirmation`
+- `pending_confirmation.action`: `submit_opportunity`
+- `data.crm_write_performed`: `false`
+
+### cloudcc_readback_record(record_id="", record_url="")
+
+提交后回读 CRM 记录并校验字段。没有真实浏览器适配器时返回 `blocked`。

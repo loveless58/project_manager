@@ -315,7 +315,7 @@ class ProjectTools:
     
     def write_response(self, content: str, filename: str) -> str:
         """将内容写入 state/ 目录"""
-        state_dir = os.path.join(os.path.dirname(__file__), "..", "..", "state")
+        state_dir = os.path.join(os.path.dirname(__file__), "..", "state")
         os.makedirs(state_dir, exist_ok=True)
         
         filepath = os.path.join(state_dir, filename)

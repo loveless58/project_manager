@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Project Manager Agent - Tool Schema",
-  "description": "20 个工具的 schema 契约。校验注册到 ToolRegistry 的工具参数与文档一致。",
+  "description": "29 个工具的 schema 契约。校验注册到 ToolRegistry 的工具参数与文档一致。",
   "version": "1.0.0",
   "tools": {
     "scan_projects": {
@@ -101,6 +101,14 @@
       },
       "required": ["file_path"]
     },
+    "extract_document": {
+      "domain": "data_cleaning",
+      "description": "提取 Word/PDF/图片文件的结构化数据",
+      "params": {
+        "file_path": {"type": "string"}
+      },
+      "required": ["file_path"]
+    },
     "classify_document": {
       "domain": "data_cleaning",
       "description": "根据文件名/内容分类文档",
@@ -125,6 +133,26 @@
         "output_path": {"type": "string"}
       },
       "required": ["data", "output_path"]
+    },
+    "process_documents_to_ledger": {
+      "domain": "data_cleaning",
+      "description": "读取多个源文件，输出结构化提取结果并更新项目总览账本",
+      "params": {
+        "file_paths": {"type": "array"},
+        "project_name": {"type": "string"}
+      },
+      "required": ["file_paths"]
+    },
+    "update_project_ledger": {
+      "domain": "data_cleaning",
+      "description": "数据清洗及文件整理：将候选事实写入项目总览.md账本并执行规则决议",
+      "params": {
+        "project_name": {"type": "string"},
+        "facts": {"type": "object"},
+        "evidence": {"type": "array"},
+        "source_type": {"type": "string"}
+      },
+      "required": []
     },
     "scan_bid_notices": {
       "domain": "opportunity",
@@ -163,14 +191,64 @@
         "bid_context": {"type": "object"}
       },
       "required": ["bid_context"]
+    },
+    "cloudcc_session_probe": {
+      "domain": "cloudcc_crm",
+      "description": "检查 CloudCC 登录态和浏览器适配器可用性",
+      "params": {},
+      "required": []
+    },
+    "cloudcc_search_record": {
+      "domain": "cloudcc_crm",
+      "description": "只读查询 CloudCC CRM 对象记录",
+      "params": {
+        "object_type": {"type": "string"},
+        "query": {"type": "string"}
+      },
+      "required": ["object_type", "query"]
+    },
+    "cloudcc_duplicate_check": {
+      "domain": "cloudcc_crm",
+      "description": "基于证据检查 CloudCC 商机是否重复",
+      "params": {
+        "project_code": {"type": "string"},
+        "project_name": {"type": "string"},
+        "customer": {"type": "string"}
+      },
+      "required": []
+    },
+    "cloudcc_prepare_opportunity_draft": {
+      "domain": "cloudcc_crm",
+      "description": "根据 bid_context 准备 CRM 商机草稿（不写入）",
+      "params": {
+        "bid_context": {"type": "object"}
+      },
+      "required": ["bid_context"]
+    },
+    "cloudcc_fill_draft_gated": {
+      "domain": "cloudcc_crm",
+      "description": "受控填充 CRM 草稿并在提交前停止",
+      "params": {
+        "draft": {"type": "object"}
+      },
+      "required": ["draft"]
+    },
+    "cloudcc_readback_record": {
+      "domain": "cloudcc_crm",
+      "description": "提交后回读 CloudCC CRM 记录并校验字段",
+      "params": {
+        "record_id": {"type": "string"},
+        "record_url": {"type": "string"}
+      },
+      "required": []
     }
   },
   "validation_rules": [
     {
       "id": "TOOL-001",
       "level": "error",
-      "check": "所有 20 个工具必须注册到 ToolRegistry",
-      "expected_count": 20
+      "check": "schema 声明的工具必须可注册到 debug_all_tools ToolRegistry；运行时只暴露 active skill 的工具子集",
+      "expected_count": 29
     },
     {
       "id": "TOOL-002",

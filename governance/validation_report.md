@@ -15,7 +15,7 @@
 校验脚本：`governance/validate.py tools`
 
 校验内容：
-- 实际注册的 20 个工具 vs schema 中的 20 个工具是否一致
+- 实际注册的 29 个工具 vs schema 中的 29 个工具是否一致
 - 是否有多余的工具（注册了但不在 schema 里）
 - 是否有缺失的工具（schema 里有但没注册）
 
@@ -59,7 +59,7 @@ python governance/validate.py all
 | 契约文件 | 版本 | 字段 |
 |---------|------|------|
 | `directory_contract.json` | 1.0.0 | required_dirs, validation_rules |
-| `project_schema.json` | 1.0.0 | tools (20), validation_rules |
+| `project_schema.json` | 1.0.0 | tools (29), validation_rules |
 | `validate.py` | 1.0.0 | dirs / tools / all |
 
 变更契约时同步更新 `version` 字段 + 本文档。

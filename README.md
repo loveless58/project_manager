@@ -2,7 +2,7 @@
 
 基于 Loop Engineering Framework 的项目全生命周期管理 Agent。
 
-集成项目管理、数据清洗、商机检测三大能力。
+集成项目管理、数据清洗、商机检测、CloudCC/CRM 受控自动化四个工具域。
 
 ## 快速开始
 
@@ -64,10 +64,11 @@ project_manager/
 │   ├── tool_registry.py            # 工具注册系统
 │   ├── state_manager.py            # 状态管理
 │   └── llm_adapter.py              # LLM 适配层
-├── tools/                          # 业务工具层（20 个工具）
+├── tools/                          # 业务工具层（29 个工具）
 │   ├── project_tools.py            # 项目管理工具（10）
-│   ├── data_cleaning_tools.py      # 数据清洗工具（5）
-│   └── opportunity_tools.py        # 商机管理工具（5）
+│   ├── data_cleaning_tools.py      # 数据清洗及文件整理工具（8）
+│   ├── opportunity_tools.py        # 商机管理工具（5）
+│   └── cloudcc_crm_tools.py        # CloudCC/CRM 受控工具（6）
 ├── planner.py                      # 规划器（LLM / RuleBased）
 ├── governance/                     # 治理契约与校验
 ├── references/
@@ -85,7 +86,7 @@ project_manager/
 └── README.md
 ```
 
-## 核心能力（20 个工具）
+## 核心能力（29 个工具）
 
 ### 项目管理（10 个）
 
@@ -122,6 +123,17 @@ project_manager/
 | `generate_bid_context` | 生成 bid_context.json | 标准化输出 |
 | `create_crm_suggestion` | 生成 CRM 录入建议 | 准备录入 CRM |
 
+### CloudCC/CRM 受控工具域（6 个）
+
+| 工具 | 说明 | 安全边界 |
+|------|------|---------|
+| `cloudcc_session_probe` | 检查 CloudCC 登录态和浏览器适配器 | 只读，失败返回 blocked |
+| `cloudcc_search_record` | 查询 CRM 对象记录 | 只读，不能把 blocked 当成未查到 |
+| `cloudcc_duplicate_check` | 基于证据检查商机重复 | 只读，必须保留 evidence |
+| `cloudcc_prepare_opportunity_draft` | 准备 CRM 商机草稿 | 本地草稿，不写 CRM |
+| `cloudcc_fill_draft_gated` | 填充草稿并停在提交前 | 必须 needs_confirmation |
+| `cloudcc_readback_record` | 写入后回读校验 | 只在确认提交后使用 |
+
 ## 与 bid-files 的关系
 
 本 Agent 是 `bid-files` 技能的智能编排层：
@@ -136,6 +148,7 @@ project_manager/
 - `项目文件/` 目录结构已初始化（项目投标/项目执行/项目归档）
 - 数据清洗工作台目录（`数据清洗工作台/00-原始文件（待处理）`）
 - 新机会目录（`新机会与线索/招标公告/`）
+- CloudCC/CRM 默认使用 fake adapter；真实浏览器接入必须先通过登录态探针、证据采集和提交前确认。
 
 ## 环境变量
 

@@ -4,7 +4,7 @@ Project Manager Loop 测试套件
 
 验证内容：
 1. 模块导入（common/ 已内联）
-2. 工具注册（20个工具）
+2. 工具注册（29个工具）
 3. LoopEngine 在 RuleBasedPlanner 下的完整运行
 4. 各场景的典型路径验证
 5. 状态管理（sliding_window）
@@ -147,6 +147,172 @@ class TestToolRegistry(unittest.TestCase):
         self.assertEqual(tool.parameters["b"]["type"], "integer")
         # b 有默认值，不应在 required 中
         self.assertNotIn("b", tool.required_params)
+
+    def test_main_registry_includes_cloudcc_domain(self):
+        """主注册表包含 CloudCC/CRM 受控工具域"""
+        import main
+
+        reg = main._build_registry()
+        tools = set(reg.list_tools())
+        self.assertEqual(len(tools), 29)
+        self.assertIn("cloudcc_session_probe", tools)
+        self.assertIn("cloudcc_duplicate_check", tools)
+        self.assertIn("cloudcc_fill_draft_gated", tools)
+        self.assertIn("update_project_ledger", tools)
+        self.assertIn("process_documents_to_ledger", tools)
+
+    def test_data_cleaning_skill_registry_exposes_only_its_tools(self):
+        """渐进式披露：激活数据清洗及文件整理 skill 时只暴露本 skill 工具"""
+        import main
+
+        reg = main._build_registry_for_skill("data_cleaning_file_organization")
+        self.assertEqual(set(reg.list_tools()), {
+            "scan_raw_files",
+            "extract_pdf",
+            "extract_document",
+            "classify_document",
+            "batch_process",
+            "save_structured",
+            "process_documents_to_ledger",
+            "update_project_ledger",
+        })
+
+    def test_route_skill_selects_data_cleaning_file_organization(self):
+        """项目账本/项目总览类请求路由到数据清洗及文件整理 skill"""
+        import main
+
+        self.assertEqual(
+            main._route_skill("跑通数据清洗及文件整理项目总览账本循环"),
+            "data_cleaning_file_organization",
+        )
+
+
+class TestCloudCCCrmTools(unittest.TestCase):
+    """验证 CloudCC/CRM fake adapter 的安全边界"""
+
+    def test_session_probe_blocks_without_adapter(self):
+        from tools.cloudcc_crm_tools import CloudCCCrmTools
+
+        result = CloudCCCrmTools().cloudcc_session_probe()
+        self.assertEqual(result["schema_version"], "cloudcc.crm.result.v1")
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["blocked_reason"], "browser_adapter_unavailable")
+        self.assertFalse(result["secrets_included"])
+
+    def test_duplicate_check_blocked_is_not_no_match(self):
+        from tools.cloudcc_crm_tools import CloudCCCrmTools
+
+        result = CloudCCCrmTools().cloudcc_duplicate_check(project_code="P-001")
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["evidence"]["duplicate_conclusion"], "blocked")
+        self.assertFalse(result["evidence"]["search_executed"])
+
+    def test_fill_draft_requires_confirmation(self):
+        from tools.cloudcc_crm_tools import CloudCCCrmTools
+
+        result = CloudCCCrmTools().cloudcc_fill_draft_gated({"opportunity_name": "测试项目"})
+        self.assertEqual(result["status"], "needs_confirmation")
+        self.assertEqual(result["pending_confirmation"]["action"], "submit_opportunity")
+        self.assertFalse(result["data"]["crm_write_performed"])
+
+
+class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
+    """Verify the data-cleaning file-organization ledger loop primitives."""
+
+    def test_project_ledger_accepts_local_file_fact_and_writes_overview(self):
+        import tempfile
+        from ledger import ProjectLedger
+
+        with tempfile.TemporaryDirectory() as td:
+            ledger = ProjectLedger(base_dir=td)
+            result = ledger.apply_patch({
+                "project_name": "测试项目",
+                "source_type": "local_file",
+                "facts": {"project_name": "测试项目", "customer_name": "测试客户"},
+                "evidence": [{
+                    "field": "customer_name",
+                    "source_ref": "招标文件.pdf#page=1",
+                    "extract_method": "pdf_text",
+                    "confidence": 0.90,
+                }],
+            })
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["decisions"]["customer_name"]["status"], "verified")
+            self.assertTrue(os.path.exists(result["markdown_path"]))
+            with open(result["markdown_path"], "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("# 项目总览：测试项目", content)
+            self.assertIn("customer_name", content)
+            self.assertIn("测试客户", content)
+
+    def test_project_ledger_records_conflict_without_overwriting_higher_weight_fact(self):
+        import tempfile
+        from ledger import ProjectLedger
+
+        with tempfile.TemporaryDirectory() as td:
+            ledger = ProjectLedger(base_dir=td)
+            first = ledger.apply_patch({
+                "project_name": "冲突项目",
+                "source_type": "human_correction",
+                "facts": {"customer_name": "正式客户名称"},
+            })
+            second = ledger.apply_patch({
+                "project_name": "冲突项目",
+                "source_type": "xlsx_summary",
+                "facts": {"customer_name": "客户简称"},
+            })
+
+            self.assertEqual(first["decisions"]["customer_name"]["status"], "verified")
+            self.assertEqual(second["decisions"]["customer_name"]["status"], "conflict")
+            self.assertEqual(second["current_facts"]["customer_name"], "正式客户名称")
+            self.assertEqual(second["conflicts"][0]["field"], "customer_name")
+
+    def test_update_project_ledger_tool_returns_structured_artifacts(self):
+        import tempfile
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            tools = DataCleaningTools(workspace_dir=td)
+            result = tools.update_project_ledger(
+                project_name="工具项目",
+                facts={"project_name": "工具项目", "bid_status": "已报名"},
+                evidence=[{"field": "bid_status", "source_ref": "项目总览.md#状态", "confidence": 0.80}],
+                source_type="local_file",
+            )
+
+            self.assertEqual(result["schema_version"], "project_ledger.update.v1")
+            self.assertEqual(result["status"], "success")
+            self.assertTrue(os.path.exists(result["artifacts"]["project_overview_md"]))
+            self.assertIn("bid_status", result["decisions"])
+
+    def test_process_docx_documents_to_ledger_outputs_structured_artifacts(self):
+        import tempfile
+        from docx import Document
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            doc_path = os.path.join(td, "采购公告.docx")
+            doc = Document()
+            doc.add_paragraph("航天时代飞鸿技术有限公司")
+            doc.add_paragraph("《采购公告》")
+            doc.add_paragraph("项目名称：")
+            doc.add_paragraph("打印刻录系统采购项目")
+            doc.save(doc_path)
+
+            tools = DataCleaningTools(workspace_dir=td)
+            result = tools.process_documents_to_ledger([doc_path])
+
+            self.assertEqual(result["schema_version"], "data_cleaning.documents_to_ledger.v1")
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["processed"], 1)
+            self.assertEqual(result["project_name"], "打印刻录系统采购项目")
+            self.assertTrue(os.path.exists(result["structured_outputs"][0]))
+            self.assertTrue(os.path.exists(result["artifacts"]["project_overview_md"]))
+            with open(result["artifacts"]["project_overview_md"], "r", encoding="utf-8") as f:
+                content = f.read()
+            self.assertIn("打印刻录系统采购项目", content)
+            self.assertIn("customer_name", content)
 
 
 # ────────────────────────────────────────────
@@ -536,6 +702,8 @@ if __name__ == "__main__":
     
     suite.addTests(loader.loadTestsFromTestCase(TestModuleImports))
     suite.addTests(loader.loadTestsFromTestCase(TestToolRegistry))
+    suite.addTests(loader.loadTestsFromTestCase(TestCloudCCCrmTools))
+    suite.addTests(loader.loadTestsFromTestCase(TestDataCleaningFileOrganizationLedger))
     suite.addTests(loader.loadTestsFromTestCase(TestLoopEngine))
     suite.addTests(loader.loadTestsFromTestCase(TestStateManager))
     suite.addTests(loader.loadTestsFromTestCase(TestReActPrompt))
