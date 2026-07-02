@@ -1,0 +1,15 @@
+{
+  "schema_version": "opportunity_management.workset.v1",
+  "task_type": "bid_notice_intake",
+  "inputs": {
+    "notice_source": "local_file"
+  },
+  "permission_boundary": {
+    "crm_write_allowed": false,
+    "requires_human_confirmation": true
+  },
+  "done_when": [
+    "bid_context_written",
+    "crm_suggestion_written"
+  ]
+}

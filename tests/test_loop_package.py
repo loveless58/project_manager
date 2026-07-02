@@ -1,4 +1,5 @@
 import json
+import importlib
 import os
 import subprocess
 import sys
@@ -120,6 +121,25 @@ class TestDataCleaningLoopPackage(unittest.TestCase):
                 self.assertEqual(package.skill_name, skill_name)
                 self.assertEqual(package.expected_tools, expected_tools)
                 self.assertTrue(package.manifest["route_keywords"])
+
+    def test_all_loop_packages_have_executable_validators_and_fixtures(self):
+        from loop_packages import discover_loop_packages
+
+        packages = discover_loop_packages()
+
+        for skill_name, package in packages.items():
+            with self.subTest(skill_name=skill_name):
+                self.assertTrue(package.manifest["validators"])
+                self.assertTrue(package.manifest["fixtures"])
+                validators = importlib.import_module(f"loop_packages.{skill_name}.validators")
+                manifest_result = validators.validate_loop_package(package.path)
+                self.assertEqual(manifest_result["status"], "pass", manifest_result)
+
+                workset_schema = validators.load_json(package.path / package.manifest["workset_schema"])
+                fixture_path = package.path / package.manifest["fixtures"][0]
+                workset = validators.load_json(fixture_path)
+                workset_result = validators.validate_workset(workset, workset_schema)
+                self.assertEqual(workset_result["status"], "pass", workset_result)
 
     def test_validate_all_loop_packages_reports_runtime_alignment(self):
         from loop_packages import validate_all_loop_packages

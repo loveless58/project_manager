@@ -1,0 +1,15 @@
+{
+  "schema_version": "project_management.workset.v1",
+  "task_type": "status_rollup",
+  "inputs": {
+    "project_filter": "active"
+  },
+  "permission_boundary": {
+    "external_write_allowed": false,
+    "requires_human_confirmation": false
+  },
+  "done_when": [
+    "project_state_read",
+    "response_written"
+  ]
+}

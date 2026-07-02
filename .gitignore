@@ -14,6 +14,7 @@ state/runs/
 state/full_loop_simulation_workspace/
 state/real_file_simulation_workspace/
 state/simulation_inputs/
+state/goal_validation_latest/
 state/subagent_check_*/
 state/subagent_check_*.md
 state/structured_documents/

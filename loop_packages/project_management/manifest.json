@@ -38,8 +38,14 @@
     "write_response"
   ],
   "runtime_registrar": "_register_project_management_tools",
-  "validators": [],
-  "fixtures": [],
+  "validators": [
+    "validate_loop_package",
+    "validate_workset",
+    "validate_trace_contract"
+  ],
+  "fixtures": [
+    "fixtures/workset_minimal.json"
+  ],
   "hard_rules": [
     "active_skill_tools_only",
     "blocked_is_not_success",

@@ -1,0 +1,15 @@
+{
+  "schema_version": "cloudcc_crm.workset.v1",
+  "task_type": "duplicate_check",
+  "inputs": {
+    "object_type": "opportunity"
+  },
+  "permission_boundary": {
+    "browser_adapter_required": true,
+    "submit_requires_confirmation": true
+  },
+  "done_when": [
+    "evidence_written",
+    "unsafe_write_blocked_or_confirmed"
+  ]
+}
