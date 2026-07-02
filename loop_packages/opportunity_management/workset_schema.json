@@ -1,0 +1,13 @@
+{
+  "schema_version": "agentplatform.workset_schema.v1",
+  "workset_schema_version": "opportunity_management.workset.v1",
+  "description": "Minimal opportunity-management workset contract.",
+  "required_top_level": ["schema_version", "task_type", "inputs", "permission_boundary", "done_when"],
+  "properties": {
+    "schema_version": {"const": "opportunity_management.workset.v1"},
+    "task_type": {"enum": ["bid_notice_intake", "duplicate_check", "context_generation"]},
+    "inputs": {"required": []},
+    "permission_boundary": {"required": ["crm_write_allowed", "requires_human_confirmation"]},
+    "done_when": {"required_items": ["bid_context_written", "crm_suggestion_written"]}
+  }
+}

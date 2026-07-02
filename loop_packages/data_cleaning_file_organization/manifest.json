@@ -1,0 +1,75 @@
+{
+  "schema_version": "agentplatform.loop_package.v1",
+  "name": "data_cleaning_file_organization",
+  "version": "0.1.0",
+  "description": "Loop package for preparing file-organization run packages, project-ledger candidate facts, review queues, archive plans, and derived progress artifacts.",
+  "route_keywords": [
+    "数据清洗及文件整理",
+    "项目总览",
+    "项目账本",
+    "ledger",
+    "扫描文件",
+    "解析文档",
+    "整理文件",
+    "文件整理",
+    "归档文件",
+    "人工复核",
+    "PDF",
+    "OCR"
+  ],
+  "skill_interface": {
+    "skill_name": "data_cleaning_file_organization",
+    "skill_doc": "skills/data_cleaning_file_organization.md",
+    "entrypoint": "main.run",
+    "active_registry": "main._build_registry_for_skill"
+  },
+  "loop_policy": {
+    "policy_module": "skill_policies.data_cleaning_file_organization",
+    "planner_mode": "rule_fallback",
+    "terminal_statuses": ["completed", "blocked", "needs_confirmation", "failed"]
+  },
+  "workset_schema": "workset_schema.json",
+  "trace_contract": "trace_contract.json",
+  "runtime_tools": [
+    "scan_raw_files",
+    "extract_pdf",
+    "extract_document",
+    "run_ocr",
+    "classify_document",
+    "batch_process",
+    "save_structured",
+    "process_documents_to_ledger",
+    "prepare_file_organization_run",
+    "apply_human_review",
+    "execute_archive_plan",
+    "import_project_detail_workbook",
+    "generate_bid_progress_html",
+    "update_project_ledger"
+  ],
+  "validators": [
+    "validate_loop_package",
+    "validate_workset",
+    "validate_trace_contract",
+    "validate_run_artifacts"
+  ],
+  "fixtures": [
+    "fixtures/workset_minimal.json"
+  ],
+  "hard_rules": [
+    "blocked_is_not_success",
+    "needs_confirmation_stops_loop",
+    "readonly_prepare_does_not_move_source_files",
+    "archive_requires_confirmed_true",
+    "human_review_required_blocks_archive_until_review_artifact_exists"
+  ],
+  "soft_guidance_sources": [
+    "skills/data_cleaning_file_organization.md"
+  ],
+  "derived_sources": [
+    "ToolRegistry",
+    "main.SKILL_TOOL_MAP",
+    "governance/project_schema.json",
+    "tests/test_loop.py",
+    "tests/test_goal_validation.py"
+  ]
+}

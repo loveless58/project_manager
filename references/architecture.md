@@ -54,13 +54,21 @@ Example for `data_cleaning_file_organization`:
 ```text
 scan_raw_files
 extract_pdf
+extract_document
+run_ocr
 classify_document
 batch_process
 save_structured
+process_documents_to_ledger
+prepare_file_organization_run
+apply_human_review
+execute_archive_plan
+import_project_detail_workbook
+generate_bid_progress_html
 update_project_ledger
 ```
 
-The full 27-tool registry still exists for governance validation:
+The full 35-tool registry still exists for governance validation:
 
 ```text
 main._build_registry()
@@ -87,12 +95,36 @@ candidate facts + evidence
 
 This is the minimum usable product for the project ledger architecture.
 
+## Observation Evaluation Contract
+
+Every tool round produces both raw evidence and a planner-facing evaluation:
+
+```text
+Observation: <raw tool output>
+Observation Evaluation: {
+  "schema_version": "loop.observation_evaluation.v1",
+  "status": "success | partial | blocked | failed | needs_confirmation",
+  "error_code": "...",
+  "retryable": true | false,
+  "needs_confirmation": true | false,
+  "next_actions": [...],
+  "summary": "..."
+}
+```
+
+`LoopEngine` stores the same evaluation on `LoopRound.observation_evaluation`
+and derives `round.status` from it. The next planner round must consume the
+evaluation before making another action decision. `needs_confirmation` is a hard
+human gate; it is not a retryable tool failure. `blocked` means evidence is
+insufficient or a capability is unavailable; it must not be reinterpreted as a
+successful negative result.
+
 ## Boundaries
 
 - Skill files define business capability contracts.
 - Tools execute bounded actions.
 - `ProjectLedger` manages project facts, evidence, conflicts, and decision logs.
-- `LoopEngine` owns retry, budget, trace, dedup, and stop conditions.
+- `LoopEngine` owns retry, budget, trace, dedup, stop conditions, and observation evaluation.
 - LLM output can recommend or classify, but cannot directly overwrite ledger facts.
 - External-system writes, including CloudCC/CRM, must remain gated.
 

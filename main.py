@@ -29,6 +29,7 @@ SKILL_TOOL_MAP = {
         "scan_raw_files",
         "extract_pdf",
         "extract_document",
+        "run_ocr",
         "classify_document",
         "batch_process",
         "save_structured",
@@ -146,14 +147,17 @@ def _register_project_management_tools(reg: ToolRegistry) -> None:
                  {"content": {"type": "string"}, "filename": {"type": "string"}}, ["content", "filename"])
 
 
-def _register_data_cleaning_file_organization_tools(reg: ToolRegistry) -> None:
+def _register_data_cleaning_file_organization_tools(reg: ToolRegistry, workspace_dir: Optional[str] = None) -> None:
     """Register data-cleaning and project-ledger tools into the provided registry."""
-    dt = _dc_tools_mod.DataCleaningTools(workspace_dir=os.path.join(_module_dir, "state"))
+    dt = _dc_tools_mod.DataCleaningTools(workspace_dir=workspace_dir or os.path.join(_module_dir, "state"))
 
     reg.register("scan_raw_files", "扫描原始文件目录", dt.scan_raw_files, {}, [])
     reg.register("extract_pdf", "提取PDF结构化数据", dt.extract_pdf,
                  {"file_path": {"type": "string"}}, ["file_path"])
     reg.register("extract_document", "提取 Word/PDF/图片文件的结构化数据", dt.extract_document,
+                 {"file_path": {"type": "string"}}, ["file_path"])
+    reg.register("run_ocr", "对图片或扫描 PDF 执行 OCR，输出 ocr.result.v1，不写入账本",
+                 dt.run_ocr,
                  {"file_path": {"type": "string"}}, ["file_path"])
     reg.register("classify_document", "根据文件名/内容分类文档", dt.classify_document,
                  {"file_path": {"type": "string"}}, ["file_path"])
@@ -260,28 +264,37 @@ def _build_registry() -> ToolRegistry:
 
 def _route_skill(goal: str) -> str:
     """Level 0 progressive disclosure: choose the active skill from the user goal."""
-    if any(k in goal for k in ["数据清洗及文件整理", "项目总览", "项目账本", "ledger", "扫描文件", "解析文档", "整理文件", "文件整理", "归档文件", "人工复核", "PDF", "OCR"]):
-        return "data_cleaning_file_organization"
-    if any(k in goal for k in ["CloudCC", "cloudcc", "CRM", "crm"]):
-        return "cloudcc_crm"
-    if any(k in goal for k in ["招标公告", "招标", "商机", "检测商机", "重复检查"]):
-        return "opportunity_management"
-    return "project_management"
+    from loop_packages import route_skill_from_packages
+
+    return route_skill_from_packages(goal)
 
 
-def _build_registry_for_skill(skill_name: str) -> ToolRegistry:
+def _build_registry_for_skill(skill_name: str, data_workspace_dir: Optional[str] = None) -> ToolRegistry:
     """Level 1/2 progressive disclosure: expose only tools owned by the active skill."""
     register_tools = SKILL_REGISTRARS.get(skill_name)
     if register_tools is None:
         raise ValueError(f"Unknown skill: {skill_name}")
 
     reg = ToolRegistry()
-    register_tools(reg)
-    expected = SKILL_TOOL_MAP[skill_name]
+    if skill_name == "data_cleaning_file_organization":
+        register_tools(reg, workspace_dir=data_workspace_dir)
+    else:
+        register_tools(reg)
+    expected = _expected_tools_for_skill(skill_name)
     actual = reg.list_tools()
     if actual != expected:
         raise ValueError(f"Skill '{skill_name}' registry drift: expected {expected}, got {actual}")
     return reg
+
+
+def _expected_tools_for_skill(skill_name: str) -> List[str]:
+    """Resolve runtime tool contract from a loop package when one exists."""
+    try:
+        from loop_packages import get_loop_package
+
+        return get_loop_package(skill_name).expected_tools
+    except KeyError:
+        return SKILL_TOOL_MAP[skill_name]
 
 
 def _skills_prompt_text() -> str:
@@ -310,7 +323,12 @@ def _make_api_llm():
     )
 
 
-def run(goal: str, planner_mode: str = "auto") -> Dict[str, Any]:
+def run(
+    goal: str,
+    planner_mode: str = "auto",
+    data_workspace_dir: Optional[str] = None,
+    trace_dir: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Agent 执行器入口。由 agent.md 触发后调用。
 
@@ -320,6 +338,9 @@ def run(goal: str, planner_mode: str = "auto") -> Dict[str, Any]:
             - "auto"（默认）：检测 LLM_API_KEY 环境变量，有则用 LLMPlanner，无则用 RuleBasedPlanner
             - "llm"：强制使用 LLM 实时规划（需要 LLM_API_KEY）
             - "rule"：强制使用规则规划器（测试/演示用，无需 API key）
+        data_workspace_dir: 可选。数据清洗及文件整理 skill 的隔离工作区。
+            不传时沿用项目内 state/ 默认目录。
+        trace_dir: 可选。Loop trace 输出目录。不传时沿用项目内 logs/ 默认目录。
 
     Returns:
         LoopTrace 的执行摘要，包含状态、轮数、结果、token 消耗等。
@@ -334,7 +355,7 @@ def run(goal: str, planner_mode: str = "auto") -> Dict[str, Any]:
     print(f"{'='*60}")
 
     # 1. 渐进式披露：先路由 Skill，再只暴露该 Skill 的工具。
-    reg = _build_registry_for_skill(active_skill)
+    reg = _build_registry_for_skill(active_skill, data_workspace_dir=data_workspace_dir)
     memory_text = _skills_prompt_text() + f"\n\nActive Skill: {active_skill}\n"
     sys_prompt = build_react_prompt(goal=goal, tools_text=reg.to_prompt_text(), memory_text=memory_text)
 
@@ -353,8 +374,8 @@ def run(goal: str, planner_mode: str = "auto") -> Dict[str, Any]:
         return planner.get_response(msgs)
 
     # 4. 运行循环
-    trace_dir = os.path.join(os.path.dirname(__file__), "logs")
-    os.makedirs(trace_dir, exist_ok=True)
+    actual_trace_dir = trace_dir or os.path.join(os.path.dirname(__file__), "logs")
+    os.makedirs(actual_trace_dir, exist_ok=True)
     engine = LoopEngine(
         agent_name="project_manager_agent",
         max_rounds=15,
@@ -363,7 +384,7 @@ def run(goal: str, planner_mode: str = "auto") -> Dict[str, Any]:
         state_mode="sliding_window",
         sliding_window_size=3,
         retry_max=2,
-        trace_dir=trace_dir,
+        trace_dir=actual_trace_dir,
     )
 
     trace = engine.run(
@@ -375,8 +396,10 @@ def run(goal: str, planner_mode: str = "auto") -> Dict[str, Any]:
     trace.metadata["active_skill"] = active_skill
     trace.metadata["disclosure_mode"] = "progressive"
     trace.metadata["exposed_tools"] = reg.list_tools()
+    if data_workspace_dir and active_skill == "data_cleaning_file_organization":
+        trace.metadata["data_workspace_dir"] = data_workspace_dir
 
-    trace.save(os.path.join(trace_dir, f"project_manager_{trace.trace_id}.json"))
+    trace.save(os.path.join(actual_trace_dir, f"project_manager_{trace.trace_id}.json"))
     trace.print_summary()
     return trace.to_dict()
 

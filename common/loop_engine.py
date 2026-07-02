@@ -1,4 +1,5 @@
 import json
+import ast
 import time
 import uuid
 from typing import List, Dict, Any, Optional, Callable
@@ -17,6 +18,7 @@ class LoopRound:
     action: str = ""
     action_input: Dict[str, Any] = field(default_factory=dict)
     observation: str = ""
+    observation_evaluation: Dict[str, Any] = field(default_factory=dict)
     status: str = "running"  # running, success, failed, blocked
     token_cost: int = 0
 
@@ -174,6 +176,96 @@ class LoopEngine:
             f"[SUGGESTION] Please try a different approach or report this failure."
         )
         return structured_error, False
+
+    def _evaluate_observation(self, observation: str, success: bool) -> Dict[str, Any]:
+        """Classify a raw tool observation into a planner-facing control signal."""
+        parsed = self._parse_observation_payload(observation)
+        status = "success" if success else "failed"
+        error_code = ""
+        retryable = not success
+        needs_confirmation = False
+        next_actions: List[str] = []
+        summary = observation[:300]
+
+        if isinstance(parsed, dict):
+            raw_status = str(parsed.get("status") or "").lower()
+            ok = parsed.get("ok")
+            if raw_status in {"success", "partial", "blocked", "failed", "needs_confirmation"}:
+                status = raw_status
+            elif ok is False:
+                status = "failed"
+
+            blocked_reason = parsed.get("blocked_reason")
+            error_text = str(parsed.get("error") or "")
+            if blocked_reason:
+                error_code = str(blocked_reason)
+            elif error_text:
+                error_code = error_text.split(":", 1)[0].strip()
+
+            needs_confirmation = status == "needs_confirmation" or bool(parsed.get("pending_confirmation"))
+            if needs_confirmation:
+                status = "needs_confirmation"
+            if status == "blocked":
+                retryable = False
+            elif status == "needs_confirmation":
+                retryable = False
+            elif status == "partial":
+                retryable = False
+            elif status == "failed":
+                retryable = bool(parsed.get("retryable", True))
+            else:
+                retryable = False
+
+            next_steps = parsed.get("next_steps") or parsed.get("next_actions") or []
+            if isinstance(next_steps, list):
+                next_actions = [str(item) for item in next_steps]
+            elif next_steps:
+                next_actions = [str(next_steps)]
+            summary = self._summarize_payload(parsed, fallback=summary)
+        else:
+            lowered = observation.lower()
+            if observation.startswith("[DEDUP]"):
+                status = "blocked"
+                error_code = "dedup_threshold"
+                retryable = False
+            elif observation.startswith("[ERROR]") or observation.startswith("[TOOL FAILED") or "tool failed" in lowered:
+                status = "failed"
+                error_code = "tool_failed"
+                retryable = True
+
+        return {
+            "schema_version": "loop.observation_evaluation.v1",
+            "status": status,
+            "error_code": error_code,
+            "retryable": retryable,
+            "needs_confirmation": needs_confirmation,
+            "next_actions": next_actions,
+            "summary": summary,
+        }
+
+    def _parse_observation_payload(self, observation: str) -> Any:
+        try:
+            return json.loads(observation)
+        except (json.JSONDecodeError, TypeError):
+            pass
+        try:
+            return ast.literal_eval(observation)
+        except (ValueError, SyntaxError, TypeError):
+            return None
+
+    def _summarize_payload(self, payload: Dict[str, Any], fallback: str) -> str:
+        parts = []
+        for key in ("schema_version", "status", "blocked_reason", "error", "operation"):
+            value = payload.get(key)
+            if value:
+                parts.append(f"{key}={value}")
+        return "; ".join(parts) if parts else fallback
+
+    def _round_status_from_evaluation(self, evaluation: Dict[str, Any], success: bool) -> str:
+        status = evaluation.get("status", "success" if success else "failed")
+        if status in {"blocked", "needs_confirmation", "partial", "failed"}:
+            return status
+        return "success" if success else "failed"
     
     def run(
         self,
@@ -319,6 +411,7 @@ class LoopEngine:
             
             # 执行工具
             observation, success = self._execute_with_retry(action, action_input, tools)
+            observation_evaluation = self._evaluate_observation(observation, success)
             
             round_record = LoopRound(
                 intent=goal,
@@ -326,7 +419,8 @@ class LoopEngine:
                 action=action,
                 action_input=action_input,
                 observation=observation,
-                status="success" if success else "failed",
+                observation_evaluation=observation_evaluation,
+                status=self._round_status_from_evaluation(observation_evaluation, success),
                 token_cost=token_cost,
             )
             trace.rounds.append(round_record)
@@ -338,6 +432,11 @@ class LoopEngine:
             # 构建下一轮的消息
             messages.append({"role": "assistant", "content": response_text})
             messages.append({"role": "user", "content": f"Observation: {observation}"})
+            messages.append({
+                "role": "user",
+                "content": "Observation Evaluation: "
+                + json.dumps(observation_evaluation, ensure_ascii=False, sort_keys=True),
+            })
             
             print(f"   Round {round_idx}: [{round_record.status}] {action} → {observation[:60]}...")
         

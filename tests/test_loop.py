@@ -154,7 +154,7 @@ class TestToolRegistry(unittest.TestCase):
 
         reg = main._build_registry()
         tools = set(reg.list_tools())
-        self.assertEqual(len(tools), 34)
+        self.assertEqual(len(tools), 35)
         self.assertIn("cloudcc_session_probe", tools)
         self.assertIn("cloudcc_duplicate_check", tools)
         self.assertIn("cloudcc_fill_draft_gated", tools)
@@ -175,6 +175,7 @@ class TestToolRegistry(unittest.TestCase):
             "scan_raw_files",
             "extract_pdf",
             "extract_document",
+            "run_ocr",
             "classify_document",
             "batch_process",
             "save_structured",
@@ -186,6 +187,62 @@ class TestToolRegistry(unittest.TestCase):
             "generate_bid_progress_html",
             "update_project_ledger",
         })
+
+    def test_each_skill_registry_exposes_only_declared_tools(self):
+        """每个 active skill 的运行时注册表都必须严格等于声明的工具集合"""
+        import main
+
+        for skill_name, expected_tools in main.SKILL_TOOL_MAP.items():
+            with self.subTest(skill_name=skill_name):
+                reg = main._build_registry_for_skill(skill_name)
+                self.assertEqual(reg.list_tools(), expected_tools)
+
+    def test_each_skill_has_level_1_contract_file(self):
+        """Level 1 skill docs describe boundaries, not a second full tool registry."""
+        from pathlib import Path
+        import main
+
+        skills_dir = Path(PROJECT_DIR) / "skills"
+        for skill_name, expected_tools in main.SKILL_TOOL_MAP.items():
+            with self.subTest(skill_name=skill_name):
+                contract_path = skills_dir / f"{skill_name}.md"
+                self.assertTrue(contract_path.exists(), f"missing skill contract: {contract_path}")
+                content = contract_path.read_text(encoding="utf-8")
+                self.assertIn(f"name: {skill_name}", content)
+                self.assertIn("## 定位", content)
+                self.assertIn("## 硬规则", content)
+                self.assertIn("ToolRegistry", content)
+                listed_tools = [tool_name for tool_name in expected_tools if f"`{tool_name}`" in content]
+                self.assertLess(
+                    len(listed_tools),
+                    len(expected_tools),
+                    f"{skill_name} doc should not duplicate the full active tool registry",
+                )
+
+    def test_skill_index_marks_all_runtime_skills_as_active_contracts(self):
+        """Skill index 不能把已经可路由和可注册的运行时 skill 标为 planned"""
+        from pathlib import Path
+        import main
+
+        content = (Path(PROJECT_DIR) / "skills" / "project_manager.md").read_text(encoding="utf-8")
+        for skill_name in main.SKILL_TOOL_MAP:
+            with self.subTest(skill_name=skill_name):
+                self.assertIn(f"`{skill_name}`", content)
+        self.assertNotIn("planned | existing tools, contract not split yet", content)
+
+    def test_route_skill_selects_all_runtime_domains(self):
+        """Level 0 路由应覆盖所有运行时 skill 域"""
+        import main
+
+        cases = {
+            "今天有哪些项目风险": "project_management",
+            "解析招标公告并生成商机上下文": "opportunity_management",
+            "CloudCC 商机查重": "cloudcc_crm",
+            "整理文件并更新项目账本": "data_cleaning_file_organization",
+        }
+        for goal, expected_skill in cases.items():
+            with self.subTest(goal=goal):
+                self.assertEqual(main._route_skill(goal), expected_skill)
 
     def test_route_skill_selects_data_cleaning_file_organization(self):
         """项目账本/项目总览类请求路由到数据清洗及文件整理 skill"""
@@ -210,6 +267,70 @@ class TestToolRegistry(unittest.TestCase):
         self.assertIn("Action: prepare_file_organization_run", response)
         payload = json.loads(response.split("Action Input: ", 1)[1])
         self.assertEqual(payload["file_paths"], ["C:\\tmp\\demo.docx"])
+
+    def test_rule_planner_delegates_file_organization_to_skill_policy(self):
+        """文件整理 fallback 流程应由 skill policy 承担，避免 planner 继续膨胀。"""
+        from planner import RuleBasedPlanner
+        from skill_policies import get_policy
+
+        self.assertIsNotNone(get_policy("data_cleaning_file_organization"))
+        self.assertNotIn("_plan_project_ledger", type(RuleBasedPlanner("x")).__dict__)
+
+        planner = RuleBasedPlanner("帮我整理文件并归档 C:\\tmp\\demo.docx")
+        response, _ = planner.get_response([])
+
+        self.assertIn("Action: prepare_file_organization_run", response)
+
+    def test_rule_planner_delegates_cloudcc_to_skill_policy(self):
+        """CloudCC fallback 流程应由 skill policy 承担，planner 只负责委托。"""
+        from planner import RuleBasedPlanner
+        from skill_policies import get_policy
+
+        self.assertIsNotNone(get_policy("cloudcc_crm"))
+        self.assertNotIn("_plan_cloudcc_crm", type(RuleBasedPlanner("x")).__dict__)
+
+        planner = RuleBasedPlanner("CloudCC CRM 草稿填写")
+        response, _ = planner.get_response([])
+
+        self.assertIn("Action: cloudcc_session_probe", response)
+
+    def test_rule_planner_uses_observation_evaluation_control_signal(self):
+        """规则 planner 应读取 Observation Evaluation 控制信号，而不只靠原始错误文本"""
+        from planner import RuleBasedPlanner
+
+        planner = RuleBasedPlanner("解析扫描图片")
+        response, _ = planner.get_response([
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "解析扫描图片"},
+            {"role": "assistant", "content": "Thought: OCR\nAction: extract_document\nAction Input: {\"file_path\": \"scan.png\"}"},
+            {"role": "user", "content": "Observation: {'status': 'blocked'}"},
+            {
+                "role": "user",
+                "content": "Observation Evaluation: {\"status\": \"blocked\", \"error_code\": \"ocr_adapter_unavailable\", \"retryable\": false, \"needs_confirmation\": false}",
+            },
+        ])
+
+        self.assertIn("Final Answer:", response)
+        self.assertIn("ocr_adapter_unavailable", response)
+
+    def test_rule_planner_stops_on_needs_confirmation_evaluation(self):
+        """规则 planner 遇到 needs_confirmation 应停在人工确认，不继续执行外部写入"""
+        from planner import RuleBasedPlanner
+
+        planner = RuleBasedPlanner("CloudCC CRM 草稿填写")
+        response, _ = planner.get_response([
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "CloudCC CRM 草稿填写"},
+            {"role": "assistant", "content": "Thought: 填写\nAction: cloudcc_fill_draft_gated\nAction Input: {\"draft\": {}}"},
+            {"role": "user", "content": "Observation: {'status': 'needs_confirmation'}"},
+            {
+                "role": "user",
+                "content": "Observation Evaluation: {\"status\": \"needs_confirmation\", \"error_code\": \"\", \"retryable\": false, \"needs_confirmation\": true}",
+            },
+        ])
+
+        self.assertIn("Final Answer:", response)
+        self.assertIn("人工确认", response)
 
 
 class TestCloudCCCrmTools(unittest.TestCase):
@@ -531,6 +652,18 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertIn("BPM销售合同号/非订单编号", content)
             self.assertIn("工业互联网网络基础条件项目", content)
             self.assertIn("服务器区防火墙系统升级采购", content)
+            self.assertIn('<col class="col-index">', content)
+            self.assertIn('<col class="col-project">', content)
+            self.assertIn('<th class="center">序号</th>', content)
+            self.assertIn('<th class="project-heading">项目名称</th>', content)
+            self.assertIn('<table class="project-table">', content)
+            self.assertIn("table-layout: fixed", content)
+            self.assertNotIn("source-note", content)
+            self.assertNotIn("展示页是派生产物", content)
+            self.assertNotIn("当前筛选口径", content)
+            self.assertNotIn("项目账本总量", content)
+            self.assertNotIn("明细表、业务判断、下一步动作、复核标记均来自项目账本", content)
+            self.assertNotIn("th { position: sticky; top: 59px", content)
             self.assertIn("项目详情", content)
             self.assertIn("里程碑进度", content)
             self.assertIn("任务跟踪", content)
@@ -567,6 +700,82 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertIn(result["archive_actions"][0]["status"], {"ready", "needs_review"})
             self.assertTrue(os.path.exists(result["structured_outputs"][0]))
             self.assertTrue(os.path.exists(doc_path), "prepare step must not move source files")
+
+    def test_image_document_uses_ocr_adapter_and_updates_ledger(self):
+        import tempfile
+        from PIL import Image
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            image_path = os.path.join(td, "扫描公告.png")
+            Image.new("RGB", (320, 120), color="white").save(image_path)
+
+            def fake_ocr(path):
+                return {
+                    "status": "success",
+                    "engine": "fake-test-ocr",
+                    "text": "项目名称：图片OCR采购项目\n采购人：测试客户",
+                    "pages": [{"page": 1, "text": "项目名称：图片OCR采购项目\n采购人：测试客户", "confidence": 0.91}],
+                }
+
+            tools = DataCleaningTools(workspace_dir=td, ocr_adapter=fake_ocr)
+            result = tools.prepare_file_organization_run([image_path])
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["processed"], 1)
+            self.assertEqual(result["project_name"], "图片OCR采购项目")
+            self.assertEqual(result["archive_actions"][0]["project_name"], "图片OCR采购项目")
+            self.assertTrue(os.path.exists(result["structured_outputs"][0]))
+            with open(result["structured_outputs"][0], "r", encoding="utf-8") as f:
+                structured = json.load(f)
+            self.assertEqual(structured["extraction"]["extract_method"], "ocr")
+            self.assertEqual(structured["extraction"]["ocr"]["engine"], "fake-test-ocr")
+            self.assertEqual(structured["extraction"]["fields"]["project_name"], "图片OCR采购项目")
+
+    def test_image_document_without_ocr_adapter_is_blocked_not_silent_success(self):
+        import tempfile
+        from PIL import Image
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            image_path = os.path.join(td, "扫描公告.png")
+            Image.new("RGB", (320, 120), color="white").save(image_path)
+
+            tools = DataCleaningTools(workspace_dir=td)
+            extracted = tools.extract_document(image_path)
+
+            self.assertEqual(extracted["status"], "blocked")
+            self.assertEqual(extracted["blocked_reason"], "ocr_adapter_unavailable")
+            self.assertTrue(extracted["is_scanned"])
+            self.assertEqual(extracted["fields"], {})
+
+            result = tools.prepare_file_organization_run([image_path])
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["processed"], 0)
+            self.assertEqual(result["failed"], 1)
+            self.assertIn("ocr_adapter_unavailable", result["failures"][0]["error"])
+
+    def test_scanned_pdf_can_use_ocr_sidecar_text(self):
+        import tempfile
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            pdf_path = os.path.join(td, "扫描公告.pdf")
+            with open(pdf_path, "wb") as f:
+                f.write(b"%PDF-1.4\n% scanned fixture placeholder\n")
+            with open(f"{pdf_path}.ocr.txt", "w", encoding="utf-8") as f:
+                f.write("项目名称：扫描PDF采购项目\n采购人：测试客户")
+
+            tools = DataCleaningTools(workspace_dir=td)
+            result = tools.prepare_file_organization_run([pdf_path])
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["project_name"], "扫描PDF采购项目")
+            with open(result["structured_outputs"][0], "r", encoding="utf-8") as f:
+                structured = json.load(f)
+            self.assertEqual(structured["extraction"]["extract_method"], "ocr")
+            self.assertEqual(structured["extraction"]["ocr"]["engine"], "sidecar_text")
+            self.assertEqual(structured["extraction"]["fields"]["project_name"], "扫描PDF采购项目")
 
     def test_apply_human_review_corrects_ledger_business_judgement(self):
         import tempfile
@@ -744,6 +953,80 @@ class TestLoopEngine(unittest.TestCase):
         self.assertEqual(trace.rounds[0].status, "failed")
         self.assertIn("not found", trace.rounds[0].observation.lower())
         self.assertEqual(trace.status, "completed")
+
+    def test_observation_evaluation_is_fed_back_to_next_planner_round(self):
+        """工具 blocked/错误输出应被结构化评估后喂回下一轮 planner"""
+        captured_messages = []
+        responses = [
+            "Thought: 尝试 OCR\nAction: extract_document\nAction Input: {\"file_path\": \"scan.png\"}",
+            "Final Answer: OCR 被阻塞，需要提供 OCR adapter 或 sidecar 文本",
+        ]
+
+        def blocked_tool(file_path):
+            return {
+                "schema_version": "document.extract.v1",
+                "status": "blocked",
+                "blocked_reason": "ocr_adapter_unavailable",
+                "error": "ocr_adapter_unavailable: no OCR adapter configured",
+                "next_steps": ["provide_ocr_sidecar", "configure_ocr_adapter"],
+            }
+
+        def llm_call(msgs, tools):
+            captured_messages.append([dict(m) for m in msgs])
+            return responses[len(captured_messages) - 1], 50
+
+        engine = LoopEngine(agent_name="test", max_rounds=3)
+        trace = engine.run(
+            goal="解析扫描图片",
+            system_prompt="你是测试 Agent",
+            llm_call=llm_call,
+            tools={"extract_document": blocked_tool},
+        )
+
+        self.assertEqual(trace.rounds[0].status, "blocked")
+        self.assertEqual(trace.rounds[0].observation_evaluation["status"], "blocked")
+        self.assertEqual(trace.rounds[0].observation_evaluation["error_code"], "ocr_adapter_unavailable")
+        self.assertFalse(trace.rounds[0].observation_evaluation["retryable"])
+        second_round_text = "\n".join(m["content"] for m in captured_messages[1])
+        self.assertIn("Observation Evaluation:", second_round_text)
+        self.assertIn('"status": "blocked"', second_round_text)
+        self.assertIn('"error_code": "ocr_adapter_unavailable"', second_round_text)
+        self.assertEqual(trace.status, "completed")
+
+    def test_observation_evaluation_classifies_needs_confirmation(self):
+        """needs_confirmation 结果应明确提示下一轮需要人工确认而不是自动继续提交"""
+        captured_messages = []
+        responses = [
+            "Thought: 填写 CRM 草稿\nAction: cloudcc_fill_draft_gated\nAction Input: {\"draft\": {\"name\": \"测试\"}}",
+            "Final Answer: 已停在提交前确认状态",
+        ]
+
+        def confirmation_tool(draft):
+            return {
+                "schema_version": "cloudcc.crm.result.v1",
+                "status": "needs_confirmation",
+                "pending_confirmation": {"action": "submit_opportunity"},
+                "next_steps": ["ask_human_confirmation"],
+            }
+
+        def llm_call(msgs, tools):
+            captured_messages.append([dict(m) for m in msgs])
+            return responses[len(captured_messages) - 1], 50
+
+        engine = LoopEngine(agent_name="test", max_rounds=3)
+        trace = engine.run(
+            goal="CRM 草稿填写",
+            system_prompt="你是测试 Agent",
+            llm_call=llm_call,
+            tools={"cloudcc_fill_draft_gated": confirmation_tool},
+        )
+
+        self.assertEqual(trace.rounds[0].status, "needs_confirmation")
+        self.assertTrue(trace.rounds[0].observation_evaluation["needs_confirmation"])
+        self.assertFalse(trace.rounds[0].observation_evaluation["retryable"])
+        second_round_text = "\n".join(m["content"] for m in captured_messages[1])
+        self.assertIn('"status": "needs_confirmation"', second_round_text)
+        self.assertIn('"needs_confirmation": true', second_round_text)
     
     def test_max_rounds_timeout(self):
         """达到最大轮数时超时"""
@@ -978,6 +1261,43 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(trace.status, "completed")
         self.assertEqual(len(trace.rounds), 2)
         self.assertEqual(trace.rounds[0].action, "generate_bid_overview")
+
+    def test_main_run_data_cleaning_file_organization_uses_isolated_workspace(self):
+        """main.run 可以把真实文件整理目标路由到数据清洗 skill，并写入隔离工作区"""
+        import tempfile
+        from docx import Document
+        import main
+
+        with tempfile.TemporaryDirectory() as td:
+            source_dir = os.path.join(td, "source")
+            workspace_dir = os.path.join(td, "workspace")
+            trace_dir = os.path.join(td, "logs")
+            os.makedirs(source_dir)
+
+            doc_path = os.path.join(source_dir, "采购公告.docx")
+            doc = Document()
+            doc.add_paragraph("航天时代飞鸿技术有限公司")
+            doc.add_paragraph("《采购公告》")
+            doc.add_paragraph("项目名称：")
+            doc.add_paragraph("打印刻录系统采购项目")
+            doc.save(doc_path)
+
+            result = main.run(
+                f"请整理文件并归档 {doc_path}",
+                planner_mode="rule",
+                data_workspace_dir=workspace_dir,
+                trace_dir=trace_dir,
+            )
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["metadata"]["active_skill"], "data_cleaning_file_organization")
+            self.assertEqual(result["rounds"][0]["action"], "prepare_file_organization_run")
+            self.assertEqual(result["rounds"][0]["status"], "success")
+            self.assertEqual(result["metadata"]["data_workspace_dir"], workspace_dir)
+            self.assertTrue(os.path.isdir(os.path.join(workspace_dir, "runs")))
+            self.assertTrue(os.path.isdir(os.path.join(workspace_dir, "project_ledgers")))
+            self.assertTrue(os.path.isdir(trace_dir))
+            self.assertTrue(os.path.exists(doc_path), "prepare step must not move source files")
 
 
 # ────────────────────────────────────────────

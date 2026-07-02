@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Project Manager Agent - Tool Schema",
-  "description": "34 个工具的 schema 契约。校验注册到 ToolRegistry 的工具参数与文档一致。",
+  "description": "35 个工具的 schema 契约。校验注册到 ToolRegistry 的工具参数与文档一致。",
   "version": "1.0.0",
   "tools": {
     "scan_projects": {
@@ -104,6 +104,14 @@
     "extract_document": {
       "domain": "data_cleaning",
       "description": "提取 Word/PDF/图片文件的结构化数据",
+      "params": {
+        "file_path": {"type": "string"}
+      },
+      "required": ["file_path"]
+    },
+    "run_ocr": {
+      "domain": "data_cleaning",
+      "description": "对图片或扫描 PDF 执行 OCR，输出 ocr.result.v1，不写入账本",
       "params": {
         "file_path": {"type": "string"}
       },

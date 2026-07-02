@@ -1,10 +1,9 @@
 ---
 name: project_manager
-version: 3.2.0
+version: 3.3.0
 description: |
-  Project Manager Agent skill index. This file lists available skills and the
-  progressive disclosure rule. Detailed tool contracts live in each skill file
-  and in governance/project_schema.json.
+  Project Manager Agent skill index. This file summarizes active skills and
+  points to the runtime sources of truth.
 ---
 
 # Project Manager Skill Index
@@ -14,54 +13,29 @@ description: |
 The agent uses three levels of disclosure:
 
 ```text
-Level 0: skill index
-Level 1: active skill contract
-Level 2: active skill tool schemas
+Level 0: skill summaries
+Level 1: active skill boundary document
+Level 2: active ToolRegistry schemas
 ```
 
-The runtime must not expose all tools by default. All-tools registration is a
-debug and governance validation mode only.
+The runtime must not expose all tools by default. All-tools registration is a debug and governance validation path only.
 
-## Skills
+## Active Skills
 
-| Skill | File | Current status |
-|---|---|---|
-| `data_cleaning_file_organization` | `skills/data_cleaning_file_organization.md` | active first loop |
-| `project_management` | planned | existing tools, contract not split yet |
-| `opportunity_management` | planned | existing tools, contract not split yet |
-| `cloudcc_crm` | planned | existing tools, contract not split yet |
+| Skill | Boundary document |
+|---|---|
+| `data_cleaning_file_organization` | `skills/data_cleaning_file_organization.md` |
+| `project_management` | `skills/project_management.md` |
+| `opportunity_management` | `skills/opportunity_management.md` |
+| `cloudcc_crm` | `skills/cloudcc_crm.md` |
 
-## First Loop
+## Hard Rules
 
-The first skill to keep working is:
+- One request routes to one active skill before tool schemas are exposed.
+- Tool ownership comes from `main.SKILL_TOOL_MAP` and executable `ToolRegistry` registrations.
+- Skill markdown files describe purpose and boundaries; they do not maintain complete parameter contracts.
+- Runtime artifacts belong under `state/`, `logs/`, or caller-provided isolated directories, not under `skills/`.
 
-```text
-data_cleaning_file_organization
-```
+## Source Of Truth
 
-Expected runtime path:
-
-```text
-goal mentioning 项目总览 / 项目账本 / 数据清洗及文件整理
-  -> route skill data_cleaning_file_organization
-  -> expose only data-cleaning/file-organization tools
-  -> call update_project_ledger
-  -> produce state/project_ledgers/<project>/项目总览.md
-```
-
-## Tool Contract Source
-
-Do not maintain a second complete tool list here. The authoritative schema is:
-
-```text
-governance/project_schema.json
-```
-
-## Runtime State
-
-Skill files are contracts. Runtime artifacts go under:
-
-```text
-state/project_ledgers/
-logs/
-```
+Use `ToolRegistry` for executable schema, `skill_policies/` for rule-mode fallback sequencing, and `governance/validate.py` for drift checks.

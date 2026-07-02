@@ -1,0 +1,50 @@
+{
+  "schema_version": "agentplatform.loop_package.v1",
+  "name": "opportunity_management",
+  "version": "0.1.0",
+  "description": "Loop package for bid notice intake, opportunity context generation, and local duplicate-check suggestions.",
+  "route_keywords": [
+    "bid_notice_intake",
+    "招标公告",
+    "招标",
+    "商机",
+    "检测商机",
+    "重复检查"
+  ],
+  "skill_interface": {
+    "skill_name": "opportunity_management",
+    "skill_doc": "skills/opportunity_management.md",
+    "entrypoint": "main.run",
+    "active_registry": "main._build_registry_for_skill"
+  },
+  "loop_policy": {
+    "policy_module": "skill_policies.opportunity_management",
+    "planner_mode": "rule_fallback",
+    "terminal_statuses": ["completed", "blocked", "needs_confirmation", "failed"]
+  },
+  "workset_schema": "workset_schema.json",
+  "trace_contract": "trace_contract.json",
+  "runtime_tools": [
+    "scan_bid_notices",
+    "parse_bid_notice",
+    "check_duplicate",
+    "generate_bid_context",
+    "create_crm_suggestion"
+  ],
+  "validators": [],
+  "fixtures": [],
+  "hard_rules": [
+    "active_skill_tools_only",
+    "blocked_is_not_success",
+    "crm_write_not_allowed"
+  ],
+  "soft_guidance_sources": [
+    "skills/opportunity_management.md"
+  ],
+  "derived_sources": [
+    "ToolRegistry",
+    "loop package manifest runtime_tools",
+    "governance/project_schema.json",
+    "tests/test_loop.py"
+  ]
+}

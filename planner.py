@@ -21,6 +21,8 @@ import re
 import json
 from typing import List, Dict, Any, Optional, Tuple
 
+from skill_policies import get_policy
+
 
 class BasePlanner:
     """规划器基类
@@ -62,6 +64,23 @@ class BasePlanner:
                 content = msg.get("content", "")
                 if content.startswith("Observation:"):
                     return content[len("Observation:"):].strip()
+        return None
+
+    def _extract_last_observation_evaluation(self, messages: List[Dict]) -> Optional[Dict[str, Any]]:
+        """提取最近一次结构化 Observation Evaluation。"""
+        prefix = "Observation Evaluation:"
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if content.startswith(prefix):
+                    raw = content[len(prefix):].strip()
+                    try:
+                        parsed = json.loads(raw)
+                    except json.JSONDecodeError:
+                        return None
+                    if isinstance(parsed, dict):
+                        return parsed
+                    return None
         return None
     
     def _has_error_in_obs(self, obs: str) -> bool:
@@ -110,6 +129,17 @@ class RuleBasedPlanner(BasePlanner):
     def get_response(self, messages: List[Dict]) -> Tuple[str, int]:
         executed = self._extract_executed_tools(messages)
         last_obs = self._extract_last_observation(messages)
+        observation_evaluation = self._extract_last_observation_evaluation(messages)
+
+        if observation_evaluation:
+            status = observation_evaluation.get("status")
+            if status == "needs_confirmation" or observation_evaluation.get("needs_confirmation"):
+                detail = observation_evaluation.get("error_code") or observation_evaluation.get("summary") or "上一步工具返回 needs_confirmation"
+                text = f"Final Answer: 当前步骤需要人工确认后才能继续；请确认后再触发后续动作。控制信号：{detail}"
+                return text, self._estimate_tokens(text)
+            if status in {"blocked", "failed"}:
+                detail = observation_evaluation.get("error_code") or observation_evaluation.get("summary") or json.dumps(observation_evaluation, ensure_ascii=False)
+                return self._handle_error_with_tokens(executed, detail)
         
         # 如果上一轮出错，尝试跳过或返回结论
         if last_obs and self._has_error_in_obs(last_obs):
@@ -126,7 +156,7 @@ class RuleBasedPlanner(BasePlanner):
         
         # ─── 意图 B：数据清洗 ───
         if any(k in goal for k in ["数据清洗及文件整理", "项目总览", "项目账本", "ledger", "整理文件", "文件整理", "归档文件", "人工复核"]):
-            return self._plan_project_ledger(executed, last_obs)
+            return self._plan_with_policy("data_cleaning_file_organization", executed, last_obs)
 
         if any(k in goal for k in ["提取", "OCR", "解析文档", "PDF", "扫描文件", "查看有哪些文件"]):
             return self._plan_data_cleaning(executed, last_obs)
@@ -139,7 +169,7 @@ class RuleBasedPlanner(BasePlanner):
         
         # ─── 意图 D：CloudCC/CRM 受控工具域 ───
         if any(k in goal for k in ["CloudCC", "cloudcc", "CRM", "crm"]):
-            return self._plan_cloudcc_crm(executed, last_obs)
+            return self._plan_with_policy("cloudcc_crm", executed, last_obs)
 
         # ─── 意图 C：商机管理 ───
         if any(k in goal for k in ["招标公告", "招标", "商机", "检测商机", "重复检查"]):
@@ -172,6 +202,15 @@ class RuleBasedPlanner(BasePlanner):
         
         # 默认 fallback
         return "Final Answer: 请明确需求：项目管理（风险/进度/归档/报告）、数据清洗（提取/分类/批量）、商机管理（招标/检测）、CloudCC/CRM（查重/草稿/确认）。"
+
+    def _plan_with_policy(self, skill_name: str, executed: List[str], last_obs: Optional[str]) -> str:
+        policy = get_policy(skill_name)
+        if policy is None:
+            return f"Final Answer: 未找到 skill policy：{skill_name}"
+        decision = policy.plan(self.goal, executed, last_obs)
+        if decision is None:
+            return f"Final Answer: {skill_name} 没有可执行的下一步。"
+        return decision.text
     
     def _handle_error(self, executed: List[str], last_obs: str) -> str:
         """上一轮出错时的应急策略。返回 ReAct 格式的响应字符串。"""
@@ -259,64 +298,6 @@ class RuleBasedPlanner(BasePlanner):
             return f"Thought: 对文件进行分类归档。\nAction: classify_document\nAction Input: {{\"file_path\": \"{path}\"}}"
         return "Final Answer: 分类完成。"
 
-    def _plan_project_ledger(self, executed: List[str], last_obs: Optional[str]) -> str:
-        paths = self._extract_file_paths()
-        workbook_paths = [path for path in paths if path.lower().endswith((".xlsx", ".xls"))]
-        wants_html = any(k in self.goal.lower() for k in ["html", "展示", "总览", "投标进度"])
-        wants_file_organization = any(k in self.goal for k in ["整理文件", "文件整理", "归档", "重命名", "人工复核", "复核"])
-        if paths and wants_file_organization and "prepare_file_organization_run" not in executed:
-            payload = {
-                "file_paths": paths,
-                "project_name": "",
-            }
-            return (
-                "Thought: 用户要求整理和归档真实文件，先准备文件整理运行包：清洗结构化、业务判断、人工复核队列和归档计划；此步不移动源文件。\n"
-                "Action: prepare_file_organization_run\n"
-                f"Action Input: {json.dumps(payload, ensure_ascii=False)}"
-            )
-        if "prepare_file_organization_run" in executed and "execute_archive_plan" not in executed:
-            return (
-                "Final Answer: 文件整理运行包已生成，包含结构化提取结果、项目总览账本、人工复核队列、归档计划和运行报告。"
-                " 为避免误移动原文件，归档执行需要人工确认后调用 execute_archive_plan(run_id, confirmed=true)。"
-            )
-        if workbook_paths and "import_project_detail_workbook" not in executed:
-            payload = {"file_path": workbook_paths[0]}
-            return (
-                "Thought: 用户提供了项目明细表类 Excel，先读取工作簿、标准化项目字段，并写入多个项目总览账本。\n"
-                "Action: import_project_detail_workbook\n"
-                f"Action Input: {json.dumps(payload, ensure_ascii=False)}"
-            )
-        if (wants_html or "import_project_detail_workbook" in executed) and "generate_bid_progress_html" not in executed:
-            return (
-                "Thought: 项目账本已经具备汇总事实，继续从 project_ledgers 派生投标进度总览 HTML。\n"
-                "Action: generate_bid_progress_html\n"
-                "Action Input: {}"
-            )
-        if "generate_bid_progress_html" in executed:
-            return "Final Answer: 项目明细表 Excel 已导入项目账本，并已从项目账本生成投标进度总览 HTML。"
-
-        if paths and "process_documents_to_ledger" not in executed:
-            payload = {
-                "file_paths": paths,
-                "project_name": "",
-            }
-            return (
-                "Thought: 用户提供了真实源文件，先通过数据清洗及文件整理 skill 读取文件、输出结构化结果并写入项目总览账本。\n"
-                "Action: process_documents_to_ledger\n"
-                f"Action Input: {json.dumps(payload, ensure_ascii=False)}"
-            )
-        if "process_documents_to_ledger" in executed:
-            return "Final Answer: 真实文件的数据清洗及文件整理 loop 已完成；请以工具返回的 structured_outputs、project_overview_md 和 project_ledger_json 作为结构化产物入口。"
-
-        if "update_project_ledger" not in executed:
-            return (
-                "Thought: 数据清洗及文件整理的第一步是把清洗后的候选事实写入项目总览账本，先跑最小 ledger 循环。\n"
-                "Action: update_project_ledger\n"
-                "Action Input: {\"project_name\": \"示例项目\", \"facts\": {\"project_name\": \"示例项目\", \"bid_status\": \"待补充\"}, "
-                "\"evidence\": [{\"field\": \"bid_status\", \"source_ref\": \"manual_goal\", \"confidence\": 0.6}], \"source_type\": \"local_file\"}"
-            )
-        return "Final Answer: 数据清洗及文件整理的项目总览账本循环已跑通；请以工具返回的 project_overview_md 和 project_ledger_json 为结构化产物入口。"
-    
     # ─────────── 意图 C：商机管理 ───────────
     
     def _plan_opportunity(self, executed: List[str], last_obs: Optional[str]) -> str:
@@ -338,42 +319,6 @@ class RuleBasedPlanner(BasePlanner):
             return "Thought: 生成 CRM 录入建议。\nAction: create_crm_suggestion\nAction Input: {\"bid_context\": {}}"
         return "Final Answer: CRM 建议已生成。"
 
-    # ─────────── 意图 D：CloudCC/CRM 受控工具域 ───────────
-
-    def _plan_cloudcc_crm(self, executed: List[str], last_obs: Optional[str]) -> str:
-        """CloudCC/CRM 只读查重、草稿准备和提交前确认。
-
-        当前 CRM 工具域默认使用 fake adapter；会返回 blocked 或
-        needs_confirmation，不会直接提交 CRM。
-        """
-        goal = self.goal
-
-        if "cloudcc_session_probe" not in executed:
-            return "Thought: CRM/CloudCC 操作必须先验证登录态和浏览器适配器。\nAction: cloudcc_session_probe\nAction Input: {}"
-
-        if last_obs and any(k in last_obs for k in ["browser_adapter_unavailable", "login_required", "Login | CloudCC"]):
-            if any(k in goal for k in ["草稿", "录入", "准备"]):
-                if "cloudcc_prepare_opportunity_draft" not in executed:
-                    return "Thought: CloudCC 浏览器不可用，但仍可基于已知上下文准备本地 CRM 草稿，不执行写入。\nAction: cloudcc_prepare_opportunity_draft\nAction Input: {\"bid_context\": {}}"
-                if "cloudcc_fill_draft_gated" not in executed:
-                    return "Thought: CRM 草稿需要提交前确认，使用受控门控工具返回 needs_confirmation。\nAction: cloudcc_fill_draft_gated\nAction Input: {\"draft\": {}}"
-                return "Final Answer: CRM 草稿已准备为受控待确认状态；未执行 CloudCC 写入。"
-            return "Final Answer: CloudCC/CRM 当前被阻塞：浏览器适配器或登录态不可用。不能把 blocked 解释为未查到重复。"
-
-        if any(k in goal for k in ["查重", "重复", "已有", "是否存在"]):
-            if "cloudcc_duplicate_check" not in executed:
-                return "Thought: 登录态可用后，执行 CloudCC 商机只读查重。\nAction: cloudcc_duplicate_check\nAction Input: {}"
-            return "Final Answer: CloudCC 商机查重流程已完成，请以工具 evidence 中的结论为准。"
-
-        if any(k in goal for k in ["草稿", "录入", "准备"]):
-            if "cloudcc_prepare_opportunity_draft" not in executed:
-                return "Thought: 准备 CRM 商机草稿，不写入 CloudCC。\nAction: cloudcc_prepare_opportunity_draft\nAction Input: {\"bid_context\": {}}"
-            if "cloudcc_fill_draft_gated" not in executed:
-                return "Thought: 填充 CRM 草稿必须停在提交前，等待人工确认。\nAction: cloudcc_fill_draft_gated\nAction Input: {\"draft\": {}}"
-            return "Final Answer: CRM 草稿已进入提交前确认状态。"
-
-        return "Final Answer: 请明确 CloudCC/CRM 需求：只读查重、记录查询、草稿准备或提交前确认。"
-    
     def _plan_new_opportunity(self, executed: List[str], last_obs: Optional[str]) -> str:
         path = self._extract_file_path()
         if path and "parse_bid_notice" not in executed:

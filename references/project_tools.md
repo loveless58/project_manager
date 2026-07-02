@@ -1,9 +1,9 @@
 # 工具层详细 API
 
-本文件描述 34 个工具的完整 API。分四个受控工具域：
+本文件描述 35 个工具的完整 API。分四个受控工具域：
 
 - **ProjectTools**（10 个）：项目管理
-- **DataCleaningTools**（13 个）：数据清洗及文件整理
+- **DataCleaningTools**（14 个）：数据清洗及文件整理
 - **OpportunityManagerTools**（5 个）：商机检测
 - **CloudCCCrmTools**（6 个）：CloudCC/CRM 只读查重、草稿准备、提交前确认
 
@@ -246,6 +246,28 @@
     "project_name": "...",
     "customer_name": "...",
     "supplier_name": "..."
+  }
+}
+```
+
+### run_ocr(file_path)
+
+对图片或扫描 PDF 执行 OCR，只返回 OCR 结果，不写入项目账本。
+
+**参数**：
+- `file_path` (str, required): 图片或扫描 PDF 文件绝对路径
+
+**返回**：
+```json
+{
+  "schema_version": "ocr.result.v1",
+  "status": "success|blocked|failed",
+  "engine": "sidecar_text|custom_adapter|unavailable",
+  "text": "...",
+  "pages": [{"page": 1, "text": "...", "confidence": 0.91}],
+  "quality": {
+    "quality": "good|partial|poor",
+    "needs_human_review": false
   }
 }
 ```

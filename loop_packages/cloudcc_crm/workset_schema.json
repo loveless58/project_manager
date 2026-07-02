@@ -1,0 +1,13 @@
+{
+  "schema_version": "agentplatform.workset_schema.v1",
+  "workset_schema_version": "cloudcc_crm.workset.v1",
+  "description": "Minimal CloudCC/CRM workset contract.",
+  "required_top_level": ["schema_version", "task_type", "inputs", "permission_boundary", "done_when"],
+  "properties": {
+    "schema_version": {"const": "cloudcc_crm.workset.v1"},
+    "task_type": {"enum": ["session_probe", "duplicate_check", "draft_prepare", "gated_fill", "readback"]},
+    "inputs": {"required": []},
+    "permission_boundary": {"required": ["browser_adapter_required", "submit_requires_confirmation"]},
+    "done_when": {"required_items": ["evidence_written", "unsafe_write_blocked_or_confirmed"]}
+  }
+}

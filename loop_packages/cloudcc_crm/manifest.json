@@ -1,0 +1,52 @@
+{
+  "schema_version": "agentplatform.loop_package.v1",
+  "name": "cloudcc_crm",
+  "version": "0.1.0",
+  "description": "Loop package for controlled CloudCC/CRM read, duplicate-check, draft, gated fill, and readback workflows.",
+  "route_keywords": [
+    "crm_submit_gate",
+    "CloudCC",
+    "cloudcc",
+    "CRM",
+    "crm"
+  ],
+  "skill_interface": {
+    "skill_name": "cloudcc_crm",
+    "skill_doc": "skills/cloudcc_crm.md",
+    "entrypoint": "main.run",
+    "active_registry": "main._build_registry_for_skill"
+  },
+  "loop_policy": {
+    "policy_module": "skill_policies.cloudcc_crm",
+    "planner_mode": "rule_fallback",
+    "terminal_statuses": ["completed", "blocked", "needs_confirmation", "failed"]
+  },
+  "workset_schema": "workset_schema.json",
+  "trace_contract": "trace_contract.json",
+  "runtime_tools": [
+    "cloudcc_session_probe",
+    "cloudcc_search_record",
+    "cloudcc_duplicate_check",
+    "cloudcc_prepare_opportunity_draft",
+    "cloudcc_fill_draft_gated",
+    "cloudcc_readback_record"
+  ],
+  "validators": [],
+  "fixtures": [],
+  "hard_rules": [
+    "active_skill_tools_only",
+    "blocked_is_not_success",
+    "needs_confirmation_stops_loop",
+    "fake_adapter_blocks_browser_dependent_operations",
+    "submit_requires_human_confirmation"
+  ],
+  "soft_guidance_sources": [
+    "skills/cloudcc_crm.md"
+  ],
+  "derived_sources": [
+    "ToolRegistry",
+    "loop package manifest runtime_tools",
+    "governance/project_schema.json",
+    "tests/test_loop.py"
+  ]
+}

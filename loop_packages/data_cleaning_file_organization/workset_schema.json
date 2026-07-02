@@ -1,0 +1,35 @@
+{
+  "schema_version": "agentplatform.workset_schema.v1",
+  "workset_schema_version": "data_cleaning.workset.v1",
+  "required_top_level": [
+    "schema_version",
+    "task_type",
+    "inputs",
+    "permission_boundary",
+    "done_when"
+  ],
+  "properties": {
+    "schema_version": {"const": "data_cleaning.workset.v1"},
+    "task_type": {"enum": ["file_organization"]},
+    "inputs": {
+      "required": ["source_files"],
+      "source_files_item_required": ["path", "source_type"]
+    },
+    "permission_boundary": {
+      "required": [
+        "readonly_prepare",
+        "external_write_allowed",
+        "requires_human_confirmation"
+      ]
+    },
+    "done_when": {
+      "required_items": [
+        "input_manifest_written",
+        "structured_outputs_written",
+        "review_queue_written",
+        "archive_plan_written",
+        "trace_written"
+      ]
+    }
+  }
+}

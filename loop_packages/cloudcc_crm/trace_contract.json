@@ -1,0 +1,11 @@
+{
+  "schema_version": "agentplatform.trace_contract.v1",
+  "trace_type": "loop_trace",
+  "required_top_level": ["trace_id", "agent_name", "goal", "status", "metadata", "rounds"],
+  "metadata_required": ["active_skill", "exposed_tools"],
+  "active_skill": "cloudcc_crm",
+  "round_required": ["action", "action_input", "status"],
+  "tool_round_observation_evaluation_required": true,
+  "observation_evaluation_required": ["schema_version", "status", "needs_confirmation"],
+  "terminal_statuses": ["completed", "blocked", "needs_confirmation", "failed", "timeout", "budget_exceeded"]
+}

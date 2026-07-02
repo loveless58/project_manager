@@ -21,10 +21,11 @@ import json
 import shutil
 import re
 import html
-from typing import Dict, List, Any, Optional
+from typing import Callable, Dict, List, Any, Optional
 from datetime import datetime
 
 from ledger import ProjectLedger
+from ocr import normalize_ocr_result
 
 
 # 工作目录
@@ -45,11 +46,12 @@ CLASSIFICATION_KEYWORDS = {
 class DataCleaningTools:
     """数据清洗工具集合"""
 
-    def __init__(self, workspace_dir: str = WORKSPACE_DIR):
+    def __init__(self, workspace_dir: str = WORKSPACE_DIR, ocr_adapter: Optional[Callable[[str], Dict[str, Any]]] = None):
         self.workspace_dir = workspace_dir
         self.raw_dir = os.path.join(workspace_dir, "00-原始文件（待处理）")
         self.ocr_dir = os.path.join(workspace_dir, "01-OCR输出（待清洗）")
         self.cleaned_dir = os.path.join(workspace_dir, "02-已清洗（结构化数据）")
+        self.ocr_adapter = ocr_adapter
 
     def scan_raw_files(self, source_dir: Optional[str] = None) -> Dict:
         """扫描原始文件目录，返回文件列表"""
@@ -81,6 +83,9 @@ class DataCleaningTools:
         ext = os.path.splitext(file_path)[1].lower()
         if ext not in [".pdf", ".png", ".jpg", ".jpeg"]:
             return {"error": f"Unsupported file type: {ext}"}
+
+        if ext in [".png", ".jpg", ".jpeg"]:
+            return self._extract_ocr_document(file_path, file_type=ext)
         
         # 尝试使用 PyMuPDF 提取文本
         try:
@@ -91,21 +96,54 @@ class DataCleaningTools:
                 text += page.get_text()
             doc.close()
             
+            is_scanned = len(text.strip()) < 100
+            if is_scanned:
+                ocr_result = self._extract_ocr_document(file_path, file_type=ext)
+                return ocr_result
+
             result = {
+                "schema_version": "document.extract.v1",
+                "status": "success",
                 "file": file_path,
+                "filename": os.path.basename(file_path),
+                "file_type": ext,
+                "extract_method": "pdf_text",
                 "text_length": len(text),
                 "extracted_text": text[:2000] + ("..." if len(text) > 2000 else ""),
-                "is_scanned": len(text.strip()) < 100,  # 文本极少则认为是扫描件
+                "is_scanned": is_scanned,
             }
             
             # 尝试提取结构化字段
             result["fields"] = self._extract_fields(text)
+            result["document_type"] = self._classify_text_document(file_path, text)
+            if is_scanned:
+                result["ocr"] = {
+                    "status": "blocked",
+                    "blocked_reason": "ocr_adapter_unavailable",
+                }
             return result
             
         except ImportError:
-            return {"error": "PyMuPDF not installed. Run: pip install pymupdf"}
+            ocr_result = self._extract_ocr_document(file_path, file_type=ext)
+            if ocr_result.get("status") == "success":
+                return ocr_result
+            ocr_result["error"] = "PyMuPDF not installed and OCR adapter unavailable"
+            return ocr_result
         except Exception as e:
+            ocr_result = self._extract_ocr_document(file_path, file_type=ext)
+            if ocr_result.get("status") == "success":
+                return ocr_result
             return {"error": str(e)}
+
+    def run_ocr(self, file_path: str) -> Dict[str, Any]:
+        """Run OCR for image or scanned-PDF input and return ocr.result.v1."""
+        if not os.path.exists(file_path):
+            return normalize_ocr_result({
+                "status": "failed",
+                "engine": "unavailable",
+                "error": f"File not found: {file_path}",
+            })
+        return self._run_ocr(file_path)
 
     def extract_document(self, file_path: str) -> Dict:
         """Extract text, table text, classification, and candidate facts from a supported document."""
@@ -158,6 +196,113 @@ class DataCleaningTools:
             }
         except Exception as e:
             return {"error": str(e)}
+
+    def _extract_ocr_document(self, file_path: str, file_type: str) -> Dict[str, Any]:
+        """Extract image or scanned-PDF text through an OCR adapter or sidecar text."""
+        ocr = self._run_ocr(file_path)
+        if ocr.get("status") != "success":
+            return {
+                "schema_version": "document.extract.v1",
+                "status": "blocked",
+                "blocked_reason": ocr.get("blocked_reason", "ocr_adapter_unavailable"),
+                "error": ocr.get("error", "ocr_adapter_unavailable: image or scanned PDF requires OCR"),
+                "file": file_path,
+                "filename": os.path.basename(file_path),
+                "file_type": file_type,
+                "extract_method": "ocr",
+                "text_length": 0,
+                "extracted_text": "",
+                "is_scanned": True,
+                "fields": {},
+                "ocr": ocr,
+                "needs_human_review": True,
+            }
+
+        text = ocr.get("text", "") or ""
+        fields = self._extract_fields(text)
+        document_type = self._classify_text_document(file_path, text)
+        needs_human_review = bool(ocr.get("quality", {}).get("needs_human_review"))
+        return {
+            "schema_version": "document.extract.v1",
+            "status": "success",
+            "file": file_path,
+            "filename": os.path.basename(file_path),
+            "file_type": file_type,
+            "document_type": document_type,
+            "extract_method": "ocr",
+            "text_length": len(text),
+            "extracted_text": text[:4000] + ("..." if len(text) > 4000 else ""),
+            "is_scanned": True,
+            "fields": fields,
+            "ocr": ocr,
+            "needs_human_review": needs_human_review,
+        }
+
+    def _run_ocr(self, file_path: str) -> Dict[str, Any]:
+        """Run the configured OCR adapter, or read a sidecar OCR text file when present."""
+        if self.ocr_adapter is not None:
+            try:
+                result = self.ocr_adapter(file_path)
+            except Exception as e:
+                return normalize_ocr_result({
+                    "status": "failed",
+                    "engine": "custom_adapter",
+                    "error": str(e),
+                })
+            if isinstance(result, str):
+                result = {"text": result}
+            text = result.get("text", "") if isinstance(result, dict) else ""
+            if not text:
+                return normalize_ocr_result({
+                    "status": "failed",
+                    "engine": result.get("engine", "custom_adapter") if isinstance(result, dict) else "custom_adapter",
+                    "error": "OCR adapter returned empty text",
+                })
+            return normalize_ocr_result({
+                "status": "success",
+                "engine": result.get("engine", "custom_adapter"),
+                "text": text,
+                "pages": result.get("pages", []),
+            })
+
+        sidecar = self._find_ocr_sidecar(file_path)
+        if sidecar:
+            text = self._read_text_file(sidecar)
+            if text:
+                return normalize_ocr_result({
+                    "status": "success",
+                    "engine": "sidecar_text",
+                    "text": text,
+                    "pages": [{"page": 1, "text": text, "confidence": 1.0, "source_ref": sidecar}],
+                })
+
+        return normalize_ocr_result({
+            "status": "blocked",
+            "engine": "unavailable",
+            "blocked_reason": "ocr_adapter_unavailable",
+            "error": "ocr_adapter_unavailable: no OCR adapter configured and no .ocr.txt sidecar found",
+        })
+
+    def _find_ocr_sidecar(self, file_path: str) -> Optional[str]:
+        base, _ = os.path.splitext(file_path)
+        candidates = [
+            f"{file_path}.ocr.txt",
+            f"{base}.ocr.txt",
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
+    def _read_text_file(self, file_path: str) -> str:
+        for encoding in ("utf-8", "utf-8-sig", "gb18030"):
+            try:
+                with open(file_path, "r", encoding=encoding) as f:
+                    return f.read()
+            except UnicodeDecodeError:
+                continue
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
     
     def _extract_fields(self, text: str) -> Dict:
         """从文本中提取常见字段"""
@@ -191,6 +336,29 @@ class DataCleaningTools:
             value = m.group(1).strip()
             if 2 <= len(value) <= 80 and not any(k in value for k in ["技术成果", "培训", "合同标的", "第三方"]):
                 fields["customer"] = value
+                fields.setdefault("customer_name", value)
+
+        m = re.search(r'(?:中标结果|中标状态|投标结果|投标状态)\s*[:：]?\s*(已中标|未中标|弃标|待开标|已报名|待报名)', text)
+        if m:
+            value = m.group(1).strip()
+            if value in {"未中标", "弃标"}:
+                fields["bid_status"] = "弃标"
+            else:
+                fields["bid_status"] = value
+
+        m = re.search(r'(?:合同状态|签约状态)\s*[:：]?\s*(已签约|已签订|未签约|待签约)', text)
+        if m:
+            fields["contract_status"] = m.group(1).strip()
+
+        m = re.search(r'(?:报名状态|报名情况)\s*[:：]?\s*(待报名|已报名)', text)
+        if m:
+            fields["registration_status"] = m.group(1).strip()
+
+        m = re.search(r'(?:销售负责人|客户经理|负责人)\s*[:：]?\s*(.+?)(?:\n|$)', text)
+        if m:
+            value = m.group(1).strip()
+            if 1 <= len(value) <= 40:
+                fields["sales_owner"] = value
         
         return fields
 
@@ -317,7 +485,7 @@ class DataCleaningTools:
                     "field": field,
                     "source_type": source_type,
                     "source_ref": item["file"],
-                    "extract_method": "docx_text_table" if item.get("file_type") == ".docx" else "document_text",
+                    "extract_method": item.get("extract_method") or ("docx_text_table" if item.get("file_type") == ".docx" else "document_text"),
                     "confidence": 0.86 if field in {"project_name", "document_type"} else 0.78,
                     "summary": f"{item.get('filename', '')} extracted as {item.get('document_type', '')}",
                 }
@@ -428,7 +596,7 @@ class DataCleaningTools:
                     "field": field,
                     "source_type": source_type,
                     "source_ref": path,
-                    "extract_method": "docx_text_table" if extracted.get("file_type") == ".docx" else "document_text",
+                    "extract_method": extracted.get("extract_method") or ("docx_text_table" if extracted.get("file_type") == ".docx" else "document_text"),
                     "confidence": 0.86 if field in {"project_name", "document_type"} else 0.78,
                     "summary": f"{extracted.get('filename', '')} extracted as {extracted.get('document_type', '')}",
                 }
@@ -498,11 +666,13 @@ class DataCleaningTools:
             "events": trace,
         })
         self._write_run_report(artifacts["run_report"], run_id, len(file_paths), len(extracted_items), failures, review_queue, archive_actions)
+        primary_project_name = self._first_project_name(archive_actions, structured_outputs)
 
         return {
             "schema_version": "file_organization.run.v1",
             "run_id": run_id,
             "status": "success" if extracted_items and not failures else ("partial" if extracted_items else "failed"),
+            "project_name": primary_project_name,
             "processed": len(extracted_items),
             "failed": len(failures),
             "structured_outputs": structured_outputs,
@@ -511,6 +681,22 @@ class DataCleaningTools:
             "archive_actions": archive_actions,
             "artifacts": artifacts,
         }
+
+    def _first_project_name(self, archive_actions: List[Dict[str, Any]], structured_outputs: List[str]) -> str:
+        for action in archive_actions:
+            name = action.get("project_name")
+            if name and name != "未命名项目":
+                return str(name)
+        for output_path in structured_outputs:
+            try:
+                with open(output_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            name = data.get("project_name")
+            if name and name != "未命名项目":
+                return str(name)
+        return "未命名项目"
 
     def apply_human_review(self, review_decisions: List[Dict[str, Any]], run_id: str = "") -> Dict[str, Any]:
         """Apply human review decisions as highest-weight ledger corrections."""
@@ -1140,23 +1326,21 @@ class DataCleaningTools:
         review_count = len([p for p in projects if p.get("human_review_required")])
         risk_count = len([p for p in projects if p.get("risk_level") in {"high", "medium"}])
         stat_cards = [
-            ("全部项目", len(projects), "slate", "项目账本总量"),
+            ("全部项目", len(projects), "slate"),
             ("已中标", len(groups["已中标"]), "green"),
             ("已弃标", len(groups["已弃标"]), "red"),
             ("参与中", len(groups["参与中"]), "blue"),
-            ("中标率", win_rate, "amber", "按已中标/已弃标计算"),
-            ("需复核", review_count, "violet", f"中高风险 {risk_count} 个"),
+            ("中标率", win_rate, "amber"),
+            ("需复核", review_count, "violet"),
         ]
         cards_html = "\n".join(
             (
                 f'<div class="stat-card {cls}">'
                 f'<div class="label">{html.escape(label)}</div>'
                 f'<div class="number">{count}</div>'
-                f'<div class="hint">{html.escape(hint)}</div>'
                 f'</div>'
             )
-            for label, count, cls, *hint_parts in stat_cards
-            for hint in [hint_parts[0] if hint_parts else "当前筛选口径"]
+            for label, count, cls in stat_cards
         )
         tab_styles = {
             "全部项目": ("#334155", "#f1f5f9"),
@@ -1179,7 +1363,6 @@ class DataCleaningTools:
                 f'<div class="section">'
                 f'<div class="section-title" style="--section-color: {tab_styles[name][0]}; --section-bg: {tab_styles[name][1]}">'
                 f'<h2>{html.escape(name)} <span class="count-badge">{len(items)}</span></h2>'
-                f'<span class="section-desc">明细表、业务判断、下一步动作、复核标记均来自项目账本</span>'
                 f'</div>'
                 f'{self._render_bid_progress_table(items)}'
                 f'<div class="detail-subsection"><h3>项目详情</h3>{self._render_project_detail_cards(items)}</div>'
@@ -1203,12 +1386,10 @@ class DataCleaningTools:
     .hero-row {{ display: flex; justify-content: space-between; gap: 20px; align-items: flex-end; flex-wrap: wrap; }}
     h1 {{ font-size: 30px; line-height: 1.2; font-weight: 800; margin-bottom: 8px; }}
     .meta {{ color: #dbeafe; font-size: 13px; }}
-    .source-note {{ color: #cbd5e1; font-size: 12px; max-width: 520px; }}
     .stats-bar {{ display: grid; grid-template-columns: repeat(6, minmax(145px, 1fr)); gap: 12px; margin-bottom: 16px; }}
-    .stat-card {{ background: var(--panel); border-radius: 8px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(15, 23, 42, .07); border: 1px solid var(--border); border-top: 4px solid #64748b; min-height: 106px; }}
+    .stat-card {{ background: var(--panel); border-radius: 8px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(15, 23, 42, .07); border: 1px solid var(--border); border-top: 4px solid #64748b; min-height: 88px; }}
     .stat-card .label {{ font-size: 12px; color: var(--muted); font-weight: 700; }}
-    .stat-card .number {{ font-size: 30px; line-height: 1.1; font-weight: 800; margin: 8px 0 6px; color: #111827; }}
-    .stat-card .hint {{ font-size: 12px; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+    .stat-card .number {{ font-size: 30px; line-height: 1.1; font-weight: 800; margin-top: 8px; color: #111827; }}
     .stat-card.green {{ border-top-color: #16a34a; }} .stat-card.green .number {{ color: #15803d; }}
     .stat-card.red {{ border-top-color: #dc2626; }} .stat-card.red .number {{ color: #b91c1c; }}
     .stat-card.blue {{ border-top-color: #2563eb; }} .stat-card.blue .number {{ color: #1d4ed8; }}
@@ -1228,15 +1409,30 @@ class DataCleaningTools:
     .section {{ background: var(--panel); border-radius: 8px; padding: 18px; margin-bottom: 22px; box-shadow: 0 1px 3px rgba(15, 23, 42, .08); border: 1px solid var(--border); }}
     .section-title {{ border-left: 4px solid var(--section-color); padding: 2px 0 2px 12px; margin-bottom: 14px; display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }}
     .section-title h2 {{ font-size: 18px; color: #111827; display: flex; align-items: center; gap: 8px; }}
-    .section-desc {{ font-size: 12px; color: var(--muted); }}
     .count-badge {{ font-size: 12px; padding: 2px 10px; border-radius: 999px; font-weight: 800; background: var(--section-bg); color: var(--section-color); }}
     .table-wrap {{ width: 100%; overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 8px; }}
     table {{ width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; min-width: 1460px; background: #fff; }}
-    th {{ position: sticky; top: 59px; z-index: 10; background: #eef3f8; padding: 9px 10px; text-align: left; font-weight: 800; color: #475569; border-bottom: 1px solid #cbd5e1; white-space: nowrap; font-size: 12px; }}
+    .project-table {{ table-layout: fixed; min-width: 3040px; }}
+    .project-table .col-index {{ width: 72px; }}
+    .project-table .col-project {{ width: 300px; }}
+    .project-table .col-code {{ width: 132px; }}
+    .project-table .col-bpm {{ width: 190px; }}
+    .project-table .col-business {{ width: 110px; }}
+    .project-table .col-customer {{ width: 220px; }}
+    .project-table .col-owner {{ width: 96px; }}
+    .project-table .col-date {{ width: 118px; }}
+    .project-table .col-money {{ width: 120px; }}
+    .project-table .col-flag {{ width: 110px; }}
+    .project-table .col-type {{ width: 96px; }}
+    .project-table .col-status {{ width: 105px; }}
+    .project-table .col-action {{ width: 260px; }}
+    .project-table .col-review {{ width: 96px; }}
+    .project-table .col-note {{ width: 260px; }}
+    th {{ background: #eef3f8; padding: 9px 10px; text-align: left; font-weight: 800; color: #475569; border-bottom: 1px solid #cbd5e1; white-space: nowrap; font-size: 12px; }}
     td {{ padding: 9px 10px; border-bottom: 1px solid #edf1f5; vertical-align: top; background: transparent; }}
     tbody tr:hover {{ background: #f1f5f9 !important; }}
     .center {{ text-align: center; }}
-    .name-cell {{ font-weight: 750; color: #111827; min-width: 260px; max-width: 340px; white-space: normal; line-height: 1.35; }}
+    .name-cell {{ font-weight: 750; color: #111827; white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }}
     .note {{ min-width: 220px; max-width: 360px; color: #334155; line-height: 1.4; }}
     .badge {{ display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; white-space: nowrap; }}
     .badge-red, .badge-danger {{ background: #fee2e2; color: #dc2626; }}
@@ -1268,7 +1464,7 @@ class DataCleaningTools:
     .weekly-content {{ font-size: 12px; color: #334155; padding: 10px; background: #f8fafc; border-radius: 8px; }}
     .stats-table th {{ background: #7c3aed; color: #fff; font-size: 13px; }}
     .stats-table td {{ padding: 12px; }}
-    @media (max-width: 1080px) {{ body {{ padding: 12px; }} .stats-bar {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} .hero {{ padding: 18px; }} th {{ top: 0; }} .tab-nav {{ position: static; }} }}
+    @media (max-width: 1080px) {{ body {{ padding: 12px; }} .stats-bar {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} .hero {{ padding: 18px; }} .tab-nav {{ position: static; }} }}
     @media print {{ body {{ background: #fff; padding: 0; }} .hero {{ color: #111827; background: #fff; box-shadow: none; border: 1px solid #e5e7eb; }} .section, .detail-card {{ box-shadow: none; border: 1px solid #e5e7eb; }} .tab-nav {{ display: none; }} .tab-content {{ display: block !important; }} }}
   </style>
 </head>
@@ -1280,7 +1476,6 @@ class DataCleaningTools:
           <h1>投标进度总览</h1>
           <div class="meta">生成时间: {html.escape(generated_at)} | 投标项目总数: {len(projects)}</div>
         </div>
-        <div class="source-note">展示页是派生产物；事实来源以 project_ledgers / project_ledger.json 和项目总览.md 为准。</div>
       </div>
     </section>
     <div class="stats-bar">{cards_html}</div>
@@ -1288,7 +1483,7 @@ class DataCleaningTools:
     {sections_html}
     <div class="tab-content" data-tab="stats">
       <div class="section">
-        <div class="section-title" style="--section-color: #7c3aed; --section-bg: #ede9fe"><h2>销售统计</h2><span class="section-desc">按负责销售汇总项目数和状态分布</span></div>
+        <div class="section-title" style="--section-color: #7c3aed; --section-bg: #ede9fe"><h2>销售统计</h2></div>
         <div class="stats-bar" style="margin-bottom: 20px;">{cards_html}</div>
         {sales_rows}
       </div>
@@ -1327,6 +1522,16 @@ class DataCleaningTools:
         ]
         if not rows:
             return '<div class="empty-state">暂无项目</div>'
+        colgroup = "".join(
+            f'<col class="{cls}">'
+            for cls in [
+                "col-index", "col-project", "col-code", "col-bpm", "col-business", "col-customer",
+                "col-owner", "col-date", "col-date", "col-money", "col-flag", "col-type",
+                "col-status", "col-status", "col-status", "col-status", "col-action", "col-review",
+                "col-note", "col-money", "col-status",
+            ]
+        )
+        header_classes = ["center", "project-heading"] + [""] * (len(headers) - 2)
         body = []
         empty_cell = '<span class="muted">-</span>'
         for idx, row in enumerate(rows, start=1):
@@ -1358,8 +1563,14 @@ class DataCleaningTools:
                 for css_class, value, badge_type in values
             )
             body.append(f'<tr style="background-color: {self._row_background(row)}">{cells}</tr>')
-        head = "".join(f"<th>{html.escape(h)}</th>" for h in headers)
-        return f'<div class="table-wrap"><table><thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
+        head = "".join(
+            f'<th class="{css_class}">{html.escape(header)}</th>' if css_class else f"<th>{html.escape(header)}</th>"
+            for header, css_class in zip(headers, header_classes)
+        )
+        return (
+            f'<div class="table-wrap"><table class="project-table"><colgroup>{colgroup}</colgroup>'
+            f'<thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
+        )
 
     def _render_project_detail_cards(self, rows: List[Dict[str, Any]]) -> str:
         if not rows:

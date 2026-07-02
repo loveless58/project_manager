@@ -1,0 +1,1 @@
+"""Opportunity management loop package."""

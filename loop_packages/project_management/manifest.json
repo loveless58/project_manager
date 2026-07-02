@@ -1,0 +1,56 @@
+{
+  "schema_version": "agentplatform.loop_package.v1",
+  "name": "project_management",
+  "version": "0.1.0",
+  "description": "Loop package for project status, risk, milestone, deliverable, archive-stage, migration, and report workflows.",
+  "route_keywords": [
+    "project_status_rollup",
+    "风险项目",
+    "项目风险",
+    "项目进度",
+    "里程碑",
+    "交付物",
+    "项目报告"
+  ],
+  "skill_interface": {
+    "skill_name": "project_management",
+    "skill_doc": "skills/project_management.md",
+    "entrypoint": "main.run",
+    "active_registry": "main._build_registry_for_skill"
+  },
+  "loop_policy": {
+    "policy_module": "skill_policies.project_management",
+    "planner_mode": "rule_fallback",
+    "terminal_statuses": ["completed", "blocked", "needs_confirmation", "failed"]
+  },
+  "workset_schema": "workset_schema.json",
+  "trace_contract": "trace_contract.json",
+  "runtime_tools": [
+    "scan_projects",
+    "read_project_record",
+    "check_milestones",
+    "check_deliverables",
+    "archive_files",
+    "migrate_project",
+    "generate_bid_overview",
+    "generate_project_overview",
+    "generate_report",
+    "write_response"
+  ],
+  "validators": [],
+  "fixtures": [],
+  "hard_rules": [
+    "active_skill_tools_only",
+    "blocked_is_not_success",
+    "needs_confirmation_stops_loop"
+  ],
+  "soft_guidance_sources": [
+    "skills/project_management.md"
+  ],
+  "derived_sources": [
+    "ToolRegistry",
+    "loop package manifest runtime_tools",
+    "governance/project_schema.json",
+    "tests/test_loop.py"
+  ]
+}

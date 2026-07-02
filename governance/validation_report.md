@@ -17,7 +17,7 @@
 
 校验内容：
 
-- 实际注册的 34 个工具与 `governance/project_schema.json` 中声明的 34 个工具是否一致
+- 实际注册的 35 个工具与 `governance/project_schema.json` 中声明的 35 个工具是否一致
 - 是否存在多余工具：已注册但未写入 schema
 - 是否存在缺失工具：schema 已声明但未注册
 - 每个工具的 required 参数是否与注册表一致
@@ -25,7 +25,7 @@
 ## 当前关键边界
 
 - 运行时采用渐进式披露：先由 skill router 选择 active skill，再只注册该 skill 的工具子集。
-- 数据清洗及文件整理 skill 暴露 13 个工具，其中 `prepare_file_organization_run`、`apply_human_review`、`execute_archive_plan` 共同构成文件整理闭环。
+- 数据清洗及文件整理 skill 暴露 14 个工具，其中 `run_ocr`、`prepare_file_organization_run`、`apply_human_review`、`execute_archive_plan` 共同构成 OCR 处理与文件整理闭环。
 - `execute_archive_plan` 在 `confirmed=false` 时必须返回 `needs_confirmation`，不得移动源文件。
 - CloudCC/CRM 工具域默认使用受控边界，真实浏览器写入必须先经过登录态探针、草稿准备和提交前确认。
 

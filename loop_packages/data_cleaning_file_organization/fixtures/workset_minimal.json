@@ -1,0 +1,26 @@
+{
+  "schema_version": "data_cleaning.workset.v1",
+  "task_type": "file_organization",
+  "inputs": {
+    "source_files": [
+      {
+        "path": "fixtures/source/采购公告.docx",
+        "source_type": "local_file",
+        "expected_extract_method": "docx_text"
+      }
+    ],
+    "project_name": ""
+  },
+  "permission_boundary": {
+    "readonly_prepare": true,
+    "external_write_allowed": false,
+    "requires_human_confirmation": true
+  },
+  "done_when": [
+    "input_manifest_written",
+    "structured_outputs_written",
+    "review_queue_written",
+    "archive_plan_written",
+    "trace_written"
+  ]
+}
