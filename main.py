@@ -23,7 +23,7 @@ from typing import Dict, List, Any, Optional
 sys.path.insert(0, os.path.dirname(__file__))
 
 from common import LoopEngine, ToolRegistry, build_react_prompt, APIAdapter
-from loop_packages import build_skill_descriptions, build_skill_tool_map
+from loop_packages import build_skill_descriptions, build_skill_registrar_map, build_skill_tool_map
 
 SKILL_TOOL_MAP = build_skill_tool_map()
 SKILL_DESCRIPTIONS = build_skill_descriptions()
@@ -193,12 +193,7 @@ def _register_cloudcc_crm_tools(reg: ToolRegistry) -> None:
                  {"record_id": {"type": "string"}, "record_url": {"type": "string"}}, [])
 
 
-SKILL_REGISTRARS = {
-    "data_cleaning_file_organization": _register_data_cleaning_file_organization_tools,
-    "project_management": _register_project_management_tools,
-    "opportunity_management": _register_opportunity_management_tools,
-    "cloudcc_crm": _register_cloudcc_crm_tools,
-}
+SKILL_REGISTRARS = build_skill_registrar_map(sys.modules[__name__])
 
 
 # ────────────────────────────────────────────

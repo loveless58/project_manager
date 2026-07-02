@@ -31,6 +31,7 @@
     "cloudcc_fill_draft_gated",
     "cloudcc_readback_record"
   ],
+  "runtime_registrar": "_register_cloudcc_crm_tools",
   "validators": [],
   "fixtures": [],
   "hard_rules": [

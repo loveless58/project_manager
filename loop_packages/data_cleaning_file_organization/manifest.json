@@ -46,6 +46,7 @@
     "generate_bid_progress_html",
     "update_project_ledger"
   ],
+  "runtime_registrar": "_register_data_cleaning_file_organization_tools",
   "validators": [
     "validate_loop_package",
     "validate_workset",

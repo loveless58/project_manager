@@ -34,6 +34,10 @@ class TestDataCleaningLoopPackage(unittest.TestCase):
         self.assertIn("validate_run_artifacts", manifest["validators"])
         self.assertIn("fixtures/workset_minimal.json", manifest["fixtures"])
         self.assertIn("prepare_file_organization_run", manifest["runtime_tools"])
+        self.assertEqual(
+            manifest["runtime_registrar"],
+            "_register_data_cleaning_file_organization_tools",
+        )
         self.assertIn("blocked_is_not_success", manifest["hard_rules"])
         self.assertIn("needs_confirmation_stops_loop", manifest["hard_rules"])
         self.assertIn("ToolRegistry", manifest["derived_sources"])
@@ -177,6 +181,17 @@ class TestDataCleaningLoopPackage(unittest.TestCase):
         self.assertEqual(main.SKILL_TOOL_MAP, build_skill_tool_map())
         self.assertNotIn("SKILL_TOOL_MAP = {", main_source)
         self.assertIn("build_skill_tool_map", main_source)
+
+    def test_main_registrar_map_is_derived_from_loop_packages(self):
+        from loop_packages import build_skill_registrar_map
+        import main
+
+        main_source = (PROJECT_DIR / "main.py").read_text(encoding="utf-8")
+        expected = build_skill_registrar_map(main)
+
+        self.assertEqual(main.SKILL_REGISTRARS, expected)
+        self.assertNotIn("SKILL_REGISTRARS = {", main_source)
+        self.assertIn("build_skill_registrar_map", main_source)
 
     def test_prepare_run_artifacts_match_package_contract(self):
         from docx import Document

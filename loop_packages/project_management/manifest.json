@@ -37,6 +37,7 @@
     "generate_report",
     "write_response"
   ],
+  "runtime_registrar": "_register_project_management_tools",
   "validators": [],
   "fixtures": [],
   "hard_rules": [

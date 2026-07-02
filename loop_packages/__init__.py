@@ -33,6 +33,10 @@ class LoopPackage:
     def route_keywords(self) -> list[str]:
         return list(self.manifest.get("route_keywords", []))
 
+    @property
+    def runtime_registrar(self) -> str:
+        return str(self.manifest.get("runtime_registrar", ""))
+
 
 def discover_loop_packages(root: Path | None = None) -> Dict[str, LoopPackage]:
     root = Path(root or PACKAGE_ROOT)
@@ -73,6 +77,19 @@ def build_skill_descriptions(root: Path | None = None) -> Dict[str, str]:
         name: str(package.manifest.get("description", ""))
         for name, package in discover_loop_packages(root).items()
     }
+
+
+def build_skill_registrar_map(registrar_module: Any, root: Path | None = None) -> Dict[str, Any]:
+    registrars: Dict[str, Any] = {}
+    for name, package in discover_loop_packages(root).items():
+        registrar_name = package.runtime_registrar
+        if not registrar_name:
+            raise ValueError(f"{name} missing runtime_registrar")
+        try:
+            registrars[name] = getattr(registrar_module, registrar_name)
+        except AttributeError as exc:
+            raise ValueError(f"{name} runtime_registrar not found: {registrar_name}") from exc
+    return registrars
 
 
 def validate_all_loop_packages(root: Path | None = None) -> Dict[str, Any]:
@@ -145,6 +162,8 @@ def _validate_generic_package(package: LoopPackage, errors: List[str]) -> None:
         errors.append(f"{package.name} route_keywords must be non-empty")
     if not package.expected_tools:
         errors.append(f"{package.name} runtime_tools must be non-empty")
+    if not package.runtime_registrar:
+        errors.append(f"{package.name} runtime_registrar must be non-empty")
     for relative_key in ["workset_schema", "trace_contract"]:
         relative_path = manifest.get(relative_key)
         if not relative_path:

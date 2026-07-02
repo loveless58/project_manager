@@ -31,6 +31,7 @@
     "generate_bid_context",
     "create_crm_suggestion"
   ],
+  "runtime_registrar": "_register_opportunity_management_tools",
   "validators": [],
   "fixtures": [],
   "hard_rules": [
