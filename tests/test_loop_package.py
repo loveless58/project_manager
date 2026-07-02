@@ -168,6 +168,16 @@ class TestDataCleaningLoopPackage(unittest.TestCase):
         self.assertEqual(package.expected_tools, package.manifest["runtime_tools"])
         self.assertEqual(reg.list_tools(), package.expected_tools)
 
+    def test_main_skill_tool_map_is_derived_from_loop_packages(self):
+        from loop_packages import build_skill_tool_map
+        import main
+
+        main_source = (PROJECT_DIR / "main.py").read_text(encoding="utf-8")
+
+        self.assertEqual(main.SKILL_TOOL_MAP, build_skill_tool_map())
+        self.assertNotIn("SKILL_TOOL_MAP = {", main_source)
+        self.assertIn("build_skill_tool_map", main_source)
+
     def test_prepare_run_artifacts_match_package_contract(self):
         from docx import Document
         from loop_packages.data_cleaning_file_organization.validators import validate_run_artifacts

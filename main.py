@@ -23,59 +23,10 @@ from typing import Dict, List, Any, Optional
 sys.path.insert(0, os.path.dirname(__file__))
 
 from common import LoopEngine, ToolRegistry, build_react_prompt, APIAdapter
+from loop_packages import build_skill_descriptions, build_skill_tool_map
 
-SKILL_TOOL_MAP = {
-    "data_cleaning_file_organization": [
-        "scan_raw_files",
-        "extract_pdf",
-        "extract_document",
-        "run_ocr",
-        "classify_document",
-        "batch_process",
-        "save_structured",
-        "process_documents_to_ledger",
-        "prepare_file_organization_run",
-        "apply_human_review",
-        "execute_archive_plan",
-        "import_project_detail_workbook",
-        "generate_bid_progress_html",
-        "update_project_ledger",
-    ],
-    "project_management": [
-        "scan_projects",
-        "read_project_record",
-        "check_milestones",
-        "check_deliverables",
-        "archive_files",
-        "migrate_project",
-        "generate_bid_overview",
-        "generate_project_overview",
-        "generate_report",
-        "write_response",
-    ],
-    "opportunity_management": [
-        "scan_bid_notices",
-        "parse_bid_notice",
-        "check_duplicate",
-        "generate_bid_context",
-        "create_crm_suggestion",
-    ],
-    "cloudcc_crm": [
-        "cloudcc_session_probe",
-        "cloudcc_search_record",
-        "cloudcc_duplicate_check",
-        "cloudcc_prepare_opportunity_draft",
-        "cloudcc_fill_draft_gated",
-        "cloudcc_readback_record",
-    ],
-}
-
-SKILL_DESCRIPTIONS = {
-    "data_cleaning_file_organization": "处理 Word、PDF、XLSX、网页导出等资料，提取候选事实并更新项目总览账本。",
-    "project_management": "项目进度、风险、归档、汇总和报告生成。",
-    "opportunity_management": "招标公告解析、商机上下文生成和商机查重建议。",
-    "cloudcc_crm": "CloudCC/CRM 查重、草稿准备、受控填写和回读校验。",
-}
+SKILL_TOOL_MAP = build_skill_tool_map()
+SKILL_DESCRIPTIONS = build_skill_descriptions()
 
 # ────────────────────────────────────────────
 # 动态导入所有工具模块（避免模块名冲突）

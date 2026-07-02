@@ -61,6 +61,20 @@ def route_skill_from_packages(goal: str, default: str = "project_management") ->
     return default
 
 
+def build_skill_tool_map(root: Path | None = None) -> Dict[str, list[str]]:
+    return {
+        name: package.expected_tools
+        for name, package in discover_loop_packages(root).items()
+    }
+
+
+def build_skill_descriptions(root: Path | None = None) -> Dict[str, str]:
+    return {
+        name: str(package.manifest.get("description", ""))
+        for name, package in discover_loop_packages(root).items()
+    }
+
+
 def validate_all_loop_packages(root: Path | None = None) -> Dict[str, Any]:
     packages = discover_loop_packages(root)
     errors: List[str] = []
