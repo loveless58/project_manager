@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -124,6 +125,27 @@ class TestDataCleaningLoopPackage(unittest.TestCase):
         self.assertEqual(result["status"], "pass", result)
         self.assertEqual(result["package_count"], 4)
         self.assertEqual(result["errors"], [])
+
+    def test_governance_validator_exposes_loop_package_target(self):
+        import governance.validate as governance_validate
+
+        errors, warnings, findings = governance_validate.validate_loop_packages(verbose=False)
+
+        self.assertEqual(errors, 0, findings)
+        self.assertEqual(warnings, 0, findings)
+
+    def test_governance_cli_accepts_loop_packages_command(self):
+        result = subprocess.run(
+            [sys.executable, "-X", "utf8", "-B", "governance/validate.py", "loop-packages"],
+            cwd=PROJECT_DIR,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("loop package", result.stdout.lower())
+        self.assertIn("0 errors, 0 warnings", result.stdout)
 
     def test_package_route_keywords_drive_runtime_skill_selection(self):
         from loop_packages import route_skill_from_packages

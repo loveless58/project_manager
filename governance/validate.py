@@ -178,6 +178,35 @@ def validate_tools(verbose: bool = True) -> Tuple[int, int, List[dict]]:
     return error_count, warning_count, findings
 
 
+def validate_loop_packages(verbose: bool = True) -> Tuple[int, int, List[dict]]:
+    """Validate loop package manifests against runtime registry contracts."""
+    sys.path.insert(0, str(PROJECT_ROOT))
+    findings: List[dict] = []
+    try:
+        from loop_packages import validate_all_loop_packages  # noqa: E402
+    except Exception as e:
+        msg = f"[ERROR] cannot import loop package validator: {e}"
+        findings.append({"id": "LOOP-PACKAGE-IMPORT", "level": "error", "msg": msg})
+        if verbose:
+            print(f"❌ {msg}")
+        return 1, 0, findings
+
+    result = validate_all_loop_packages()
+    for index, error in enumerate(result.get("errors", []), 1):
+        msg = f"[ERROR] loop package validation failed: {error}"
+        findings.append({"id": f"LOOP-PACKAGE-{index:03d}", "level": "error", "msg": msg})
+        if verbose:
+            print(f"❌ {msg}")
+
+    if verbose and not findings:
+        package_count = result.get("package_count", 0)
+        packages = ", ".join(result.get("packages", []))
+        print(f"✅ loop package contracts consistent: {package_count} packages")
+        print(f"   packages: {packages}")
+
+    return len(findings), 0, findings
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -186,6 +215,12 @@ def main():
     command = sys.argv[1]
     error_count = 0
     warning_count = 0
+
+    valid_commands = {"dirs", "tools", "loop-packages", "all"}
+    if command not in valid_commands:
+        print(f"Unknown command: {command}")
+        print("Expected one of: dirs, tools, loop-packages, all")
+        sys.exit(2)
 
     print(f"📂 工作基址: {BASE_DIR}")
     print(f"📦 项目根: {PROJECT_ROOT}")
@@ -205,6 +240,15 @@ def main():
         print("工具 schema 校验")
         print("=" * 60)
         e, w, _ = validate_tools()
+        error_count += e
+        warning_count += w
+        print()
+
+    if command in ("loop-packages", "all"):
+        print("=" * 60)
+        print("loop package 合约校验")
+        print("=" * 60)
+        e, w, _ = validate_loop_packages()
         error_count += e
         warning_count += w
         print()
