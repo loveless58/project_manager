@@ -1,4 +1,8 @@
 # 项目依赖
 requests>=2.31.0
 python-dotenv>=1.0.0
+# 数据清洗及文件整理 skill：Word/PDF/Excel 文件解析
+python-docx>=1.0.0
+openpyxl>=3.1.0
+pymupdf>=1.20.0
 # 核心框架 common/ 模块已内联到本项目，无需额外安装
