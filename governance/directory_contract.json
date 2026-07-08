@@ -8,11 +8,11 @@
   "required_dirs": {
     "project_files": {
       "path": "项目文件",
-      "required_subdirs": ["项目投标", "项目执行", "项目归档"],
-      "optional_subdirs": ["新机会与线索", "公司通用财务", "项目丢标"],
+      "required_subdirs": ["项目投标", "项目执行", "项目丢标"],
+      "optional_subdirs": ["新机会与线索", "公司通用财务"],
       "required_files": ["index.json"],
       "validation_level": "error",
-      "description": "项目数据根目录（三阶段目录 + index.json）"
+      "description": "项目数据根目录（三阶段目录：项目投标 / 项目执行 / 项目丢标 + index.json）"
     },
     "data_cleaning_workbench": {
       "path": "数据清洗工作台",
