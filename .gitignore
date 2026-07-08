@@ -1,14 +1,42 @@
+# macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Python 构建产物
 __pycache__/
-*.pyc
-*.pyo
-.pytest_cache/
-.mypy_cache/
-.env
+*.py[cod]
+*$py.class
+*.so
 *.egg-info/
 dist/
 build/
+
+# 测试缓存
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 机密
+.env
+.env.local
+secrets.yaml
+*.pem
+*.key
+
+# ===运行时产物（不入 git，本地审计用）===
+
+# 日志（按 agent_name 时间戳命名）
 logs/project_manager_*.json
+
+# state/ 下所有运行时子目录
 state/project_ledgers/
 state/runs/
 state/full_loop_simulation_workspace/
@@ -19,3 +47,18 @@ state/subagent_check_*/
 state/subagent_check_*.md
 state/structured_documents/
 state/structured_workbooks/
+
+# state/ 下临时笔记文件
+state/*.md
+!state/README.md
+
+# 运行时报告
+reports/*.md
+
+# 历史评估报告（已迁移至 .runtime/archive/superpowers-reports/）
+docs/superpowers/reports/
+!docs/superpowers/plans/
+
+# 外层本地运行时目录（不入 git）
+.runtime/
+
