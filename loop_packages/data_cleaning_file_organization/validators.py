@@ -126,7 +126,7 @@ def validate_run_artifacts(run_result: Dict[str, Any]) -> Dict[str, Any]:
     artifacts = run_result.get("artifacts", {})
     required_artifacts = {
         "input_manifest": "file_organization.input_manifest.v1",
-        "review_queue": "review_queue.v1",
+        "review_queue": {"review_queue.v1", "review_queue.v2"},
         "planned_archive_actions": "archive_plan.v1",
         "trace": "file_organization.trace.v1",
     }
@@ -140,7 +140,8 @@ def validate_run_artifacts(run_result: Dict[str, Any]) -> Dict[str, Any]:
             errors.append(f"artifact path missing: {key}")
             continue
         payload = load_json(path)
-        if payload.get("schema_version") != expected_schema:
+        expected_versions = expected_schema if isinstance(expected_schema, set) else {expected_schema}
+        if payload.get("schema_version") not in expected_versions:
             errors.append(f"{key} schema_version mismatch")
         if run_result.get("run_id") and payload.get("run_id") != run_result["run_id"]:
             errors.append(f"{key} run_id mismatch")

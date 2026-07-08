@@ -28,10 +28,32 @@ from datetime import datetime
 
 from common.file_readiness import probe_readable_file, probe_writable_dir
 from common.workspace_config import default_data_cleaning_workspace, resolve_workspace_config
+from agents import AdversarialAgent, AuditAgent
 from business_rules.archive_decision import evaluate_archive_decision
 from business_rules.bid_project_rules import BidProjectRuleEngine
 from business_rules.field_quality import filter_business_facts
 from business_rules.semantic_document import apply_semantic_guardrail, normalize_semantic_response
+from contracts.feedback_schema import (
+    FeedbackValidationError,
+    build_parser_test_candidates,
+    build_rule_candidates,
+    feedback_event,
+    normalize_feedback_decision,
+)
+from contracts.feedback_form_schema import (
+    build_feedback_form,
+    feedback_decisions_from_form,
+    render_feedback_form_markdown,
+)
+from contracts.archive_gate_schema import evaluate_archive_execution_gate
+from contracts.ocr_aliases import resolve_ocr_field
+from contracts.parsers import extract_deadlines, normalize_date, parse_amount
+from contracts.review_queue_schema import normalize_review_queue
+from contracts.test_candidate_schema import (
+    build_candidate_test_manifest,
+    render_parser_candidate_tests,
+    render_rule_candidate_tests,
+)
 from ledger import ProjectLedger
 from ocr import normalize_ocr_result
 from ocr import provider_registry
@@ -212,8 +234,11 @@ class DataCleaningTools:
         )
         text = result.get("extracted_text", "")
         if result.get("status") == "success":
-            result["fields"] = self._extract_fields(text)
-            result["document_type"] = self._classify_text_document(file_path, text)
+            document_type = result.get("document_type") or self._classify_text_document(file_path, text)
+            fields = self._extract_fields(text)
+            self._apply_ocr_field_aliases(fields, result.get("fields", {}), document_type)
+            result["fields"] = fields
+            result["document_type"] = document_type
         return result
 
     def run_ocr(self, file_path: str) -> Dict[str, Any]:
@@ -717,8 +742,64 @@ class DataCleaningTools:
                 value = self._normalize_payment_amount(value)
             if value:
                 fields[field] = value
-        
+
+        self._apply_contract_text_fields(text, fields)
         return fields
+
+    def _apply_contract_text_fields(self, text: str, fields: Dict[str, Any]) -> None:
+        deadlines = extract_deadlines(text)
+        fields.update(deadlines)
+        if deadlines.get("bid_deadline"):
+            fields["deadline"] = deadlines["bid_deadline"]
+
+        amount_match = re.search(
+            r"(?:项目金额|预算金额|采购预算|最高限价|报价|投标报价|合同金额|金额)\s*[:：]\s*(.+?)(?:\n|$)",
+            text,
+        )
+        if amount_match:
+            amount, label = parse_amount(amount_match.group(1))
+            if amount is not None:
+                fields.setdefault("amount", amount)
+            if label:
+                fields.setdefault("amount_label", label)
+
+    def _apply_ocr_field_aliases(
+        self,
+        fields: Dict[str, Any],
+        ocr_fields: Optional[Dict[str, Any]],
+        document_type: str,
+    ) -> None:
+        if not isinstance(ocr_fields, dict):
+            return
+
+        amount_fields = {"amount", "bid_fee", "budget", "quoted_amount", "contract_amount", "project_amount"}
+        date_fields = {
+            "date",
+            "bid_deadline",
+            "registration_deadline",
+            "bid_open_time",
+            "payment_date",
+            "contract_date",
+            "bid_announcement_date",
+            "document_date",
+        }
+        for source_field, raw_value in ocr_fields.items():
+            if raw_value in (None, ""):
+                continue
+            target_field = resolve_ocr_field(source_field, document_type)
+            value = raw_value
+            if target_field in amount_fields:
+                amount, label = parse_amount(raw_value)
+                if amount is not None:
+                    value = amount
+                if label:
+                    fields.setdefault("amount_label", label)
+            elif source_field in date_fields or target_field in date_fields:
+                value = normalize_date(raw_value) or raw_value
+
+            fields[target_field] = value
+            if target_field == "bid_deadline":
+                fields["deadline"] = value
 
     @staticmethod
     def _clean_markdown_field_value(value: str) -> str:
@@ -1500,6 +1581,327 @@ class DataCleaningTools:
             "artifacts": artifacts,
         }
 
+    def verify_file_organization_run(self, run_id: str) -> Dict[str, Any]:
+        """Read-only verification over a prepared file-organization run package."""
+        run_dir = os.path.join(self.workspace_dir, "runs", run_id)
+        if not os.path.isdir(run_dir):
+            return {
+                "schema_version": "adversarial_verification.v1",
+                "status": "failed",
+                "run_id": run_id,
+                "error": f"Run directory not found: {run_dir}",
+            }
+
+        extracted_items: List[Dict[str, Any]] = []
+        extracted_dir = os.path.join(run_dir, "extracted")
+        if os.path.isdir(extracted_dir):
+            for name in sorted(os.listdir(extracted_dir)):
+                if not name.endswith(".json"):
+                    continue
+                payload = self._load_json_file(os.path.join(extracted_dir, name))
+                extraction = payload.get("extraction")
+                if isinstance(extraction, dict):
+                    extracted_items.append(extraction)
+
+        archive_actions: List[Dict[str, Any]] = []
+        plan_path = os.path.join(run_dir, "planned_archive_actions.json")
+        if os.path.exists(plan_path):
+            plan = self._load_json_file(plan_path)
+            actions = plan.get("actions", [])
+            if isinstance(actions, list):
+                archive_actions = actions
+
+        return AdversarialAgent(workspace_dir=self.workspace_dir).review(
+            run_id=run_id,
+            extracted_items=extracted_items,
+            ledger_results=[],
+            archive_actions=archive_actions,
+        )
+
+    def audit_file_organization_run(self, run_id: str) -> Dict[str, Any]:
+        """Read-only audit over a prepared and verified file-organization run package."""
+        return AuditAgent(workspace_dir=self.workspace_dir).review_run(run_id)
+
+    def prepare_feedback_form(self, run_id: str) -> Dict[str, Any]:
+        """Write a human-editable feedback form for a prepared run package."""
+        run_dir = os.path.join(self.workspace_dir, "runs", run_id)
+        if not os.path.isdir(run_dir):
+            return {
+                "schema_version": "feedback_form.prepare.v1",
+                "status": "failed",
+                "run_id": run_id,
+                "error": f"Run directory not found: {run_dir}",
+            }
+
+        review_queue = self._load_json_file(os.path.join(run_dir, "review_queue.json")) if os.path.exists(os.path.join(run_dir, "review_queue.json")) else {}
+        audit_review = self._load_json_file(os.path.join(run_dir, "audit_review.json")) if os.path.exists(os.path.join(run_dir, "audit_review.json")) else {}
+        adversarial_verification = self._load_json_file(os.path.join(run_dir, "adversarial_verification.json")) if os.path.exists(os.path.join(run_dir, "adversarial_verification.json")) else {}
+        form = build_feedback_form(
+            run_id=run_id,
+            review_queue=review_queue,
+            audit_review=audit_review,
+            adversarial_verification=adversarial_verification,
+        )
+
+        artifacts = {
+            "feedback_form_json": os.path.join(run_dir, "feedback_form.json"),
+            "feedback_form_md": os.path.join(run_dir, "feedback_form.md"),
+        }
+        self._save_structured_json(artifacts["feedback_form_json"], form)
+        with open(artifacts["feedback_form_md"], "w", encoding="utf-8") as f:
+            f.write(render_feedback_form_markdown(form))
+
+        return {
+            "schema_version": "feedback_form.prepare.v1",
+            "status": "success",
+            "run_id": run_id,
+            "item_count": len(form["items"]),
+            "required_feedback_items": form["required_feedback_items"],
+            "artifacts": artifacts,
+            "boundary": {
+                "moved_files": False,
+                "updated_business_ledger": False,
+                "archive_plan_executed": False,
+            },
+        }
+
+    def apply_feedback_form(
+        self,
+        run_id: str,
+        feedback_form: Optional[Dict[str, Any]] = None,
+        feedback_form_path: str = "",
+        generate_tests: bool = True,
+    ) -> Dict[str, Any]:
+        """Apply a filled feedback_form.v1 and optionally generate candidate tests."""
+        run_dir = os.path.join(self.workspace_dir, "runs", run_id)
+        if not os.path.isdir(run_dir):
+            return {
+                "schema_version": "feedback_form.apply.v1",
+                "status": "failed",
+                "run_id": run_id,
+                "error": f"Run directory not found: {run_dir}",
+            }
+        if feedback_form is None:
+            form_path = feedback_form_path or os.path.join(run_dir, "feedback_form.json")
+            if not os.path.exists(form_path):
+                return {
+                    "schema_version": "feedback_form.apply.v1",
+                    "status": "failed",
+                    "run_id": run_id,
+                    "error": f"Feedback form not found: {form_path}",
+                }
+            feedback_form = self._load_json_file(form_path)
+
+        decisions = feedback_decisions_from_form(feedback_form)
+        feedback_apply = self.apply_feedback_decisions(run_id=run_id, feedback_decisions=decisions)
+        candidate_tests = None
+        if generate_tests and feedback_apply.get("accepted", 0):
+            candidate_tests = self.generate_candidate_tests(run_id)
+
+        artifacts = dict(feedback_apply.get("artifacts") or {})
+        if candidate_tests:
+            artifacts.update(candidate_tests.get("artifacts") or {})
+
+        return {
+            "schema_version": "feedback_form.apply.v1",
+            "status": feedback_apply.get("status", "failed"),
+            "run_id": run_id,
+            "accepted": feedback_apply.get("accepted", 0),
+            "failed": feedback_apply.get("failed", 0),
+            "feedback_decisions": decisions,
+            "feedback_apply": feedback_apply,
+            "candidate_tests": candidate_tests,
+            "artifacts": artifacts,
+            "boundary": {
+                "moved_files": False,
+                "updated_business_ledger": False,
+                "archive_plan_executed": False,
+            },
+        }
+
+    def apply_feedback_decisions(self, run_id: str, feedback_decisions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Persist structured human feedback for later rule/test authoring.
+
+        This does not move files, write business ledgers, or modify source artifacts.
+        """
+        if isinstance(feedback_decisions, dict):
+            feedback_decisions = [feedback_decisions]
+        run_dir = os.path.join(self.workspace_dir, "runs", run_id)
+        os.makedirs(run_dir, exist_ok=True)
+
+        accepted: List[Dict[str, Any]] = []
+        errors: List[Dict[str, Any]] = []
+        for index, raw in enumerate(feedback_decisions or [], 1):
+            try:
+                accepted.append(normalize_feedback_decision(raw, run_id=run_id, index=index))
+            except FeedbackValidationError as exc:
+                errors.append({
+                    "index": index,
+                    "error": exc.code,
+                    "message": str(exc),
+                    "item": raw,
+                })
+
+        events = [feedback_event(decision) for decision in accepted]
+        rule_candidates = build_rule_candidates(accepted)
+        parser_test_candidates = build_parser_test_candidates(accepted)
+
+        artifacts = {
+            "human_feedback_decisions": os.path.join(run_dir, "human_feedback_decisions.json"),
+            "feedback_events": os.path.join(run_dir, "feedback_events.jsonl"),
+            "rule_candidates": os.path.join(run_dir, "rule_candidates.json"),
+            "parser_test_candidates": os.path.join(run_dir, "parser_test_candidates.json"),
+        }
+        review_queue_updates = self._apply_feedback_to_review_queue(run_dir, accepted)
+        if review_queue_updates.get("artifact"):
+            artifacts["review_queue"] = review_queue_updates["artifact"]
+        self._save_structured_json(artifacts["human_feedback_decisions"], {
+            "schema_version": "human_feedback.decisions.v1",
+            "run_id": run_id,
+            "decisions": accepted,
+            "errors": errors,
+        })
+        with open(artifacts["feedback_events"], "w", encoding="utf-8") as f:
+            for event in events:
+                f.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+        self._save_structured_json(artifacts["rule_candidates"], {
+            "schema_version": "rule_candidates.v1",
+            "run_id": run_id,
+            "items": rule_candidates,
+        })
+        self._save_structured_json(artifacts["parser_test_candidates"], {
+            "schema_version": "parser_test_candidates.v1",
+            "run_id": run_id,
+            "items": parser_test_candidates,
+        })
+
+        return {
+            "schema_version": "human_feedback.apply.v1",
+            "status": "success" if accepted and not errors else ("partial" if accepted else "failed"),
+            "run_id": run_id,
+            "accepted": len(accepted),
+            "failed": len(errors),
+            "decisions": accepted,
+            "errors": errors,
+            "rule_candidates": rule_candidates,
+            "parser_test_candidates": parser_test_candidates,
+            "review_queue_updates": review_queue_updates,
+            "artifacts": artifacts,
+            "boundary": {
+                "moved_files": False,
+                "updated_business_ledger": False,
+                "archive_plan_executed": False,
+            },
+        }
+
+    def _apply_feedback_to_review_queue(
+        self,
+        run_dir: str,
+        feedback_decisions: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        review_queue_path = os.path.join(run_dir, "review_queue.json")
+        if not os.path.exists(review_queue_path):
+            return {
+                "status": "skipped",
+                "updated": 0,
+                "pending": [],
+                "artifact": "",
+            }
+
+        queue = self._load_json_file(review_queue_path)
+        items = queue.get("items", [])
+        if not isinstance(items, list):
+            return {
+                "status": "failed",
+                "updated": 0,
+                "pending": [],
+                "artifact": review_queue_path,
+                "error": "review_queue.items must be a list",
+            }
+
+        by_item_id: Dict[str, List[Dict[str, Any]]] = {}
+        for decision in feedback_decisions:
+            by_item_id.setdefault(str(decision.get("item_id") or ""), []).append(decision)
+
+        updated = 0
+        pending: List[str] = []
+        now = datetime.now().isoformat()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or item.get("item_id") or "")
+            decisions = by_item_id.get(item_id, [])
+            if decisions:
+                item["feedback_status"] = "feedback_received"
+                item["feedback_ids"] = [decision["feedback_id"] for decision in decisions]
+                item["feedback_decisions"] = [decision["decision"] for decision in decisions]
+                item["feedback_updated_at"] = now
+                updated += 1
+            else:
+                item.setdefault("feedback_status", "pending")
+                pending.append(item_id)
+
+        queue["items"] = items
+        queue["status"] = "reviewed" if items and not pending else ("needs_review" if items else "clear")
+        queue["feedback_summary"] = {
+            "updated": updated,
+            "pending": pending,
+            "updated_at": now,
+        }
+        self._save_structured_json(review_queue_path, queue)
+        return {
+            "status": "updated",
+            "updated": updated,
+            "pending": pending,
+            "artifact": review_queue_path,
+        }
+
+    def generate_candidate_tests(self, run_id: str) -> Dict[str, Any]:
+        """Generate runnable test-draft artifacts from feedback candidates.
+
+        The generated files stay inside the run package. They are review inputs,
+        not automatically promoted repository tests.
+        """
+        run_dir = os.path.join(self.workspace_dir, "runs", run_id)
+        if not os.path.isdir(run_dir):
+            return {
+                "schema_version": "candidate_test_generation.v1",
+                "status": "failed",
+                "run_id": run_id,
+                "error": f"Run directory not found: {run_dir}",
+            }
+
+        parser_candidates = self._load_candidate_items(os.path.join(run_dir, "parser_test_candidates.json"))
+        rule_candidates = self._load_candidate_items(os.path.join(run_dir, "rule_candidates.json"))
+
+        generated_dir = os.path.join(run_dir, "generated_tests")
+        artifacts = {
+            "parser_candidate_tests": os.path.join(generated_dir, "parser_candidate_tests.py"),
+            "rule_candidate_tests": os.path.join(generated_dir, "rule_candidate_tests.py"),
+            "test_manifest": os.path.join(generated_dir, "test_manifest.json"),
+        }
+        os.makedirs(generated_dir, exist_ok=True)
+        with open(artifacts["parser_candidate_tests"], "w", encoding="utf-8") as f:
+            f.write(render_parser_candidate_tests(parser_candidates))
+        with open(artifacts["rule_candidate_tests"], "w", encoding="utf-8") as f:
+            f.write(render_rule_candidate_tests(rule_candidates))
+
+        manifest = build_candidate_test_manifest(
+            run_id=run_id,
+            parser_candidates=parser_candidates,
+            rule_candidates=rule_candidates,
+            artifacts=artifacts,
+        )
+        self._save_structured_json(artifacts["test_manifest"], manifest)
+        return manifest
+
+    def _load_candidate_items(self, path: str) -> List[Dict[str, Any]]:
+        if not os.path.exists(path):
+            return []
+        payload = self._load_json_file(path)
+        items = payload.get("items", [])
+        return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
     def _first_project_name(self, archive_actions: List[Dict[str, Any]], structured_outputs: List[str]) -> str:
         for action in archive_actions:
             name = action.get("project_name")
@@ -1825,6 +2227,21 @@ class DataCleaningTools:
                 "message": "Archive plan prepared but not executed. Call with confirmed=True to move files.",
             }
 
+        gate = self._evaluate_archive_execution_gate(run_id=run_id, run_dir=run_dir, confirmed=confirmed)
+        if gate["status"] != "passed":
+            return {
+                "schema_version": "archive_plan.execute.v1",
+                "status": "blocked",
+                "run_id": run_id,
+                "moved": 0,
+                "failed": len(actions),
+                "results": [],
+                "gate": gate,
+                "artifacts": {
+                    "archive_execution_gate": os.path.join(run_dir, "archive_execution_gate.json"),
+                },
+            }
+
         results = []
         review_decisions_path = os.path.join(run_dir, "review_decisions.json")
         has_human_review = os.path.exists(review_decisions_path)
@@ -1929,8 +2346,23 @@ class DataCleaningTools:
             "moved": moved,
             "failed": failed,
             "results": results,
+            "gate": gate,
             "artifacts": artifacts,
         }
+
+    def _evaluate_archive_execution_gate(self, run_id: str, run_dir: str, confirmed: bool) -> Dict[str, Any]:
+        audit_path = os.path.join(run_dir, "audit_review.json")
+        review_queue_path = os.path.join(run_dir, "review_queue.json")
+        audit_review = self._load_json_file(audit_path) if os.path.exists(audit_path) else {}
+        review_queue = self._load_json_file(review_queue_path) if os.path.exists(review_queue_path) else {}
+        gate = evaluate_archive_execution_gate(
+            run_id=run_id,
+            confirmed=confirmed,
+            audit_review=audit_review,
+            review_queue=review_queue,
+        )
+        self._save_structured_json(os.path.join(run_dir, "archive_execution_gate.json"), gate)
+        return gate
 
     def _build_archive_action(
         self,
@@ -2019,12 +2451,7 @@ class DataCleaningTools:
                     "blockers": action.get("blockers", []),
                     "recommended_action": "确认归档计划后再执行 execute_archive_plan",
                 })
-        return {
-            "schema_version": "review_queue.v1",
-            "run_id": run_id,
-            "status": "needs_review" if items else "clear",
-            "items": items,
-        }
+        return normalize_review_queue(run_id=run_id, raw_items=items)
 
     def _write_run_report(
         self,
@@ -2853,6 +3280,12 @@ class DataCleaningTools:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _load_json_file(path: str) -> Dict[str, Any]:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else {}
 
     def classify_document(self, file_path: str) -> Dict:
         """根据文件名/内容分类文档到业务领域"""

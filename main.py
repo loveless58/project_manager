@@ -141,7 +141,33 @@ def _register_data_cleaning_file_organization_tools(reg: ToolRegistry, workspace
                  {
                      "file_paths": {"type": "array"},
                      "project_name": {"type": "string"},
-                 }, ["file_paths"])
+                  }, ["file_paths"])
+    reg.register("verify_file_organization_run", "只读验证已生成的文件整理运行包：审查提取字段、OCR质量和归档计划，写入 adversarial_verification.json，不移动文件、不写账本",
+                 dt.verify_file_organization_run,
+                 {"run_id": {"type": "string"}}, ["run_id"])
+    reg.register("audit_file_organization_run", "只读审计已生成并验证的文件整理运行包：检查必需 artifact、验证报告和人工确认状态，写入 audit_review.json，不移动文件、不写账本",
+                 dt.audit_file_organization_run,
+                 {"run_id": {"type": "string"}}, ["run_id"])
+    reg.register("prepare_feedback_form", "为文件整理 run 生成可编辑反馈表 feedback_form.json 和人读 Markdown；不移动文件、不写账本",
+                 dt.prepare_feedback_form,
+                 {"run_id": {"type": "string"}}, ["run_id"])
+    reg.register("apply_feedback_form", "应用已填写的 feedback_form.json，转换为标准反馈并可生成候选测试草案；不执行归档",
+                 dt.apply_feedback_form,
+                 {
+                     "run_id": {"type": "string"},
+                     "feedback_form": {"type": "object"},
+                     "feedback_form_path": {"type": "string"},
+                     "generate_tests": {"type": "boolean"},
+                 }, ["run_id"])
+    reg.register("apply_feedback_decisions", "标准化并落盘人工批量反馈，生成 feedback_events、rule_candidates 和 parser_test_candidates；不移动文件、不写账本、不执行归档",
+                 dt.apply_feedback_decisions,
+                 {
+                     "run_id": {"type": "string"},
+                     "feedback_decisions": {"type": "array"},
+                 }, ["run_id", "feedback_decisions"])
+    reg.register("generate_candidate_tests", "将人工反馈生成的 parser/rule candidates 转成 run 包内可运行的测试草案；不修改仓库 tests",
+                 dt.generate_candidate_tests,
+                 {"run_id": {"type": "string"}}, ["run_id"])
     reg.register("apply_human_review", "应用人工复核修正，将复核结果写入项目总览账本并生成规则候选",
                  dt.apply_human_review,
                  {

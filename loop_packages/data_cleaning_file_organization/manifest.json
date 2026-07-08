@@ -42,6 +42,12 @@
     "extract_structured_business_output",
     "semantic_structure_document",
     "prepare_file_organization_run",
+    "verify_file_organization_run",
+    "audit_file_organization_run",
+    "prepare_feedback_form",
+    "apply_feedback_form",
+    "apply_feedback_decisions",
+    "generate_candidate_tests",
     "apply_human_review",
     "execute_archive_plan",
     "import_project_detail_workbook",
@@ -63,7 +69,8 @@
     "needs_confirmation_stops_loop",
     "readonly_prepare_does_not_move_source_files",
     "archive_requires_confirmed_true",
-    "human_review_required_blocks_archive_until_review_artifact_exists"
+    "human_review_required_blocks_archive_until_review_artifact_exists",
+    "archive_execution_gate_blocks_pending_feedback"
   ],
   "soft_guidance_sources": [
     "skills/data_cleaning_file_organization.md"

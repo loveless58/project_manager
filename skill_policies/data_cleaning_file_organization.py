@@ -1,3 +1,4 @@
+import ast
 import json
 import re
 from typing import List, Optional
@@ -25,15 +26,39 @@ class DataCleaningFileOrganizationPolicy:
                 "project_name": "",
             }
             return PolicyDecision(
-                "Thought: 用户要求整理和归档真实文件，先准备文件整理运行包：清洗结构化、业务判断、人工复核队列和归档计划；此步不移动源文件。\n"
+                "Thought: 用户要求整理和归档真实文件，先准备文件整理运行包：结构化提取、业务判断、人工复核队列和归档计划；此步骤不移动源文件。\n"
                 "Action: prepare_file_organization_run\n"
                 f"Action Input: {json.dumps(payload, ensure_ascii=False)}"
             )
 
+        if "prepare_file_organization_run" in executed and "verify_file_organization_run" not in executed:
+            run_id = self._extract_run_id(last_observation)
+            if run_id:
+                payload = {"run_id": run_id}
+                return PolicyDecision(
+                    "Thought: 文件整理运行包已生成，先调用反驳型 Agent 做只读验证；此步骤不移动文件、不写账本。\n"
+                    "Action: verify_file_organization_run\n"
+                    f"Action Input: {json.dumps(payload, ensure_ascii=False)}"
+                )
+
+        if "verify_file_organization_run" in executed and "audit_file_organization_run" not in executed:
+            run_id = self._extract_run_id(last_observation)
+            if run_id:
+                payload = {"run_id": run_id}
+                return PolicyDecision(
+                    "Thought: 反驳型验证已完成，继续调用审计型 Agent 检查 artifact、验证报告和确认状态；此步骤仍然只读。\n"
+                    "Action: audit_file_organization_run\n"
+                    f"Action Input: {json.dumps(payload, ensure_ascii=False)}"
+                )
+
+        if "audit_file_organization_run" in executed:
+            return PolicyDecision(
+                "Final Answer: 文件整理运行包已经完成 prepare、反驳型验证和审计型复核。请根据 audit_review.json 与 adversarial_verification.json 的 verdict 决定是否人工复核；真实归档仍需显式调用 execute_archive_plan(run_id, confirmed=true)。"
+            )
+
         if "prepare_file_organization_run" in executed and "execute_archive_plan" not in executed:
             return PolicyDecision(
-                "Final Answer: 文件整理运行包已生成，包含结构化提取结果、项目总览账本、人工复核队列、归档计划和运行报告。"
-                " 为避免误移动原文件，归档执行需要人工确认后调用 execute_archive_plan(run_id, confirmed=true)。"
+                "Final Answer: 文件整理运行包已生成，但没有从 Observation 中解析到 run_id，未能自动进入反驳验证。为避免误移动源文件，归档执行仍需人工确认后调用 execute_archive_plan(run_id, confirmed=true)。"
             )
 
         if workbook_paths and "import_project_detail_workbook" not in executed:
@@ -74,7 +99,7 @@ class DataCleaningFileOrganizationPolicy:
             return PolicyDecision(
                 "Thought: 数据清洗及文件整理的第一步是把清洗后的候选事实写入项目总览账本，先跑最小 ledger 循环。\n"
                 "Action: update_project_ledger\n"
-                "Action Input: {\"project_name\": \"示例项目\", \"facts\": {\"project_name\": \"示例项目\", \"bid_status\": \"待补充\"}, "
+                "Action Input: {\"project_name\": \"示例项目\", \"facts\": {\"project_name\": \"示例项目\", \"bid_status\": \"待补全\"}, "
                 "\"evidence\": [{\"field\": \"bid_status\", \"source_ref\": \"manual_goal\", \"confidence\": 0.6}], \"source_type\": \"local_file\"}"
             )
 
@@ -85,3 +110,16 @@ class DataCleaningFileOrganizationPolicy:
     def _extract_file_paths(self, goal: str) -> List[str]:
         pattern = r'(?:[A-Za-z]:\\[^"\'\s]+|[\/~][^"\'\s]+)\.(?:docx|pdf|xlsx|xls|md|html|png|jpg|jpeg)'
         return re.findall(pattern, goal, flags=re.IGNORECASE)
+
+    def _extract_run_id(self, observation: Optional[str]) -> str:
+        if not observation:
+            return ""
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                payload = parser(observation)
+            except (ValueError, SyntaxError, TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict) and payload.get("run_id"):
+                return str(payload["run_id"])
+        match = re.search(r"['\"]?run_id['\"]?\s*:\s*['\"]([^'\"]+)['\"]", observation)
+        return match.group(1) if match else ""
