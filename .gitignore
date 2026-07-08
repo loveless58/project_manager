@@ -48,6 +48,12 @@ state/subagent_check_*/
 state/subagent_check_*.md
 state/structured_documents/
 state/structured_workbooks/
+state/all_execution_recheck/
+state/loop_structured_runs/
+state/real_scene_structured/
+state/semantic_eval_project_execution/
+state/targeted_field_quality_recheck/
+tmp_ocr_verify/
 
 # Runtime notes under state; keep the documented state entrypoint.
 state/*.md
