@@ -16,22 +16,7 @@ import os
 import re
 from typing import Any, Dict, List
 
-
-REVIEW_DIMENSIONS = [
-    "field_completeness",          # 字段完整性
-    "field_accuracy",              # 字段准确性
-    "document_classification",     # 文档分类
-    "archive_plan",                # 归档合理性
-    "cross_doc_consistency",       # 跨文档一致性（V1.1+）
-]
-
-
-REQUIRED_FIELDS = {
-    "投标文件": ["project_name", "budget", "customer", "deadline"],
-    "采购公告": ["project_name", "budget", "customer", "deadline"],
-    "合同": ["project_name", "customer", "contract_status"],
-    "未分类": ["project_name"],
-}
+from contracts.fields import REQUIRED_FIELDS, REVIEW_DIMENSIONS
 
 
 class ReviewerAgent:
