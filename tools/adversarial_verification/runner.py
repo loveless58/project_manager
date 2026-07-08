@@ -22,12 +22,10 @@ import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from contracts.fields import OCR_CONFIDENCE_THRESHOLD
 from .defender import DefenderAgent
 from .devils_advocate import DevilsAdvocateAgent
 from .reviewer import ReviewerAgent
-
-
-OCR_CONFIDENCE_THRESHOLD = 0.60
 
 
 class AdversarialVerification:
