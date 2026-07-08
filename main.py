@@ -22,7 +22,7 @@ from typing import Dict, List, Any, Optional
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from common import LoopEngine, ToolRegistry, build_react_prompt, APIAdapter
+from common import LoopEngine, ToolRegistry, build_react_prompt, APIAdapter, resolve_workspace_config
 from loop_packages import build_skill_descriptions, build_skill_registrar_map, build_skill_tool_map
 
 SKILL_TOOL_MAP = build_skill_tool_map()
@@ -100,7 +100,7 @@ def _register_project_management_tools(reg: ToolRegistry) -> None:
 
 def _register_data_cleaning_file_organization_tools(reg: ToolRegistry, workspace_dir: Optional[str] = None) -> None:
     """Register data-cleaning and project-ledger tools into the provided registry."""
-    dt = _dc_tools_mod.DataCleaningTools(workspace_dir=workspace_dir or os.path.join(_work_dir, "project_manager"))
+    dt = _dc_tools_mod.DataCleaningTools(workspace_dir=workspace_dir)
 
     reg.register("scan_raw_files", "扫描原始文件目录", dt.scan_raw_files, {}, [])
     reg.register("extract_pdf", "提取PDF结构化数据", dt.extract_pdf,
@@ -121,7 +121,21 @@ def _register_data_cleaning_file_organization_tools(reg: ToolRegistry, workspace
                  {
                      "file_paths": {"type": "array"},
                      "project_name": {"type": "string"},
-                  }, ["file_paths"])
+                   }, ["file_paths"])
+    reg.register("extract_structured_business_output", "只读提取文件结构化业务证据：输出 run 级 JSON，不写账本、不生成归档计划、不移动文件",
+                 dt.extract_structured_business_output,
+                 {
+                     "file_paths": {"type": "array"},
+                     "source_dir": {"type": "string"},
+                     "project_name": {"type": "string"},
+                     "output_dir": {"type": "string"},
+                     "skip_backups": {"type": "boolean"},
+                 }, [])
+    reg.register("semantic_structure_document", "只读语义结构化 evidence pack：输出 semantic_document.v1，不写账本、不生成归档计划、不移动文件",
+                 dt.semantic_structure_document,
+                 {
+                     "evidence_pack": {"type": "object"},
+                 }, ["evidence_pack"])
     reg.register("prepare_file_organization_run", "准备文件整理闭环运行包：内部已完成结构化提取+分类+归档计划，返回待确认清单。注意：不要额外调用 extract_document，此工具已包含提取。",
                  dt.prepare_file_organization_run,
                  {
@@ -320,7 +334,8 @@ def run(
         return planner.get_response(msgs)
 
     # 4. 运行循环
-    actual_trace_dir = trace_dir or os.path.join(os.path.dirname(__file__), "logs")
+    workspace_config = resolve_workspace_config()
+    actual_trace_dir = trace_dir or str(workspace_config.logs_dir)
     os.makedirs(actual_trace_dir, exist_ok=True)
     engine = LoopEngine(
         agent_name="project_manager_agent",

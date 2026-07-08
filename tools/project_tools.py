@@ -11,10 +11,11 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
 
+from common.workspace_config import default_business_root, default_project_files_dir
 
 # ============= 常量配置 =============
 
-PROJECT_BASE_DIR = os.path.expanduser("~/Desktop/工作文件/项目文件")
+PROJECT_BASE_DIR = default_project_files_dir()
 INDEX_PATH = os.path.join(PROJECT_BASE_DIR, "index.json")
 PHASES = ["项目投标", "项目执行", "项目归档"]
 
@@ -38,9 +39,9 @@ ARCHIVE_SUBDIRS = {
 class ProjectTools:
     """项目扫描与读取工具"""
     
-    def __init__(self, base_dir: str = PROJECT_BASE_DIR):
-        self.base_dir = base_dir
-        self.index_path = os.path.join(base_dir, "index.json")
+    def __init__(self, base_dir: Optional[str] = None):
+        self.base_dir = base_dir or default_project_files_dir()
+        self.index_path = os.path.join(self.base_dir, "index.json")
     
     def scan_projects(self, phase: Optional[str] = None) -> Dict:
         """扫描三阶段目录，返回项目列表"""
@@ -330,12 +331,12 @@ class ProjectTools:
 class ArchiveTools:
     """智能归档工具"""
     
-    def __init__(self, base_dir: str = PROJECT_BASE_DIR):
-        self.base_dir = base_dir
+    def __init__(self, base_dir: Optional[str] = None):
+        self.base_dir = base_dir or default_project_files_dir()
     
     def archive_files(self, source_dir: Optional[str] = None) -> Dict:
         """智能归档散落文件"""
-        source = source_dir or os.path.expanduser("~/Desktop/工作文件")
+        source = source_dir or default_business_root()
         
         # 扫描文件
         files = []
@@ -434,9 +435,9 @@ class ArchiveTools:
 class ReportTools:
     """报告生成工具"""
     
-    def __init__(self, base_dir: str = PROJECT_BASE_DIR):
-        self.base_dir = base_dir
-        self.project_tools = ProjectTools(base_dir)
+    def __init__(self, base_dir: Optional[str] = None):
+        self.base_dir = base_dir or default_project_files_dir()
+        self.project_tools = ProjectTools(self.base_dir)
     
     def generate_bid_overview(self, output_file: Optional[str] = None) -> str:
         """生成投标进度总览"""
@@ -615,9 +616,9 @@ class ReportTools:
 class MigrateTools:
     """状态迁移工具"""
     
-    def __init__(self, base_dir: str = PROJECT_BASE_DIR):
-        self.base_dir = base_dir
-        self.project_tools = ProjectTools(base_dir)
+    def __init__(self, base_dir: Optional[str] = None):
+        self.base_dir = base_dir or default_project_files_dir()
+        self.project_tools = ProjectTools(self.base_dir)
     
     def migrate_project(self, project_name: str, 
                        to_phase: Optional[str] = None,

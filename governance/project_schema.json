@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Project Manager Agent - Tool Schema",
-  "description": "35 个工具的 schema 契约。校验注册到 ToolRegistry 的工具参数与文档一致。",
+  "description": "37 个工具的 schema 契约。校验注册到 ToolRegistry 的工具参数与文档一致。",
   "version": "1.0.0",
   "tools": {
     "scan_projects": {
@@ -151,6 +151,26 @@
       },
       "required": ["file_paths"]
     },
+    "extract_structured_business_output": {
+      "domain": "data_cleaning",
+      "description": "只读提取文件结构化业务证据：输出 run 级 JSON，不写账本、不生成归档计划、不移动文件",
+      "params": {
+        "file_paths": {"type": "array"},
+        "source_dir": {"type": "string"},
+        "project_name": {"type": "string"},
+        "output_dir": {"type": "string"},
+        "skip_backups": {"type": "boolean"}
+      },
+      "required": []
+    },
+    "semantic_structure_document": {
+      "domain": "data_cleaning",
+      "description": "只读语义结构化 evidence pack：输出 semantic_document.v1，不写账本、不生成归档计划、不移动文件",
+      "params": {
+        "evidence_pack": {"type": "object"}
+      },
+      "required": ["evidence_pack"]
+    },
     "prepare_file_organization_run": {
       "domain": "data_cleaning",
       "description": "准备文件整理闭环运行包：结构化提取、业务判断、复核队列和归档计划",
@@ -299,7 +319,7 @@
       "id": "TOOL-001",
       "level": "error",
       "check": "schema 声明的工具必须可注册到 debug_all_tools ToolRegistry；运行时只暴露 active skill 的工具子集",
-      "expected_count": 34
+      "expected_count": 37
     },
     {
       "id": "TOOL-002",

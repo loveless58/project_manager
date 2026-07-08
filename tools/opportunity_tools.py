@@ -24,9 +24,10 @@ import re
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 
+from common.workspace_config import default_opportunity_dir
 
 # 工作目录
-OPPORTUNITY_DIR = os.path.expanduser("~/Desktop/工作文件/新机会与线索")
+OPPORTUNITY_DIR = default_opportunity_dir()
 BID_NOTICE_DIR = os.path.join(OPPORTUNITY_DIR, "招标公告")
 BID_CONTEXT_DIR = os.path.join(OPPORTUNITY_DIR, "bid_contexts")
 
@@ -34,10 +35,10 @@ BID_CONTEXT_DIR = os.path.join(OPPORTUNITY_DIR, "bid_contexts")
 class OpportunityManagerTools:
     """商机管理工具集合"""
 
-    def __init__(self, opportunity_dir: str = OPPORTUNITY_DIR):
-        self.opportunity_dir = opportunity_dir
-        self.bid_notice_dir = os.path.join(opportunity_dir, "招标公告")
-        self.bid_context_dir = os.path.join(opportunity_dir, "bid_contexts")
+    def __init__(self, opportunity_dir: Optional[str] = None):
+        self.opportunity_dir = opportunity_dir or default_opportunity_dir()
+        self.bid_notice_dir = os.path.join(self.opportunity_dir, "招标公告")
+        self.bid_context_dir = os.path.join(self.opportunity_dir, "bid_contexts")
 
     def scan_bid_notices(self, source_dir: Optional[str] = None) -> Dict:
         """扫描招标公告目录，返回文件列表"""

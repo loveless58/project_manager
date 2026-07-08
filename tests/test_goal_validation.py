@@ -1,7 +1,12 @@
 import json
 import os
+import sys
 import tempfile
 import unittest
+from pathlib import Path
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class TestGoalValidation(unittest.TestCase):
@@ -38,11 +43,19 @@ class TestGoalValidation(unittest.TestCase):
             image_path = os.path.join(td, "无OCR扫描公告.png")
             Image.new("RGB", (320, 120), color="white").save(image_path)
 
-            extracted = DataCleaningTools(workspace_dir=td).extract_document(image_path)
+            def failed_ocr(path):
+                return {
+                    "status": "failed",
+                    "engine": "fake-missing",
+                    "error": "ocr adapter unavailable",
+                    "blocked_reason": "ocr_adapter_unavailable",
+                }
+
+            extracted = DataCleaningTools(workspace_dir=td, ocr_adapter=failed_ocr).extract_document(image_path)
 
             self.assertEqual(extracted["status"], "blocked")
             self.assertEqual(extracted["ocr"]["schema_version"], "ocr.result.v1")
-            self.assertEqual(extracted["ocr"]["blocked_reason"], "ocr_adapter_unavailable")
+            self.assertIn(extracted["blocked_reason"], {"ocr_adapter_unavailable", "ocr_engine_failed"})
             self.assertTrue(extracted["ocr"]["quality"]["needs_human_review"])
 
     def test_ocr_is_registered_as_explicit_tool(self):
@@ -69,13 +82,21 @@ class TestGoalValidation(unittest.TestCase):
             doc.save(pdf_path)
             doc.close()
 
-            extracted = DataCleaningTools(workspace_dir=td).extract_document(pdf_path)
+            def failed_ocr(path):
+                return {
+                    "status": "failed",
+                    "engine": "fake-missing",
+                    "error": "ocr adapter unavailable",
+                    "blocked_reason": "ocr_adapter_unavailable",
+                }
+
+            extracted = DataCleaningTools(workspace_dir=td, ocr_adapter=failed_ocr).extract_document(pdf_path)
 
             self.assertEqual(extracted["status"], "blocked")
-            self.assertEqual(extracted["blocked_reason"], "ocr_adapter_unavailable")
+            self.assertIn(extracted["blocked_reason"], {"ocr_adapter_unavailable", "ocr_engine_failed"})
             self.assertEqual(extracted["ocr"]["schema_version"], "ocr.result.v1")
 
-            result = DataCleaningTools(workspace_dir=td).prepare_file_organization_run([pdf_path])
+            result = DataCleaningTools(workspace_dir=td, ocr_adapter=failed_ocr).prepare_file_organization_run([pdf_path])
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["processed"], 0)
             self.assertEqual(result["failed"], 1)

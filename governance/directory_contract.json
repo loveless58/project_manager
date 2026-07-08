@@ -1,71 +1,61 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Project Manager Agent - Directory Contract",
-  "description": "工作目录结构契约。校验运行时所需的关键目录是否存在。",
-  "version": "1.0.0",
-  "base_dir_env": "LOOP_PROJECT_BASE_DIR",
-  "base_dir_default": "~/Desktop/工作文件",
+  "description": "Runtime directory contract. Business paths are resolved through common.workspace_config instead of legacy Desktop defaults.",
+  "version": "2.0.0",
+  "config_source": "common.workspace_config.resolve_workspace_config",
+  "business_root_env": "PROJECT_MANAGER_BUSINESS_ROOT",
+  "workspace_dir_env": "PROJECT_MANAGER_WORKSPACE_DIR",
+  "compat_base_dir_env": "LOOP_PROJECT_BASE_DIR",
+  "base_dir_default": "E:\\SynologyDrive\\_project_manager_workspace",
   "required_dirs": {
     "project_files": {
       "path": "项目文件",
+      "scope": "business",
       "required_subdirs": ["项目投标", "项目执行", "项目丢标"],
-      "optional_subdirs": ["新机会与线索", "公司通用财务"],
-      "required_files": ["index.json"],
-      "validation_level": "error",
-      "description": "项目数据根目录（三阶段目录：项目投标 / 项目执行 / 项目丢标 + index.json）"
+      "optional_subdirs": ["新机会与线索", "公司通用财务", "项目归档"],
+      "optional_files": ["index.json"],
+      "validation_level": "info",
+      "description": "Business project data root resolved from WorkspaceConfig.business_root. Runtime workspace must not own real archived project files."
     },
     "data_cleaning_workbench": {
       "path": "数据清洗工作台",
-      "required_subdirs": ["00-原始文件（待处理）"],
-      "optional_subdirs": ["01-OCR输出（待清洗）", "02-已清洗（结构化数据）"],
-      "validation_level": "warning",
-      "description": "数据清洗工作台（三阶段：原始→OCR→已清洗）"
+      "required_subdirs": ["runs"],
+      "optional_subdirs": ["structured_documents", "structured_workbooks"],
+      "validation_level": "info",
+      "description": "Data cleaning workbench for run packages and structured outputs. Source files are read from WorkspaceConfig.business_root by default."
     },
     "new_opportunities": {
       "path": "新机会与线索",
       "required_subdirs": ["招标公告"],
       "optional_subdirs": ["bid_contexts"],
       "optional_files": ["商机列表.md", "重复检测记录.md"],
-      "validation_level": "warning",
-      "description": "新机会与线索（招标公告扫描 + 商机列表）"
+      "validation_level": "info",
+      "description": "Opportunity workbench derived from WorkspaceConfig.opportunity_dir."
     },
     "agent_state": {
       "path": "state",
-      "scope": "project",
-      "validation_level": "warning",
-      "description": "Agent 运行状态/输出（risk_summary.md、报告等）。路径相对项目根目录。"
+      "validation_level": "info",
+      "description": "Agent runtime state under the configured runtime workspace."
     },
     "agent_logs": {
       "path": "logs",
-      "scope": "project",
-      "validation_level": "warning",
-      "description": "Agent 执行轨迹（project_manager_*.json）。路径相对项目根目录。"
+      "validation_level": "info",
+      "description": "Agent traces under the configured runtime workspace."
     }
   },
   "validation_rules": [
     {
       "id": "DIR-001",
-      "level": "error",
-      "check": "project_files.required_subdirs must exist",
-      "fix": "运行 bid-files 的 project_init.py 初始化三阶段目录"
+      "level": "info",
+      "check": "workspace paths resolve through common.workspace_config",
+      "fix": "Set PROJECT_MANAGER_BUSINESS_ROOT or PROJECT_MANAGER_WORKSPACE_DIR when defaults do not match this machine."
     },
     {
       "id": "DIR-002",
-      "level": "error",
-      "check": "project_files.index.json must exist",
-      "fix": "运行 bid-files 的 generate_index.py 生成 index.json"
-    },
-    {
-      "id": "DIR-003",
-      "level": "warning",
-      "check": "data_cleaning_workbench required_subdirs",
-      "fix": "创建 00-原始文件（待处理） 目录"
-    },
-    {
-      "id": "DIR-004",
-      "level": "warning",
-      "check": "new_opportunities required_subdirs",
-      "fix": "创建 招标公告 目录"
+      "level": "info",
+      "check": "cloud-drive files must be readable before extraction or archive execution",
+      "fix": "Let the sync client hydrate files, then rerun the loop."
     }
   ]
 }

@@ -1,11 +1,13 @@
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
+from .field_quality import required_fields_for_facts
+
 
 class BidProjectRuleEngine:
     """Deterministic business rules for bid project state and next actions."""
 
-    REQUIRED_FIELDS = ["project_name", "customer_name", "sales_owner"]
+    REQUIRED_FIELDS = ["project_name"]
 
     def __init__(self, today: Optional[str] = None):
         self.today = self._parse_date(today) or date.today()
@@ -22,8 +24,8 @@ class BidProjectRuleEngine:
         evidence_index = evidence_index or []
 
         business_stage = self._business_stage(facts)
-        display_status = self._display_status(business_stage)
-        missing_fields = [field for field in self.REQUIRED_FIELDS if not facts.get(field)]
+        display_status = self._display_status(business_stage, facts)
+        missing_fields = [field for field in required_fields_for_facts(facts) if not facts.get(field)]
         conflict_fields = sorted({str(item.get("field")) for item in conflicts if item.get("status", "open") == "open" and item.get("field")})
         low_confidence_fields = self._low_confidence_fields(fact_meta)
 
@@ -33,6 +35,7 @@ class BidProjectRuleEngine:
 
         self._deadline_rules(facts, risk_reasons, next_actions)
         self._bond_rules(facts, risk_reasons, next_actions)
+        self._state_consistency_rules(facts, risk_reasons, data_quality_flags, next_actions)
         self._stage_actions(business_stage, facts, next_actions)
 
         if missing_fields:
@@ -58,7 +61,7 @@ class BidProjectRuleEngine:
             "conflict_fields": conflict_fields,
             "low_confidence_fields": low_confidence_fields,
             "human_review_required": bool(missing_fields or conflict_fields or risk_level in {"high", "unknown"}),
-            "crm_required": business_stage not in {"closed_lost", "unknown"},
+            "crm_required": business_stage not in {"closed", "closed_lost", "unknown"},
             "bpm_required": business_stage in {"won_pending_contract", "execution"} and not facts.get("bpm_contract_code"),
             "evidence_count": len(evidence_index),
             "evaluated_at": datetime.now().isoformat(),
@@ -68,9 +71,12 @@ class BidProjectRuleEngine:
         bid_status = str(facts.get("bid_status", ""))
         contract_status = str(facts.get("contract_status", ""))
         registration_status = str(facts.get("registration_status", ""))
+        lifecycle_stage = str(facts.get("lifecycle_stage", ""))
 
-        if "弃标" in bid_status:
-            return "closed_lost"
+        if "弃标" in bid_status or "丢标" in bid_status or "未中标" in bid_status:
+            return "closed"
+        if lifecycle_stage in {"execution", "executing", "delivery"}:
+            return "execution"
         if "已签" in contract_status or facts.get("contract_code"):
             return "execution"
         if "已中标" in bid_status:
@@ -81,8 +87,13 @@ class BidProjectRuleEngine:
             return "bidding"
         return "unknown"
 
-    def _display_status(self, business_stage: str) -> str:
-        if business_stage == "closed_lost":
+    def _display_status(self, business_stage: str, facts: Optional[Dict[str, Any]] = None) -> str:
+        facts = facts or {}
+        bid_status = str(facts.get("bid_status", ""))
+        closed_reason_type = str(facts.get("closed_reason_type", ""))
+        if business_stage in {"closed", "closed_lost"}:
+            if "丢标" in bid_status or "未中标" in bid_status or closed_reason_type == "lost_to_competitor":
+                return "已丢标"
             return "已弃标"
         if business_stage in {"won_pending_contract", "execution"}:
             return "已中标"
@@ -106,6 +117,26 @@ class BidProjectRuleEngine:
             risk_reasons.append("投标保证金存在但未确认支付")
             next_actions.append("确认保证金支付状态")
 
+    def _state_consistency_rules(
+        self,
+        facts: Dict[str, Any],
+        risk_reasons: List[str],
+        data_quality_flags: List[str],
+        next_actions: List[str],
+    ) -> None:
+        registration_status = str(facts.get("registration_status", ""))
+        bid_status = str(facts.get("bid_status", ""))
+        lifecycle_stage = str(facts.get("lifecycle_stage", ""))
+        closed = lifecycle_stage in {"closed", "closed_lost"} or any(token in bid_status for token in ("弃标", "丢标", "未中标"))
+        if closed and "待报名" in registration_status:
+            data_quality_flags.append("报名状态与中标状态冲突")
+            risk_reasons.append(f"{bid_status or '已关闭'}不能同时处于待报名")
+            next_actions.append("人工确认报名/参与状态并修正项目记录")
+        if lifecycle_stage in {"execution", "executing", "delivery"} and any(token in bid_status for token in ("弃标", "丢标", "未中标")):
+            data_quality_flags.append("执行阶段与中标状态冲突")
+            risk_reasons.append(f"执行阶段不能同时处于{bid_status}")
+            next_actions.append("人工确认项目执行/弃标状态并修正项目记录")
+
     def _stage_actions(self, business_stage: str, facts: Dict[str, Any], next_actions: List[str]) -> None:
         if business_stage == "pending_registration":
             next_actions.append("确认报名是否完成")
@@ -127,7 +158,7 @@ class BidProjectRuleEngine:
         missing_fields: List[str],
         conflict_fields: List[str],
     ) -> str:
-        if any("已过" in reason for reason in risk_reasons):
+        if any("已过" in reason or "冲突" in reason or "不能同时" in reason for reason in risk_reasons):
             return "high"
         if conflict_fields:
             return "high"
@@ -135,6 +166,8 @@ class BidProjectRuleEngine:
             return "medium"
         if business_stage == "won_pending_contract":
             return "medium"
+        if business_stage == "unknown":
+            return "unknown"
         if missing_fields:
             return "unknown"
         return "low"

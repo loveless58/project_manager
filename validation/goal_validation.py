@@ -126,6 +126,15 @@ def _case_report(case_name: str, expected_status: str, result: Dict[str, Any]) -
         if item.get("extraction", {}).get("extract_method") == "ocr"
     ]
     failure_errors = " ".join(str(item.get("error", "")) for item in result.get("failures", []))
+    blocked_reasons = {
+        str(value)
+        for item in result.get("failures", [])
+        for value in [
+            item.get("blocked_reason"),
+            item.get("ocr", {}).get("blocked_reason") if isinstance(item.get("ocr"), dict) else None,
+        ]
+        if value
+    }
     artifacts = result.get("artifacts", {})
 
     module_evidence = {
@@ -158,7 +167,7 @@ def _case_report(case_name: str, expected_status: str, result: Dict[str, Any]) -
         },
         "scanned_document_processing": {
             "has_successful_ocr": any(extraction.get("ocr", {}).get("status") == "success" for extraction in ocr_extractions),
-            "blocked_without_ocr": "ocr_adapter_unavailable" in failure_errors,
+            "blocked_without_ocr": "ocr_adapter_unavailable" in blocked_reasons or "ocr_adapter_unavailable" in failure_errors,
             "ocr_extractions": ocr_extractions,
         },
     }

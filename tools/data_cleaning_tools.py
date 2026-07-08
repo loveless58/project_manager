@@ -21,15 +21,24 @@ import json
 import shutil
 import re
 import html
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Callable, Dict, List, Any, Optional
 from datetime import datetime
 
+from common.file_readiness import probe_readable_file, probe_writable_dir
+from common.workspace_config import default_data_cleaning_workspace, resolve_workspace_config
+from business_rules.archive_decision import evaluate_archive_decision
+from business_rules.bid_project_rules import BidProjectRuleEngine
+from business_rules.field_quality import filter_business_facts
+from business_rules.semantic_document import apply_semantic_guardrail, normalize_semantic_response
 from ledger import ProjectLedger
 from ocr import normalize_ocr_result
+from ocr import provider_registry
 
 
 # 工作目录
-WORKSPACE_DIR = os.path.expanduser("~/Desktop/工作文件/project_manager")
+WORKSPACE_DIR = default_data_cleaning_workspace()
 RAW_DIR = os.path.join(WORKSPACE_DIR, "00-原始文件（待处理）")
 OCR_DIR = os.path.join(WORKSPACE_DIR, "01-OCR输出（待清洗）")
 CLEANED_DIR = os.path.join(WORKSPACE_DIR, "02-已清洗（结构化数据）")
@@ -103,33 +112,9 @@ class DataCleaningTools:
 
     def _ocr_with_easyocr(self, file_path: str) -> Dict[str, Any]:
         """使用 easyocr 进行 OCR（纯 Python，已下载模型后可用）。"""
-        import time
-        try:
-            import easyocr
-        except ImportError:
-            return {"status": "failed", "engine": "easyocr", "error": "easyocr not installed"}
-        
-        try:
-            start = time.time()
-            reader = easyocr.Reader(['ch_sim', 'en'], gpu=False, verbose=False)
-            
-            # easyocr 直接接受文件路径
-            result = reader.readtext(file_path, detail=0)
-            elapsed = time.time() - start
-            
-            text = "\n".join(result)
-            if not text.strip():
-                return {"status": "failed", "engine": "easyocr", "error": "easyocr returned empty text"}
-            
-            return {
-                "status": "success",
-                "engine": "easyocr",
-                "text": text,
-                "pages": [{"page": 1, "text": text, "confidence": 0.85}],
-                "elapsed_seconds": round(elapsed, 2),
-            }
-        except Exception as e:
-            return {"status": "failed", "engine": "easyocr", "error": str(e)}
+        from ocr.providers.easyocr_provider import EasyOcrProvider
+
+        return EasyOcrProvider().extract(file_path)
 
     def _default_ocr_adapter(self, file_path: str) -> Dict[str, Any]:
         """默认 OCR adapter：优先 easyocr（已下载模型），其次 Tesseract，最后 Vision。"""
@@ -174,12 +159,21 @@ class DataCleaningTools:
                      "(2) brew install tesseract tesseract-lang",
         }
 
-    def __init__(self, workspace_dir: str = WORKSPACE_DIR, ocr_adapter: Optional[Callable[[str], Dict[str, Any]]] = None):
-        self.workspace_dir = workspace_dir
-        self.raw_dir = os.path.join(workspace_dir, "00-原始文件（待处理）")
-        self.ocr_dir = os.path.join(workspace_dir, "01-OCR输出（待清洗）")
-        self.cleaned_dir = os.path.join(workspace_dir, "02-已清洗（结构化数据）")
+    def __init__(
+        self,
+        workspace_dir: Optional[str] = None,
+        ocr_adapter: Optional[Callable[[str], Dict[str, Any]]] = None,
+        semantic_adapter: Optional[Callable[[Dict[str, Any]], Any]] = None,
+    ):
+        config = resolve_workspace_config()
+        self.workspace_dir = workspace_dir or str(config.data_cleaning_workspace)
+        self.project_files_dir = os.path.join(self.workspace_dir, "项目文件") if workspace_dir else str(config.project_files_dir)
+        self.business_root = self.workspace_dir if workspace_dir else str(config.business_root)
+        self.raw_dir = os.path.join(self.workspace_dir, "00-原始文件（待处理）") if workspace_dir else str(config.business_root)
+        self.ocr_dir = os.path.join(self.workspace_dir, "01-OCR输出（待清洗）")
+        self.cleaned_dir = os.path.join(self.workspace_dir, "02-已清洗（结构化数据）")
         self.ocr_adapter = ocr_adapter
+        self.semantic_adapter = semantic_adapter
 
     def scan_raw_files(self, source_dir: Optional[str] = None) -> Dict:
         """扫描原始文件目录，返回文件列表"""
@@ -209,54 +203,18 @@ class DataCleaningTools:
             return {"error": f"File not found: {file_path}"}
         
         ext = os.path.splitext(file_path)[1].lower()
-        if ext not in [".pdf", ".png", ".jpg", ".jpeg"]:
+        if ext not in [".pdf", ".png", ".jpg", ".jpeg", ".ofd"]:
             return {"error": f"Unsupported file type: {ext}"}
 
-        if ext in [".png", ".jpg", ".jpeg"]:
-            return self._extract_ocr_document(file_path, file_type=ext)
-        
-        # 尝试使用 PyMuPDF 提取文本
-        try:
-            import fitz
-            doc = fitz.open(file_path)
-            text = ""
-            for page in doc:
-                text += page.get_text()
-            doc.close()
-            
-            is_scanned = len(text.strip()) < 100
-            if is_scanned:
-                ocr_result = self._extract_ocr_document(file_path, file_type=ext)
-                return ocr_result
-
-            result = {
-                "schema_version": "document.extract.v1",
-                "status": "success",
-                "file": file_path,
-                "filename": os.path.basename(file_path),
-                "file_type": ext,
-                "extract_method": "pdf_text",
-                "text_length": len(text),
-                "extracted_text": text[:2000] + ("..." if len(text) > 2000 else ""),
-                "is_scanned": is_scanned,
-            }
-            
-            # 尝试提取结构化字段
+        result = provider_registry.extract_pdf_or_image(
+            file_path,
+            ocr_adapter=self.ocr_adapter or self._default_ocr_adapter,
+        )
+        text = result.get("extracted_text", "")
+        if result.get("status") == "success":
             result["fields"] = self._extract_fields(text)
             result["document_type"] = self._classify_text_document(file_path, text)
-            return result
-            
-        except ImportError:
-            ocr_result = self._extract_ocr_document(file_path, file_type=ext)
-            if ocr_result.get("status") == "success":
-                return ocr_result
-            ocr_result["error"] = "PyMuPDF not installed and OCR adapter unavailable"
-            return ocr_result
-        except Exception as e:
-            ocr_result = self._extract_ocr_document(file_path, file_type=ext)
-            if ocr_result.get("status") == "success":
-                return ocr_result
-            return {"error": str(e)}
+        return result
 
     def run_ocr(self, file_path: str) -> Dict[str, Any]:
         """Run OCR for image or scanned-PDF input and return ocr.result.v1."""
@@ -274,10 +232,13 @@ class DataCleaningTools:
             return {"error": f"File not found: {file_path}"}
 
         ext = os.path.splitext(file_path)[1].lower()
-        if ext in [".pdf", ".png", ".jpg", ".jpeg"]:
+        if ext in [".pdf", ".png", ".jpg", ".jpeg", ".ofd"]:
             extracted = self.extract_pdf(file_path)
-            if "error" not in extracted:
-                extracted["document_type"] = self.classify_document(file_path).get("category", "未分类")
+            if "error" not in extracted and not extracted.get("document_type"):
+                extracted["document_type"] = self._classify_text_document(
+                    file_path,
+                    extracted.get("extracted_text") or extracted.get("text") or "",
+                )
             return extracted
 
         if ext == ".md":
@@ -300,7 +261,15 @@ class DataCleaningTools:
             except Exception as e:
                 return {"error": str(e)}
 
+        if ext == ".xlsx":
+            return self._extract_xlsx_document(file_path)
+
+        if ext == ".xml":
+            return self._extract_xml_document(file_path)
+
         if ext != ".docx":
+            if self._business_phase_from_path(file_path):
+                return self._metadata_passthrough_document(file_path, ext)
             return {"error": f"Unsupported file type: {ext}"}
 
         try:
@@ -344,10 +313,13 @@ class DataCleaningTools:
         """Extract image or scanned-PDF text through an OCR adapter or sidecar text."""
         ocr = self._run_ocr(file_path)
         if ocr.get("status") != "success":
+            blocked_reason = ocr.get("blocked_reason", "ocr_adapter_unavailable")
+            if file_type in {".png", ".jpg", ".jpeg"} and blocked_reason == "ocr_adapter_unavailable":
+                blocked_reason = "ocr_engine_failed"
             return {
                 "schema_version": "document.extract.v1",
                 "status": "blocked",
-                "blocked_reason": ocr.get("blocked_reason", "ocr_adapter_unavailable"),
+                "blocked_reason": blocked_reason,
                 "error": ocr.get("error", "ocr_adapter_unavailable: image or scanned PDF requires OCR"),
                 "file": file_path,
                 "filename": os.path.basename(file_path),
@@ -380,6 +352,105 @@ class DataCleaningTools:
             "ocr": ocr,
             "needs_human_review": needs_human_review,
         }
+
+    def _metadata_passthrough_document(self, file_path: str, file_type: str) -> Dict[str, Any]:
+        return {
+            "schema_version": "document.extract.v1",
+            "status": "success",
+            "file": file_path,
+            "filename": os.path.basename(file_path),
+            "file_type": file_type,
+            "document_type": self.classify_document(file_path).get("category", "未分类"),
+            "extract_method": "metadata_passthrough",
+            "text_length": 0,
+            "extracted_text": "",
+            "fields": {},
+            "needs_human_review": False,
+        }
+
+    def _extract_xlsx_document(self, file_path: str) -> Dict[str, Any]:
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            return {"error": "openpyxl not installed. Run: pip install openpyxl"}
+
+        try:
+            workbook = load_workbook(file_path, read_only=True, data_only=True)
+            lines: List[str] = []
+            row_count = 0
+            for sheet in workbook.worksheets:
+                lines.append(f"[sheet] {sheet.title}")
+                for row in sheet.iter_rows(values_only=True):
+                    values = [self._cell_to_text(value) for value in row]
+                    values = [value for value in values if value]
+                    if not values:
+                        continue
+                    row_count += 1
+                    lines.append(" | ".join(values))
+                    if row_count >= 200:
+                        break
+                if row_count >= 200:
+                    break
+            workbook.close()
+
+            text = "\n".join(lines)
+            fields = self._extract_fields(text)
+            return {
+                "schema_version": "document.extract.v1",
+                "status": "success",
+                "file": file_path,
+                "filename": os.path.basename(file_path),
+                "file_type": ".xlsx",
+                "document_type": self._classify_text_document(file_path, text),
+                "extract_method": "xlsx_table",
+                "sheet_count": len(workbook.worksheets),
+                "table_row_count": row_count,
+                "text_length": len(text),
+                "extracted_text": text[:4000] + ("..." if len(text) > 4000 else ""),
+                "fields": fields,
+                "needs_human_review": False,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _extract_xml_document(self, file_path: str) -> Dict[str, Any]:
+        try:
+            tree = ET.parse(file_path)
+            root = tree.getroot()
+            pairs: List[str] = []
+            for elem in root.iter():
+                text = (elem.text or "").strip()
+                if not text:
+                    continue
+                tag = elem.tag.split("}", 1)[-1]
+                pairs.append(f"{tag}: {text}")
+                if len(pairs) >= 200:
+                    break
+            extracted_text = "\n".join(pairs)
+            fields = self._extract_fields(extracted_text)
+            return {
+                "schema_version": "document.extract.v1",
+                "status": "success",
+                "file": file_path,
+                "filename": os.path.basename(file_path),
+                "file_type": ".xml",
+                "document_type": self._classify_text_document(file_path, extracted_text),
+                "extract_method": "xml_text",
+                "text_length": len(extracted_text),
+                "extracted_text": extracted_text[:4000] + ("..." if len(extracted_text) > 4000 else ""),
+                "fields": fields,
+                "needs_human_review": False,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
+    def _cell_to_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return str(value).strip()
 
     def _ocr_with_vision_macos(self, file_path: str) -> Dict[str, Any]:
         """使用 macOS Vision 框架对 PDF/图片做 OCR。
@@ -536,7 +607,7 @@ class DataCleaningTools:
         return normalize_ocr_result({
             "status": "blocked",
             "engine": default_result.get("engine", "unavailable"),
-            "blocked_reason": "ocr_engine_failed",
+            "blocked_reason": "ocr_adapter_unavailable",
             "error": default_result.get("error", "No OCR engine available. Options: (1) brew install tesseract tesseract-lang (2) pip install easyocr"),
         })
 
@@ -566,14 +637,16 @@ class DataCleaningTools:
         fields = {}
         
         # 招标编号
-        m = re.search(r'(?:招标编号|项目编号|采购编号)\s*[:：]?\s*([A-Z0-9\-]{5,})', text)
+        m = re.search(r'(?:招标编号|项目编号|采购编号|CRM\s*编号)\**\s*[:：]?\s*([A-Z0-9\-]{5,})', text)
         if m:
             fields["project_code"] = m.group(1)
         
         # 项目名称
-        m = re.search(r'(?:项目名称|采购名称|标的名称)\s*[:：]?\s*(.+?)(?:\n|$)', text)
+        m = re.search(r'(?:项目名称|采购名称|标的名称)\**\s*[:：]?\s*(.+?)(?:\n|$)', text)
+        if not m:
+            m = re.search(r'^#\s*项目记录\s*[:：]\s*(.+?)(?:\n|$)', text, re.MULTILINE)
         if m:
-            value = m.group(1).strip()
+            value = self._clean_markdown_field_value(m.group(1))
             if value:
                 fields["project_name"] = value
         
@@ -588,36 +661,90 @@ class DataCleaningTools:
             fields["deadline"] = m.group(1)
         
         # 客户/招标人
-        m = re.search(r'(?:招标人|采购人|甲方|业主)\s*[:：]?\s*(.+?)(?:\n|$)', text)
+        m = re.search(r'(?:招标人/客户|招标人|采购人|委托人|甲方|业主)\**\s*[:：]?\s*(.+?)(?:\n|$)', text)
         if m:
-            value = m.group(1).strip()
-            if 2 <= len(value) <= 80 and not any(k in value for k in ["技术成果", "培训", "合同标的", "第三方"]):
+            value = self._clean_markdown_field_value(m.group(1))
+            if value not in {"待确认", "待录入", "待补充", "未指定"} and 2 <= len(value) <= 80 and not any(k in value for k in ["技术成果", "培训", "合同标的", "第三方"]):
                 fields["customer"] = value
                 fields.setdefault("customer_name", value)
 
-        m = re.search(r'(?:中标结果|中标状态|投标结果|投标状态)\s*[:：]?\s*(已中标|未中标|弃标|待开标|已报名|待报名)', text)
+        m = re.search(r'(?:中标结果|中标状态|投标结果|投标状态)\**\s*[:：]?\s*(已中标|未中标|已丢标|丢标|已弃标|弃标|待开标|已报名|待报名)', text)
         if m:
-            value = m.group(1).strip()
-            if value in {"未中标", "弃标"}:
-                fields["bid_status"] = "弃标"
+            value = self._clean_markdown_field_value(m.group(1))
+            if value in {"未中标", "已丢标", "丢标"}:
+                fields["bid_status"] = "已丢标"
+            elif value in {"已弃标", "弃标"}:
+                fields["bid_status"] = "已弃标"
             else:
                 fields["bid_status"] = value
 
-        m = re.search(r'(?:合同状态|签约状态)\s*[:：]?\s*(已签约|已签订|未签约|待签约)', text)
+        m = re.search(r'(?:合同状态|签约状态)\**\s*[:：]?\s*(已签约|已签订|未签约|待签约)', text)
         if m:
-            fields["contract_status"] = m.group(1).strip()
+            fields["contract_status"] = self._clean_markdown_field_value(m.group(1))
 
-        m = re.search(r'(?:报名状态|报名情况)\s*[:：]?\s*(待报名|已报名)', text)
+        m = re.search(r'(?:报名状态|报名情况)\**\s*[:：]?\s*(待报名|已报名|已弃标|弃标)', text)
         if m:
-            fields["registration_status"] = m.group(1).strip()
+            fields["registration_status"] = self._clean_markdown_field_value(m.group(1))
+            if fields["registration_status"] in {"已弃标", "弃标"}:
+                fields["bid_status"] = "已弃标"
 
-        m = re.search(r'(?:销售负责人|客户经理|负责人)\s*[:：]?\s*(.+?)(?:\n|$)', text)
+        m = re.search(r'(?:负责销售|销售负责人|客户经理|负责人)\**\s*[:：]?\s*(.+?)(?:\n|$)', text)
         if m:
-            value = m.group(1).strip()
-            if 1 <= len(value) <= 40:
+            value = self._clean_markdown_field_value(m.group(1))
+            if value not in {"待确认", "待录入", "待补充", "未指定"} and re.fullmatch(r"[\u4e00-\u9fff]{2,4}", value):
                 fields["sales_owner"] = value
+
+        if fields.get("bid_status") == "已弃标" or "已弃标" in text:
+            fields["lifecycle_stage"] = "closed"
+            fields["closed_reason_type"] = "abandoned_by_us"
+        elif fields.get("bid_status") == "已丢标" or "未中标" in text or "已丢标" in text:
+            fields["lifecycle_stage"] = "closed"
+            fields["closed_reason_type"] = "lost_to_competitor"
+
+        payment_patterns = {
+            "payer": r"付款人\s*[:：]\s*(.+?)(?:\n|$)",
+            "payee": r"收款人\s*[:：]\s*(.+?)(?:\n|$)",
+            "payment_date": r"交易日期\s*[:：]\s*(\d{4}年\d{1,2}月\d{1,2}日?)",
+            "payment_amount": r"交易金额\s*(?:[（(]小写[）)])?\s*[:：]\s*(.+?)(?:\n|$)",
+            "payment_summary": r"交易摘要\s*[:：]\s*(.+?)(?:\n|$)",
+        }
+        for field, pattern in payment_patterns.items():
+            m = re.search(pattern, text)
+            if not m:
+                continue
+            value = self._clean_markdown_field_value(m.group(1))
+            if field == "payment_amount":
+                value = self._normalize_payment_amount(value)
+            if value:
+                fields[field] = value
         
         return fields
+
+    @staticmethod
+    def _clean_markdown_field_value(value: str) -> str:
+        value = value.strip()
+        value = re.sub(r"^\s*[-*]\s*", "", value)
+        value = re.sub(r"^\*+", "", value)
+        value = re.sub(r"\*+\s*[:：]\s*", "", value)
+        value = value.strip("* \t")
+        value = re.sub(r"^[\s）)\]】]+", "", value)
+        value = re.sub(r"^(?:委托人|受托人|甲方|乙方)\s*[:：]\s*", "", value)
+        value = re.sub(r"^[（(](?:甲方|乙方)[）)]\s*", "", value)
+        value = re.sub(r"\s*[（(](?:甲方|乙方)[）)]\s*$", "", value)
+        return value.strip()
+
+    @staticmethod
+    def _normalize_payment_amount(value: str) -> str:
+        raw = value.replace("O", "0").replace("o", "0").replace("零", "0")
+        cleaned = re.sub(r"[^0-9.]", "", raw)
+        m = re.search(r"\d+(?:\.\d*)?", cleaned)
+        if not m:
+            return ""
+        amount = m.group(0).rstrip(".")
+        if "." not in amount:
+            return f"{amount}.00"
+        integer, decimal = amount.split(".", 1)
+        return f"{integer}.{decimal[:2].ljust(2, '0')}"
 
     def _extract_docx_business_fields(self, paragraphs: List[str], table_rows: List[List[str]], file_path: str) -> Dict:
         """Extract lightweight bid-project fields from Word paragraph/table text."""
@@ -651,10 +778,12 @@ class DataCleaningTools:
 
         for line in all_lines[:40]:
             if line.endswith("有限公司") and "单位名称" not in line and "北京华胜天成" not in line:
-                fields.setdefault("customer_name", line.strip())
+                fields.setdefault("customer_name", self._clean_markdown_field_value(line.strip()))
                 break
 
-        if "采购公告" in joined or "响应须知" in joined:
+        if "技术开发合同" in joined or "合同登记编号" in joined or ("委托人" in joined and "受托人" in joined):
+            fields["document_type"] = "合同"
+        elif "采购公告" in joined or "响应须知" in joined:
             fields["document_type"] = "采购公告"
         elif "投标文件" in os.path.basename(file_path) or "报价单" in joined:
             fields["document_type"] = "投标文件"
@@ -678,6 +807,33 @@ class DataCleaningTools:
     def _classify_text_document(self, file_path: str, text: str) -> str:
         filename = os.path.basename(file_path)
         haystack = f"{filename}\n{text[:5000]}"
+        if filename.startswith("项目记录"):
+            return "项目记录"
+        if "电子发票" in haystack or "发票号码" in haystack:
+            return "发票"
+        if (
+            "技术开发合同" in haystack
+            or "合同登记编号" in haystack
+            or ("委托人" in haystack and "受托人" in haystack)
+            or ("买受人" in haystack and "出卖人" in haystack)
+            or ("甲方" in haystack and "乙方" in haystack and "合同" in haystack)
+            or ("合同" in filename and self._business_phase_from_path(file_path))
+        ):
+            return "合同"
+        if any(token in filename for token in ("开户凭证", "账户", "账号", "汇款账号")) or (
+            "开户银行" in haystack and "账号" in haystack
+        ):
+            return "账户凭证"
+        if "付款凭证" in filename or "交易金额" in haystack or "交易摘要" in haystack:
+            return "付款凭证"
+        if "支付申请" in filename or "付款申请" in filename or "工程款支付申请" in haystack:
+            return "付款申请"
+        if "授权书" in filename or "授权代表" in haystack:
+            return "授权文件"
+        if "法审" in filename or "法律审核" in haystack or "审核意见" in haystack:
+            return "法审材料"
+        if "仲裁" in filename or "仲裁裁决" in haystack:
+            return "仲裁文书"
         if "采购公告" in haystack:
             return "采购公告"
         if "投标文件" in haystack or "报价单" in haystack:
@@ -713,7 +869,10 @@ class DataCleaningTools:
         extracted_items = []
         failures = []
         for path in file_paths:
-            extracted = self.extract_document(path)
+            if self._use_archive_metadata_passthrough(path):
+                extracted = self._metadata_passthrough_document(path, os.path.splitext(path)[1].lower())
+            else:
+                extracted = self.extract_document(path)
             if "error" in extracted:
                 failures.append({"file": path, "error": extracted["error"]})
                 continue
@@ -723,7 +882,7 @@ class DataCleaningTools:
         structured_dir = os.path.join(self.workspace_dir, "structured_documents", self._safe_name(inferred_project_name))
         os.makedirs(structured_dir, exist_ok=True)
 
-        ledger_dir = os.path.join(self.workspace_dir, "项目文件")
+        ledger_dir = self.project_files_dir
         ledger = ProjectLedger(base_dir=ledger_dir)
         ledger_result = None
         structured_outputs = []
@@ -737,6 +896,12 @@ class DataCleaningTools:
             facts.setdefault("project_name", inferred_project_name)
 
             source_type = self._source_type_for_document(item.get("document_type", ""), item.get("filename", ""))
+            accepted_facts, field_quality = filter_business_facts(
+                facts,
+                source_type=source_type,
+                source_path=item.get("file", ""),
+            )
+            item["field_quality"] = field_quality
             evidence = [
                 {
                     "field": field,
@@ -746,17 +911,24 @@ class DataCleaningTools:
                     "confidence": 0.86 if field in {"project_name", "document_type"} else 0.78,
                     "summary": f"{item.get('filename', '')} extracted as {item.get('document_type', '')}",
                 }
-                for field in facts.keys()
+                for field in accepted_facts.keys()
             ]
 
-            ledger_result = ledger.apply_patch({
-                "project_name": inferred_project_name,
-                "source_type": source_type,
-                "facts": facts,
-                "evidence": evidence,
-                "skill": "data_cleaning_file_organization",
-                "actor": "data_cleaning_file_organization",
-            })
+            if accepted_facts:
+                ledger_result = ledger.apply_patch({
+                    "project_name": accepted_facts.get("project_name", inferred_project_name),
+                    "source_type": source_type,
+                    "facts": accepted_facts,
+                    "evidence": evidence,
+                    "skill": "data_cleaning_file_organization",
+                    "actor": "data_cleaning_file_organization",
+                })
+            else:
+                ledger_result = self._archive_only_ledger_result(
+                    inferred_project_name,
+                    {"project_name": inferred_project_name},
+                    evidence,
+                )
 
             output_path = os.path.join(structured_dir, f"{self._safe_name(item['filename'])}_extracted.json")
             self._save_structured_json(output_path, {
@@ -764,9 +936,11 @@ class DataCleaningTools:
                 "project_name": inferred_project_name,
                 "source_type": source_type,
                 "extraction": item,
+                "accepted_business_facts": accepted_facts,
+                "field_quality": field_quality,
                 "ledger_artifacts": {
-                    "project_overview_md": ledger_result["markdown_path"],
-                    "project_ledger_json": ledger_result["state_path"],
+                    "project_overview_md": ledger_result.get("markdown_path", ""),
+                    "project_ledger_json": ledger_result.get("state_path", ""),
                 },
                 "processed_at": datetime.now().isoformat(),
             })
@@ -792,10 +966,283 @@ class DataCleaningTools:
             "failures": failures,
             "structured_outputs": structured_outputs,
             "artifacts": {
-                "project_overview_md": ledger_result["markdown_path"] if ledger_result else "",
-                "project_ledger_json": ledger_result["state_path"] if ledger_result else "",
-                "project_dir": ledger_result["project_dir"] if ledger_result else "",
+                "project_overview_md": ledger_result.get("markdown_path", "") if ledger_result else "",
+                "project_ledger_json": ledger_result.get("state_path", "") if ledger_result else "",
+                "project_dir": ledger_result.get("project_dir", "") if ledger_result else "",
             },
+        }
+
+    def build_evidence_pack(
+        self,
+        file_path: str,
+        extracted: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build a read-only evidence pack for semantic structuring."""
+        extracted = extracted or self.extract_document(file_path)
+        text = extracted.get("extracted_text") or extracted.get("text") or ""
+        text_segments = []
+        if text:
+            text_segments.append({
+                "ref": "text:0",
+                "text": text[:4000],
+            })
+
+        fields = dict(extracted.get("fields") or {})
+        path_project = self._project_name_from_phase_path(self._path_parts(file_path))
+        if path_project:
+            fields.setdefault("project_name", path_project)
+        path_phase = self._business_phase_from_path(file_path)
+        if path_phase == "项目执行":
+            fields.setdefault("lifecycle_stage", "execution")
+        elif path_phase == "项目丢标":
+            fields.setdefault("lifecycle_stage", "closed")
+
+        return {
+            "schema_version": "document.evidence_pack.v1",
+            "source_file": file_path,
+            "filename": os.path.basename(file_path),
+            "file_type": extracted.get("file_type") or os.path.splitext(file_path)[1].lower(),
+            "document_type_hint": extracted.get("document_type", ""),
+            "extract_method": extracted.get("extract_method") or (
+                "docx_text_table" if os.path.splitext(file_path)[1].lower() == ".docx" else "document_text"
+            ),
+            "text_length": extracted.get("text_length", len(text)),
+            "text_segments": text_segments,
+            "path_context": {
+                "business_phase": path_phase,
+                "project_name": path_project,
+            },
+            "candidate_fields": fields,
+            "extraction_quality": {
+                "needs_human_review": bool(extracted.get("needs_human_review")),
+                "ocr_quality": ((extracted.get("ocr") or {}).get("quality") or {}),
+            },
+        }
+
+    def semantic_structure_document(self, evidence_pack: Dict[str, Any]) -> Dict[str, Any]:
+        """Read-only semantic structuring over an evidence pack; never writes ledgers or archives."""
+        if not isinstance(evidence_pack, dict):
+            return {
+                "schema_version": "semantic_document.v1",
+                "status": "blocked",
+                "blocked_reason": "invalid_evidence_pack",
+                "accepted_business_facts": {},
+                "semantic_guardrail": {
+                    "schema_version": "semantic_guardrail.v1",
+                    "status": "blocked",
+                    "rejected_fields": [],
+                },
+            }
+
+        source_path = evidence_pack.get("source_file", "")
+        fallback_document_type = evidence_pack.get("document_type_hint", "")
+        if self.semantic_adapter is None:
+            return {
+                "schema_version": "semantic_document.v1",
+                "status": "blocked",
+                "blocked_reason": "semantic_adapter_unavailable",
+                "document_type": fallback_document_type,
+                "accepted_business_facts": {},
+                "semantic_guardrail": {
+                    "schema_version": "semantic_guardrail.v1",
+                    "status": "blocked",
+                    "rejected_fields": [],
+                },
+                "review_reasons": ["configure_semantic_adapter_or_llm_provider"],
+            }
+
+        try:
+            raw = self.semantic_adapter(evidence_pack)
+            if isinstance(raw, str):
+                raw = json.loads(raw)
+        except Exception as exc:
+            return {
+                "schema_version": "semantic_document.v1",
+                "status": "blocked",
+                "blocked_reason": "semantic_adapter_failed",
+                "error": str(exc),
+                "document_type": fallback_document_type,
+                "accepted_business_facts": {},
+                "semantic_guardrail": {
+                    "schema_version": "semantic_guardrail.v1",
+                    "status": "blocked",
+                    "rejected_fields": [],
+                },
+            }
+
+        semantic_document = normalize_semantic_response(raw, fallback_document_type=fallback_document_type)
+        source_type = self._source_type_for_document(
+            semantic_document.get("document_type", ""),
+            evidence_pack.get("filename", ""),
+        )
+        accepted_facts, guardrail = apply_semantic_guardrail(
+            semantic_document,
+            source_type=source_type,
+            source_path=source_path,
+        )
+        semantic_document["accepted_business_facts"] = accepted_facts
+        semantic_document["semantic_guardrail"] = guardrail
+        return semantic_document
+
+    def extract_structured_business_output(
+        self,
+        file_paths: Optional[List[str]] = None,
+        source_dir: str = "",
+        project_name: str = "",
+        output_dir: str = "",
+        skip_backups: bool = True,
+    ) -> Dict[str, Any]:
+        """Read source files and write structured business evidence without ledger/archive side effects."""
+        paths = self._resolve_structured_source_files(file_paths, source_dir, skip_backups)
+        run_id = datetime.now().strftime("structured_%Y%m%d_%H%M%S_%f")
+        target_dir = output_dir or os.path.join(self.workspace_dir, "runs", run_id, "structured_business_output")
+        os.makedirs(target_dir, exist_ok=True)
+
+        documents: List[Dict[str, Any]] = []
+        failures: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, Any]] = []
+        business_cases: List[Dict[str, Any]] = []
+        trace: List[Dict[str, Any]] = []
+
+        supported = {".md", ".docx", ".pdf", ".png", ".jpg", ".jpeg", ".ofd", ".xlsx", ".xml"}
+        for item in paths:
+            if item.get("status") == "skipped":
+                skipped.append(item)
+                continue
+            path = item["path"]
+            ext = os.path.splitext(path)[1].lower()
+            if ext not in supported:
+                skipped.append({"file": path, "reason": f"unsupported_suffix:{ext}"})
+                continue
+
+            readiness = probe_readable_file(path)
+            if readiness.get("status") != "ready":
+                failure = {
+                    "file": path,
+                    "stage": "source_readiness",
+                    "status": "blocked",
+                    "error": "source_not_local_or_unreadable",
+                    "blocked_reason": readiness.get("blocked_reason", "source_not_local_or_unreadable"),
+                    "readiness": readiness,
+                }
+                failures.append(failure)
+                trace.append({"stage": "source_readiness", "file": path, "status": "blocked"})
+                continue
+
+            extracted = self.extract_document(path)
+            if "error" in extracted:
+                failure = {
+                    "file": path,
+                    "stage": "extract_document",
+                    "status": extracted.get("status", "failed"),
+                    "error": extracted["error"],
+                }
+                if extracted.get("blocked_reason"):
+                    failure["blocked_reason"] = extracted["blocked_reason"]
+                failures.append(failure)
+                trace.append({"stage": "extract_document", "file": path, "status": failure["status"]})
+                continue
+
+            fields = self._apply_source_path_context(extracted.get("fields") or {}, path)
+            extracted["fields"] = fields
+            evidence_pack = self.build_evidence_pack(path, extracted=extracted)
+            evidence_pack["candidate_fields"] = fields
+            semantic_structure = self.semantic_structure_document(evidence_pack)
+            inferred_project_name = fields.get("project_name") or self._project_name_from_phase_path(self._path_parts(path)) or project_name or "未命名项目"
+            facts = {key: value for key, value in fields.items() if key not in {"document_type", "source_filename"}}
+            facts.setdefault("project_name", inferred_project_name)
+            extraction_trust = self._business_fact_gate(extracted)
+            if not extraction_trust.get("trusted", True):
+                facts = {
+                    key: value
+                    for key, value in facts.items()
+                    if key in {"project_name", "lifecycle_stage"}
+                }
+            source_type = self._source_type_for_document(extracted.get("document_type", ""), extracted.get("filename", os.path.basename(path)))
+            accepted_facts, field_quality = filter_business_facts(
+                facts,
+                source_type=source_type,
+                source_path=path,
+            )
+            field_quality["extraction_trust"] = extraction_trust
+            judgement_facts = dict(accepted_facts) if accepted_facts else dict(facts)
+            judgement_facts.setdefault("project_name", inferred_project_name)
+            business_judgement = BidProjectRuleEngine().evaluate(judgement_facts)
+            cases = self._business_cases_for_structured_output(
+                project_name=inferred_project_name,
+                source_file=path,
+                source_type=source_type,
+                facts=judgement_facts,
+                judgement=business_judgement,
+            )
+            business_cases.extend(cases)
+
+            documents.append({
+                "source_file": path,
+                "filename": os.path.basename(path),
+                "status": extracted.get("status", "success"),
+                "file_type": extracted.get("file_type") or ext,
+                "document_type": extracted.get("document_type", ""),
+                "source_type": source_type,
+                "extract_method": extracted.get("extract_method") or ("docx_text_table" if ext == ".docx" else "document_text"),
+                "text_length": extracted.get("text_length", len(extracted.get("extracted_text", "") or "")),
+                "paragraph_count": extracted.get("paragraph_count", 0),
+                "table_count": extracted.get("table_count", 0),
+                "fields": fields,
+                "accepted_business_facts": accepted_facts,
+                "field_quality": field_quality,
+                "semantic_structure": semantic_structure,
+                "business_judgement": business_judgement,
+                "business_cases": cases,
+                "extraction": extracted,
+            })
+            trace.append({"stage": "structured_output", "file": path, "status": "success", "project_name": inferred_project_name})
+
+        primary_project_name = project_name or self._first_project_name_from_documents(documents) or "未命名项目"
+        output_path = os.path.join(target_dir, f"{self._safe_name(primary_project_name)}_structured_business_output.json")
+        payload = {
+            "schema_version": "business_structured_output.run.v1",
+            "run_id": run_id,
+            "project_name": primary_project_name,
+            "source_dir": source_dir,
+            "created_at": datetime.now().isoformat(),
+            "boundary": {
+                "mode": "read_only_structured_output",
+                "moved_files": False,
+                "updated_external_ledger": False,
+                "archive_plan_created": False,
+                "archive_plan_executed": False,
+            },
+            "summary": {
+                "documents_total": len(documents),
+                "documents_success": len([d for d in documents if d.get("status") == "success"]),
+                "documents_blocked": len([d for d in documents if d.get("status") == "blocked"]),
+                "documents_failed": len(failures),
+                "business_cases_total": len(business_cases),
+                "skipped_total": len(skipped),
+            },
+            "documents": documents,
+            "business_cases": business_cases,
+            "failures": failures,
+            "skipped": skipped,
+            "trace": trace,
+        }
+        self._save_structured_json(output_path, payload)
+        return {
+            "schema_version": "business_structured_output.result.v1",
+            "run_id": run_id,
+            "status": "success" if documents and not failures else ("partial" if documents else "failed"),
+            "project_name": primary_project_name,
+            "processed": len(documents),
+            "failed": len(failures),
+            "business_cases": business_cases,
+            "failures": failures,
+            "skipped": skipped,
+            "artifacts": {
+                "structured_business_output": output_path,
+                "output_dir": target_dir,
+            },
+            "boundary": payload["boundary"],
         }
 
     def prepare_file_organization_run(self, file_paths: List[str], project_name: str = "") -> Dict[str, Any]:
@@ -810,6 +1257,7 @@ class DataCleaningTools:
         os.makedirs(extracted_dir, exist_ok=True)
         os.makedirs(patches_dir, exist_ok=True)
 
+        readiness_by_path = {path: probe_readable_file(path) for path in file_paths}
         input_manifest = {
             "schema_version": "file_organization.input_manifest.v1",
             "run_id": run_id,
@@ -818,8 +1266,9 @@ class DataCleaningTools:
                 {
                     "path": path,
                     "name": os.path.basename(path),
-                    "exists": os.path.exists(path),
-                    "size": os.path.getsize(path) if os.path.exists(path) else None,
+                    "exists": readiness_by_path[path].get("exists", False),
+                    "size": os.path.getsize(path) if readiness_by_path[path].get("status") == "ready" else None,
+                    "readiness": readiness_by_path[path],
                 }
                 for path in file_paths
             ],
@@ -830,47 +1279,114 @@ class DataCleaningTools:
         structured_outputs: List[str] = []
         ledger_results: List[Dict[str, Any]] = []
         archive_actions: List[Dict[str, Any]] = []
+        quality_reviews: List[Dict[str, Any]] = []
         trace: List[Dict[str, Any]] = []
 
-        ledger = ProjectLedger(base_dir=os.path.join(self.workspace_dir, "项目文件"))
-
         for path in file_paths:
-            extracted = self.extract_document(path)
-            if "error" in extracted:
-                failure = {"file": path, "stage": "extract_document", "error": extracted["error"]}
+            readiness = readiness_by_path[path]
+            if readiness.get("status") != "ready":
+                failure = {
+                    "file": path,
+                    "stage": "source_readiness",
+                    "error": "source_not_local_or_unreadable",
+                    "blocked_reason": readiness.get("blocked_reason", "source_not_local_or_unreadable"),
+                    "readiness": readiness,
+                }
                 failures.append(failure)
-                trace.append({"stage": "extract_document", "file": path, "status": "failed", "error": extracted["error"]})
+                trace.append({
+                    "stage": "source_readiness",
+                    "file": path,
+                    "status": "blocked",
+                    "blocked_reason": failure["blocked_reason"],
+                    "error": readiness.get("error", ""),
+                })
+                continue
+
+            if self._use_archive_metadata_passthrough(path):
+                extracted = self._metadata_passthrough_document(path, os.path.splitext(path)[1].lower())
+            else:
+                extracted = self.extract_document(path)
+            if "error" in extracted:
+                failure = {
+                    "file": path,
+                    "stage": "extract_document",
+                    "status": extracted.get("status", "failed"),
+                    "error": extracted["error"],
+                }
+                if extracted.get("blocked_reason"):
+                    failure["blocked_reason"] = extracted["blocked_reason"]
+                if extracted.get("ocr"):
+                    failure["ocr"] = extracted["ocr"]
+                failures.append(failure)
+                trace_event = {
+                    "stage": "extract_document",
+                    "file": path,
+                    "status": failure["status"],
+                    "error": extracted["error"],
+                }
+                if failure.get("blocked_reason"):
+                    trace_event["blocked_reason"] = failure["blocked_reason"]
+                trace.append(trace_event)
                 continue
 
             extracted_items.append(extracted)
-            fields = extracted.get("fields") or {}
+            fields = self._apply_source_path_context(extracted.get("fields") or {}, path)
+            extracted["fields"] = fields
             inferred_project_name = project_name or fields.get("project_name") or "未命名项目"
             facts = {key: value for key, value in fields.items() if key not in {"document_type", "source_filename"}}
             facts.setdefault("project_name", inferred_project_name)
             source_type = self._source_type_for_document(extracted.get("document_type", ""), extracted.get("filename", ""))
+            accepted_facts, field_quality = filter_business_facts(
+                facts,
+                source_type=source_type,
+                source_path=path,
+            )
+            extracted["field_quality"] = field_quality
+            ledger = ProjectLedger(base_dir=self._ledger_base_for_source(path, fields))
             evidence = [
                 {
                     "field": field,
                     "source_type": source_type,
                     "source_ref": path,
                     "extract_method": extracted.get("extract_method") or ("docx_text_table" if extracted.get("file_type") == ".docx" else "document_text"),
-                    "confidence": 0.86 if field in {"project_name", "document_type"} else 0.78,
+                    "confidence": self._evidence_confidence(field, path),
                     "summary": f"{extracted.get('filename', '')} extracted as {extracted.get('document_type', '')}",
                 }
-                for field in facts.keys()
+                for field in accepted_facts.keys()
             ]
 
-            ledger_result = ledger.apply_patch({
-                "project_name": inferred_project_name,
-                "source_type": source_type,
-                "facts": facts,
-                "evidence": evidence,
-                "skill": "data_cleaning_file_organization",
-                "actor": "data_cleaning_file_organization",
-            })
-            ledger_results.append(ledger_result)
+            fact_gate = self._business_fact_gate(extracted)
+            if fact_gate["trusted"] and accepted_facts:
+                ledger_result = ledger.apply_patch({
+                    "project_name": accepted_facts.get("project_name", inferred_project_name),
+                    "source_type": source_type,
+                    "facts": accepted_facts,
+                    "evidence": evidence,
+                    "skill": "data_cleaning_file_organization",
+                    "actor": "data_cleaning_file_organization",
+                })
+                ledger_results.append(ledger_result)
+            else:
+                if fact_gate["trusted"] and not accepted_facts:
+                    fact_gate = {
+                        "trusted": False,
+                        "blocked_reason": "no_accepted_business_facts",
+                    }
+                extracted["business_fact_gate"] = fact_gate
+                quality_reviews.append({
+                    "type": "extraction_quality_review",
+                    "severity": "medium",
+                    "project_name": inferred_project_name,
+                    "file": path,
+                    "reason": fact_gate["blocked_reason"],
+                    "field_quality": field_quality,
+                    "extract_method": extracted.get("extract_method", ""),
+                    "recommended_action": "人工复核提取文本后再写入业务账本",
+                })
+                archive_only_facts = dict(accepted_facts) if accepted_facts else {"project_name": inferred_project_name}
+                ledger_result = self._archive_only_ledger_result(inferred_project_name, archive_only_facts, evidence)
 
-            extracted_path = os.path.join(extracted_dir, f"{self._safe_name(os.path.basename(path))}_extracted.json")
+            extracted_path = os.path.join(extracted_dir, f"{self._structured_output_stem(path)}_extracted.json")
             self._save_structured_json(extracted_path, {
                 "schema_version": "file_organization.extracted_document.v1",
                 "run_id": run_id,
@@ -878,29 +1394,40 @@ class DataCleaningTools:
                 "source_file": path,
                 "source_type": source_type,
                 "extraction": extracted,
+                "accepted_business_facts": accepted_facts,
+                "field_quality": field_quality,
                 "business_judgement": ledger_result.get("business_judgement", {}),
+                "business_cases": self._business_cases_for_structured_output(
+                    project_name=inferred_project_name,
+                    source_file=path,
+                    source_type=source_type,
+                    facts=fields,
+                    judgement=ledger_result.get("business_judgement", {}),
+                ),
                 "ledger_artifacts": {
-                    "project_overview_md": ledger_result["markdown_path"],
-                    "project_ledger_json": ledger_result["state_path"],
+                    "project_overview_md": ledger_result.get("markdown_path", ""),
+                    "project_ledger_json": ledger_result.get("state_path", ""),
                 },
                 "processed_at": datetime.now().isoformat(),
             })
             structured_outputs.append(extracted_path)
 
-            patch_path = os.path.join(patches_dir, f"{self._safe_name(inferred_project_name)}_{self._safe_name(os.path.basename(path))}.json")
-            self._save_structured_json(patch_path, {
-                "schema_version": "project_patch.v1",
-                "project_name": inferred_project_name,
-                "source_type": source_type,
-                "facts": facts,
-                "evidence": evidence,
-            })
+            if fact_gate["trusted"]:
+                patch_path = os.path.join(patches_dir, f"{self._safe_name(inferred_project_name)}_{self._safe_name(os.path.basename(path))}.json")
+                self._save_structured_json(patch_path, {
+                    "schema_version": "project_patch.v1",
+                    "project_name": inferred_project_name,
+                    "source_type": source_type,
+                    "facts": accepted_facts,
+                    "evidence": evidence,
+                    "field_quality": field_quality,
+                })
 
             action = self._build_archive_action(run_id, path, inferred_project_name, extracted, ledger_result)
             archive_actions.append(action)
             trace.append({"stage": "process_file", "file": path, "status": "success", "project_name": inferred_project_name})
 
-        review_queue = self._build_review_queue(run_id, failures, archive_actions, ledger_results)
+        review_queue = self._build_review_queue(run_id, failures, archive_actions, ledger_results, quality_reviews)
 
         # ── 对抗性验证循环（Adversarial Verification Loop）──
         try:
@@ -989,12 +1516,195 @@ class DataCleaningTools:
                 return str(name)
         return "未命名项目"
 
+    def _resolve_structured_source_files(
+        self,
+        file_paths: Optional[List[str]],
+        source_dir: str,
+        skip_backups: bool,
+    ) -> List[Dict[str, Any]]:
+        if isinstance(file_paths, str):
+            file_paths = [file_paths]
+        resolved: List[Dict[str, Any]] = []
+        for path in file_paths or []:
+            resolved.append({"path": str(path), "status": "ready"})
+        if source_dir:
+            if not os.path.isdir(source_dir):
+                resolved.append({"file": source_dir, "status": "skipped", "reason": "source_dir_missing"})
+            else:
+                for name in sorted(os.listdir(source_dir)):
+                    path = os.path.join(source_dir, name)
+                    if not os.path.isfile(path) or name.startswith("."):
+                        continue
+                    if skip_backups and (".bak_" in name or name.endswith(".bak")):
+                        resolved.append({"file": path, "status": "skipped", "reason": "backup_file_skipped"})
+                        continue
+                    resolved.append({"path": path, "status": "ready"})
+        seen = set()
+        deduped: List[Dict[str, Any]] = []
+        for item in resolved:
+            key = item.get("path") or item.get("file")
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
+
+    @staticmethod
+    def _first_project_name_from_documents(documents: List[Dict[str, Any]]) -> str:
+        for document in documents:
+            fields = document.get("fields") or {}
+            name = fields.get("project_name")
+            if name and name != "未命名项目":
+                return str(name)
+        return ""
+
+    def _use_archive_metadata_passthrough(self, source_path: str) -> bool:
+        ext = os.path.splitext(source_path)[1].lower()
+        if ext not in {".pdf", ".png", ".jpg", ".jpeg", ".ofd"}:
+            return False
+        return bool(self._business_phase_from_path(source_path) and self._project_name_from_phase_path(self._path_parts(source_path)))
+
+    def _business_fact_gate(self, extracted: Dict[str, Any]) -> Dict[str, Any]:
+        """Decide whether extracted fields are allowed to update business ledgers."""
+        if extracted.get("extract_method") == "metadata_passthrough":
+            return {
+                "trusted": False,
+                "blocked_reason": "metadata_passthrough_archive_only",
+            }
+        quality = ((extracted.get("ocr") or {}).get("quality") or {})
+        if extracted.get("needs_human_review") or quality.get("needs_human_review"):
+            return {
+                "trusted": False,
+                "blocked_reason": "low_quality_extraction",
+                "quality_flags": quality.get("flags", []),
+            }
+        return {"trusted": True, "blocked_reason": ""}
+
+    def _archive_only_ledger_result(
+        self,
+        project_name: str,
+        facts: Dict[str, Any],
+        evidence: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        judgement = BidProjectRuleEngine().evaluate(facts, evidence_index=evidence)
+        return {
+            "project_name": project_name,
+            "status": "skipped",
+            "skip_reason": "archive_only_extraction",
+            "business_judgement": judgement,
+            "markdown_path": "",
+            "state_path": "",
+        }
+
+    def _business_cases_for_structured_output(
+        self,
+        project_name: str,
+        source_file: str,
+        source_type: str,
+        facts: Dict[str, Any],
+        judgement: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        flags = set(judgement.get("data_quality_flags") or [])
+        status_conflict = bool(flags.intersection({"报名状态与中标状态冲突", "执行阶段与中标状态冲突"}))
+        if not status_conflict:
+            return []
+        return [{
+            "schema_version": "business_case.v1",
+            "case_type": "status_conflict",
+            "entities": [{
+                "project_name": project_name,
+                "source_file": source_file,
+                "source_type": source_type,
+                "lifecycle_stage": facts.get("lifecycle_stage", ""),
+                "registration_status": facts.get("registration_status", ""),
+                "bid_status": facts.get("bid_status", ""),
+                "contract_status": facts.get("contract_status", ""),
+            }],
+            "signals": {
+                "status_conflict": True,
+                "data_quality_flags": judgement.get("data_quality_flags", []),
+                "risk_reasons": judgement.get("risk_reasons", []),
+            },
+            "output": {
+                "decision": "needs_review",
+                "reason": "状态冲突，业务层只输出结构化复核信号，不自动合并、不自动覆盖、不驱动文件移动",
+            },
+        }]
+
+    def _ledger_base_for_source(self, source_path: str, fields: Dict[str, Any]) -> str:
+        phase = self._business_phase_from_path(source_path)
+        if not phase:
+            status = str(fields.get("bid_status") or "")
+            lifecycle_stage = str(fields.get("lifecycle_stage") or "")
+            if "弃标" in status or "丢标" in status or "未中标" in status or lifecycle_stage in {"closed", "closed_lost"}:
+                phase = "项目丢标"
+            else:
+                phase = "项目投标"
+        return os.path.join(self.project_files_dir, phase)
+
+    def _apply_source_path_context(self, fields: Dict[str, Any], source_path: str) -> Dict[str, Any]:
+        enriched = dict(fields)
+        parts_list = self._path_parts(source_path)
+        parts = set(parts_list)
+        project_name_from_path = self._project_name_from_phase_path(parts_list)
+        if project_name_from_path:
+            enriched["project_name"] = project_name_from_path
+        if "项目丢标" in parts:
+            if str(enriched.get("bid_status") or "") not in {"已丢标", "未中标"}:
+                enriched["bid_status"] = "已弃标"
+                enriched["registration_status"] = "已弃标"
+                enriched["closed_reason_type"] = "abandoned_by_us"
+            else:
+                enriched["bid_status"] = "已丢标"
+                enriched["closed_reason_type"] = "lost_to_competitor"
+            enriched["lifecycle_stage"] = "closed"
+        elif "项目执行" in parts:
+            enriched["lifecycle_stage"] = "execution"
+        return enriched
+
+    @staticmethod
+    def _project_name_from_phase_path(parts: List[str]) -> str:
+        for phase in ("项目投标", "项目执行", "项目丢标"):
+            if phase in parts:
+                index = parts.index(phase)
+                if index + 1 < len(parts):
+                    project_name = parts[index + 1].strip()
+                    if project_name:
+                        return project_name
+        return ""
+
+    @staticmethod
+    def _business_phase_from_path(source_path: str) -> str:
+        parts = DataCleaningTools._path_parts(source_path)
+        for phase in ("项目投标", "项目执行", "项目丢标"):
+            if phase in parts:
+                return phase
+        return ""
+
+    @staticmethod
+    def _path_parts(source_path: str) -> List[str]:
+        return [part for part in re.split(r"[\\/]+", os.path.normpath(str(source_path))) if part]
+
+    def _structured_output_stem(self, source_path: str) -> str:
+        parent = os.path.basename(os.path.dirname(source_path))
+        basename = os.path.basename(source_path)
+        if parent and basename == "项目记录.md":
+            return f"{self._safe_name(parent)}_{self._safe_name(basename)}"
+        return self._safe_name(basename)
+
+    def _evidence_confidence(self, field: str, source_path: str) -> float:
+        parts = set(self._path_parts(source_path))
+        if "项目丢标" in parts and field in {"bid_status", "lifecycle_stage"}:
+            return 0.95
+        if field in {"project_name", "document_type"}:
+            return 0.86
+        return 0.78
+
     def apply_human_review(self, review_decisions: List[Dict[str, Any]], run_id: str = "") -> Dict[str, Any]:
         """Apply human review decisions as highest-weight ledger corrections."""
         if isinstance(review_decisions, dict):
             review_decisions = [review_decisions]
 
-        ledger = ProjectLedger(base_dir=os.path.join(self.workspace_dir, "项目文件"))
         results = []
         rule_candidates = []
         for decision in review_decisions:
@@ -1004,6 +1714,9 @@ class DataCleaningTools:
                 results.append({"status": "failed", "error": "missing project_name", "decision": decision})
                 continue
             facts.setdefault("project_name", project_name)
+            archive_phase = decision.get("archive_phase", "")
+            ledger_base = os.path.join(self.project_files_dir, archive_phase) if archive_phase else self.project_files_dir
+            ledger = ProjectLedger(base_dir=ledger_base)
             evidence = [
                 {
                     "field": field,
@@ -1067,3 +1780,1241 @@ class DataCleaningTools:
                 })
 
         artifacts = {}
+        if run_id:
+            run_dir = os.path.join(self.workspace_dir, "runs", run_id)
+            os.makedirs(run_dir, exist_ok=True)
+            artifacts["review_decisions"] = os.path.join(run_dir, "review_decisions.json")
+            artifacts["rule_candidates"] = os.path.join(run_dir, "rule_candidates.json")
+            self._save_structured_json(artifacts["review_decisions"], {
+                "schema_version": "human_review.decisions.v1",
+                "run_id": run_id,
+                "decisions": review_decisions,
+                "results": results,
+            })
+            self._save_structured_json(artifacts["rule_candidates"], {
+                "schema_version": "rule_candidates.v1",
+                "run_id": run_id,
+                "items": rule_candidates,
+            })
+
+        return {
+            "schema_version": "human_review.apply.v1",
+            "status": "success" if results and all(r["status"] == "success" for r in results) else "partial",
+            "reviewed": len([r for r in results if r["status"] == "success"]),
+            "failed": len([r for r in results if r["status"] != "success"]),
+            "results": results,
+            "rule_candidates": rule_candidates,
+            "artifacts": artifacts,
+        }
+
+    def execute_archive_plan(self, run_id: str, confirmed: bool = False) -> Dict[str, Any]:
+        """Execute a prepared archive plan only after explicit confirmation."""
+        run_dir = os.path.join(self.workspace_dir, "runs", run_id)
+        plan_path = os.path.join(run_dir, "planned_archive_actions.json")
+        if not os.path.exists(plan_path):
+            return {"error": f"Archive plan not found for run_id: {run_id}"}
+        with open(plan_path, "r", encoding="utf-8") as f:
+            plan = json.load(f)
+        actions = plan.get("actions", [])
+        if not confirmed:
+            return {
+                "schema_version": "archive_plan.execute.v1",
+                "status": "needs_confirmation",
+                "run_id": run_id,
+                "planned": len(actions),
+                "message": "Archive plan prepared but not executed. Call with confirmed=True to move files.",
+            }
+
+        results = []
+        review_decisions_path = os.path.join(run_dir, "review_decisions.json")
+        has_human_review = os.path.exists(review_decisions_path)
+        for action in actions:
+            source = action.get("source_file", "")
+            target = action.get("target_path", "")
+            if action.get("status") == "already_archived":
+                results.append({
+                    "status": "success",
+                    "source_file": source,
+                    "archived_path": target,
+                    "archive_record": {
+                        "original_path": source,
+                        "archived_path": target,
+                        "archive_status": "already_archived",
+                        "run_id": run_id,
+                    },
+                })
+                continue
+            hard_blockers = [b for b in action.get("blockers", []) if b in {"source_missing", "target_exists", "unknown_project"}]
+            if hard_blockers:
+                results.append({"status": "blocked", "source_file": source, "blockers": hard_blockers})
+                continue
+            if "human_review_recommended" in action.get("blockers", []) and not has_human_review:
+                results.append({
+                    "status": "blocked",
+                    "source_file": source,
+                    "blockers": ["human_review_required"],
+                    "message": "Archive action requires apply_human_review before confirmed execution.",
+                })
+                continue
+            source_readiness = probe_readable_file(source)
+            if source_readiness.get("status") != "ready":
+                results.append({
+                    "status": "blocked",
+                    "source_file": source,
+                    "blockers": ["source_not_local_or_unreadable"],
+                    "blocked_reason": source_readiness.get("blocked_reason", "source_not_local_or_unreadable"),
+                    "error": source_readiness.get("error", ""),
+                    "readiness": source_readiness,
+                })
+                continue
+            if os.path.exists(target):
+                results.append({"status": "blocked", "source_file": source, "blockers": ["target_exists"]})
+                continue
+            target_dir_readiness = probe_writable_dir(os.path.dirname(target))
+            if target_dir_readiness.get("status") != "ready":
+                results.append({
+                    "status": "blocked",
+                    "source_file": source,
+                    "target_path": target,
+                    "blockers": ["target_not_writable"],
+                    "blocked_reason": target_dir_readiness.get("blocked_reason", "target_not_writable"),
+                    "error": target_dir_readiness.get("error", ""),
+                    "target_readiness": target_dir_readiness,
+                })
+                continue
+            shutil.move(source, target)
+            archive_record = {
+                "original_path": source,
+                "archived_path": target,
+                "document_type": action.get("document_type", ""),
+                "archived_at": datetime.now().isoformat(),
+                "run_id": run_id,
+            }
+            archive_phase = (action.get("archive_decision") or {}).get("archive_phase") or self._business_phase_from_path(target) or "项目投标"
+            ledger = ProjectLedger(base_dir=os.path.join(self.project_files_dir, archive_phase))
+            ledger_result = ledger.record_archive_event(action.get("project_name") or "未命名项目", {
+                "original_path": source,
+                "archived_path": target,
+                "document_type": action.get("document_type", ""),
+                "archive_phase": archive_phase,
+                "run_id": run_id,
+                "archived_at": archive_record["archived_at"],
+                "skill": "data_cleaning_file_organization",
+                "actor": "archive_executor",
+            })
+            results.append({
+                "status": "success",
+                "source_file": source,
+                "archived_path": target,
+                "archive_record": archive_record,
+                "project_overview_md": ledger_result["markdown_path"],
+            })
+
+        artifacts = {
+            "archive_result": os.path.join(run_dir, "archive_result.json"),
+            "run_report": os.path.join(run_dir, "run_report.md"),
+        }
+        self._save_structured_json(artifacts["archive_result"], {
+            "schema_version": "archive_result.v1",
+            "run_id": run_id,
+            "results": results,
+        })
+        self._append_archive_report(artifacts["run_report"], results)
+        moved = len([item for item in results if item["status"] == "success"])
+        failed = len([item for item in results if item["status"] != "success"])
+        return {
+            "schema_version": "archive_plan.execute.v1",
+            "status": "success" if moved and not failed else ("partial" if moved else "failed"),
+            "run_id": run_id,
+            "moved": moved,
+            "failed": failed,
+            "results": results,
+            "artifacts": artifacts,
+        }
+
+    def _build_archive_action(
+        self,
+        run_id: str,
+        source_file: str,
+        project_name: str,
+        extracted: Dict[str, Any],
+        ledger_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        judgement = ledger_result.get("business_judgement", {})
+        decision = evaluate_archive_decision(
+            source_file=source_file,
+            extracted=extracted,
+            business_judgement=judgement,
+            project_files_dir=self.project_files_dir,
+        )
+        document_type = decision.get("document_type") or extracted.get("document_type") or "未分类"
+        target_dir = decision["target_dir"]
+        target_path = decision["target_path"]
+        proposed_name = os.path.basename(target_path)
+        project_name = decision.get("subject_name") or project_name
+        blockers = list(decision.get("blockers", []))
+        fact_gate = extracted.get("business_fact_gate") or {}
+        if fact_gate.get("blocked_reason"):
+            decision.setdefault("reasons", []).append(fact_gate["blocked_reason"])
+        source_abs = os.path.normcase(os.path.abspath(source_file))
+        target_abs = os.path.normcase(os.path.abspath(target_path))
+        already_archived = source_abs == target_abs
+        if not os.path.exists(source_file):
+            blockers.append("source_missing")
+        if os.path.exists(target_path) and not already_archived:
+            blockers.append("target_exists")
+        return {
+            "schema_version": "archive_action.v1",
+            "run_id": run_id,
+            "status": "already_archived" if already_archived and not blockers else ("ready" if not blockers else "needs_review"),
+            "source_file": source_file,
+            "project_name": project_name,
+            "document_type": document_type,
+            "proposed_name": proposed_name,
+            "target_dir": target_dir,
+            "target_path": target_path,
+            "blockers": blockers,
+            "business_judgement": judgement,
+            "archive_decision": decision,
+        }
+
+    def _build_review_queue(
+        self,
+        run_id: str,
+        failures: List[Dict[str, Any]],
+        archive_actions: List[Dict[str, Any]],
+        ledger_results: List[Dict[str, Any]],
+        quality_reviews: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        items = []
+        items.extend(quality_reviews or [])
+        for failure in failures:
+            items.append({
+                "type": "extraction_failure",
+                "severity": "high",
+                "file": failure.get("file"),
+                "reason": failure.get("error"),
+                "recommended_action": "人工检查文件是否可读或转换格式后重试",
+            })
+        for result in ledger_results:
+            judgement = result.get("business_judgement", {})
+            if judgement.get("human_review_required"):
+                items.append({
+                    "type": "business_judgement_review",
+                    "severity": judgement.get("risk_level", "unknown"),
+                    "project_name": result.get("project_name"),
+                    "missing_fields": judgement.get("missing_fields", []),
+                    "risk_reasons": judgement.get("risk_reasons", []),
+                    "recommended_actions": judgement.get("next_actions", []),
+                    "project_overview_md": result.get("markdown_path"),
+                })
+        for action in archive_actions:
+            if action.get("status") not in {"ready", "already_archived"}:
+                items.append({
+                    "type": "archive_action_review",
+                    "severity": "medium",
+                    "project_name": action.get("project_name"),
+                    "source_file": action.get("source_file"),
+                    "target_path": action.get("target_path"),
+                    "blockers": action.get("blockers", []),
+                    "recommended_action": "确认归档计划后再执行 execute_archive_plan",
+                })
+        return {
+            "schema_version": "review_queue.v1",
+            "run_id": run_id,
+            "status": "needs_review" if items else "clear",
+            "items": items,
+        }
+
+    def _write_run_report(
+        self,
+        report_path: str,
+        run_id: str,
+        total: int,
+        processed: int,
+        failures: List[Dict[str, Any]],
+        review_queue: Dict[str, Any],
+        archive_actions: List[Dict[str, Any]],
+    ) -> None:
+        lines = [
+            f"# 文件整理运行报告：{run_id}",
+            "",
+            f"- 输入文件数：{total}",
+            f"- 结构化成功：{processed}",
+            f"- 失败：{len(failures)}",
+            f"- 复核项：{len(review_queue.get('items', []))}",
+            f"- 归档计划：{len(archive_actions)}",
+            "",
+            "## 失败项",
+        ]
+        if failures:
+            for failure in failures:
+                lines.append(f"- {failure.get('file')}: {failure.get('error')}")
+        else:
+            lines.append("- 无")
+        lines.extend(["", "## 人工复核队列"])
+        if review_queue.get("items"):
+            for item in review_queue.get("items", []):
+                title = item.get("project_name") or item.get("file")
+                detail = item.get("reason") or item.get("recommended_action") or ", ".join(item.get("recommended_actions", []))
+                lines.append(f"- [{item.get('type')}] {title}: {detail}")
+        else:
+            lines.append("- 无")
+        lines.extend(["", "## 归档计划"])
+        if archive_actions:
+            for action in archive_actions:
+                lines.append(f"- {action.get('status')}: {action.get('source_file')} -> {action.get('target_path')}")
+        else:
+            lines.append("- 无")
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+    def _append_archive_report(self, report_path: str, results: List[Dict[str, Any]]) -> None:
+        lines = ["", "## 归档执行结果"]
+        for item in results:
+            if item.get("status") == "success":
+                lines.append(f"- success: {item.get('source_file')} -> {item.get('archived_path')}")
+            else:
+                lines.append(f"- {item.get('status')}: {item.get('source_file')} {item.get('error') or item.get('blockers')}")
+        with open(report_path, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+    def import_project_detail_workbook(self, file_path: str) -> Dict[str, Any]:
+        """Import 项目明细表.xlsx and update one ledger per project.
+
+        The workbook is treated as an xlsx_summary source. It can seed and
+        update project master data, but higher-weight evidence such as CRM/BPM
+        readback, contracts, and human corrections can override it later.
+        """
+        if not os.path.exists(file_path):
+            return {"error": f"File not found: {file_path}"}
+
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            return {"error": "openpyxl not installed. Run: pip install openpyxl"}
+
+        wb = load_workbook(file_path, data_only=True)
+        if "项目明细表" not in wb.sheetnames:
+            return {"error": "Workbook missing required sheet: 项目明细表"}
+
+        detail_rows = self._worksheet_records(wb["项目明细表"])
+        execution_rows = self._worksheet_records(wb["项目执行"]) if "项目执行" in wb.sheetnames else []
+        execution_by_key = self._execution_rows_by_project(execution_rows)
+
+        ledger = ProjectLedger(base_dir=self.project_files_dir)
+        structured_dir = os.path.join(self.workspace_dir, "structured_workbooks", self._safe_name(os.path.basename(file_path)))
+        os.makedirs(structured_dir, exist_ok=True)
+
+        projects = []
+        failed = []
+        for row_index, row in enumerate(detail_rows, start=2):
+            facts = self._project_detail_facts(row)
+            project_name = facts.get("project_name")
+            if not project_name:
+                failed.append({"row": row_index, "error": "missing project_name"})
+                continue
+
+            exec_row = self._match_execution_row(facts, execution_by_key)
+            if exec_row:
+                facts.update(self._project_execution_facts(exec_row))
+            facts["lifecycle_stage"] = self._infer_lifecycle_stage(facts)
+            facts["risk_level"] = self._infer_risk_level(facts)
+
+            evidence = [
+                {
+                    "field": field,
+                    "source_type": "xlsx_summary",
+                    "source_ref": f"{file_path}#项目明细表!row={row_index}",
+                    "extract_method": "xlsx_row",
+                    "confidence": 0.90 if field in {"project_name", "project_code", "bid_status"} else 0.82,
+                    "summary": "项目明细表导入",
+                }
+                for field in facts.keys()
+            ]
+            if exec_row:
+                evidence.extend([
+                    {
+                        "field": field,
+                        "source_type": "xlsx_summary",
+                        "source_ref": f"{file_path}#项目执行",
+                        "extract_method": "xlsx_row",
+                        "confidence": 0.82,
+                        "summary": "项目执行表补充",
+                    }
+                    for field in self._project_execution_facts(exec_row).keys()
+                ])
+
+            ledger_result = ledger.apply_patch({
+                "project_name": project_name,
+                "source_type": "xlsx_summary",
+                "facts": facts,
+                "evidence": evidence,
+                "skill": "data_cleaning_file_organization",
+                "actor": "data_cleaning_file_organization",
+            })
+
+            structured_path = os.path.join(structured_dir, f"{self._safe_name(project_name)}.json")
+            self._save_structured_json(structured_path, {
+                "schema_version": "project_detail.row.v1",
+                "source_file": file_path,
+                "source_row": row_index,
+                "facts": facts,
+                "raw_row": row,
+                "execution_row": exec_row or {},
+                "artifacts": {
+                    "project_overview_md": ledger_result["markdown_path"],
+                    "project_ledger_json": ledger_result["state_path"],
+                },
+                "processed_at": datetime.now().isoformat(),
+            })
+
+            projects.append({
+                "project_name": project_name,
+                "facts": facts,
+                "structured_output": structured_path,
+                "artifacts": {
+                    "project_overview_md": ledger_result["markdown_path"],
+                    "project_ledger_json": ledger_result["state_path"],
+                    "project_dir": ledger_result["project_dir"],
+                },
+            })
+
+        return {
+            "schema_version": "project_detail_workbook.import.v1",
+            "status": "success" if projects and not failed else ("partial" if projects else "failed"),
+            "source_file": file_path,
+            "processed_projects": len(projects),
+            "failed": len(failed),
+            "execution_rows": len(execution_rows),
+            "projects": projects,
+            "failures": failed,
+            "structured_dir": structured_dir,
+        }
+
+    def generate_bid_progress_html(self, output_file: str = "") -> Dict[str, Any]:
+        """Generate 投标进度总览.html from project ledger facts.
+
+        The HTML is a derived view. The authoritative evidence remains each
+        project's project_ledger.json and 项目总览.md.
+        """
+        ledger_dir = self.project_files_dir
+        if not os.path.exists(ledger_dir):
+            return {"error": f"Project ledger directory not found: {ledger_dir}"}
+
+        projects = self._load_project_ledger_summaries(ledger_dir)
+        if not projects:
+            return {"error": f"No project ledgers found in: {ledger_dir}"}
+
+        groups = {
+            "已中标": [p for p in projects if p["overview_status"] == "已中标"],
+            "已丢标": [p for p in projects if p["overview_status"] == "已丢标"],
+            "已弃标": [p for p in projects if p["overview_status"] == "已弃标"],
+            "参与中": [p for p in projects if p["overview_status"] == "参与中"],
+        }
+        output = output_file or os.path.join(self.business_root, "投标进度总览.html")
+        os.makedirs(os.path.dirname(output), exist_ok=True)
+        with open(output, "w", encoding="utf-8") as f:
+            f.write(self._render_bid_progress_html(projects, groups))
+
+        return {
+            "schema_version": "bid_progress_html.v1",
+            "status": "success",
+            "source_dir": ledger_dir,
+            "output_file": output,
+            "total_projects": len(projects),
+            "counts": {name: len(items) for name, items in groups.items()},
+        }
+
+    def _worksheet_records(self, ws) -> List[Dict[str, Any]]:
+        headers = [self._cell_text(cell.value) for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+        records = []
+        for row in ws.iter_rows(min_row=2):
+            record = {}
+            has_value = False
+            for idx, cell in enumerate(row):
+                if idx >= len(headers) or not headers[idx]:
+                    continue
+                value = self._normalize_cell_value(cell.value)
+                if value not in (None, ""):
+                    has_value = True
+                record[headers[idx]] = value
+            if has_value:
+                records.append(record)
+        return records
+
+    def _project_detail_facts(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        mapping = {
+            "项目名称": "project_name",
+            "项目编号": "project_code",
+            "招标人/客户": "customer_name",
+            "负责销售": "sales_owner",
+            "报名截止": "registration_deadline",
+            "开标时间": "bid_open_time",
+            "投标保证金": "bid_bond_amount",
+            "保证金已支付": "bid_bond_paid",
+            "项目类型": "project_type",
+            "报名状态": "registration_status",
+            "中标状态": "bid_status",
+            "签约状态": "contract_status",
+            "备注": "note",
+            "立项金额": "project_amount",
+            "招标编号": "bid_code",
+        }
+        facts = {}
+        for source_field, target_field in mapping.items():
+            value = row.get(source_field)
+            if value in (None, ""):
+                continue
+            facts[target_field] = value
+        return facts
+
+    def _project_execution_facts(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        mapping = {
+            "客户": "customer_name",
+            "合同金额": "contract_amount",
+            "合同编号": "contract_code",
+            "签订日期": "contract_signed_date",
+            "签约状态": "contract_status",
+            "里程碑节点": "milestone_name",
+            "预计完成": "planned_finish_date",
+            "实际完成": "actual_finish_date",
+            "备注": "execution_note",
+        }
+        facts = {}
+        for source_field, target_field in mapping.items():
+            value = row.get(source_field)
+            if value in (None, ""):
+                continue
+            facts[target_field] = value
+        return facts
+
+    def _execution_rows_by_project(self, rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            for key in [row.get("项目编号"), row.get("项目名称")]:
+                if key:
+                    grouped.setdefault(str(key), []).append(row)
+        return grouped
+
+    def _match_execution_row(self, facts: Dict[str, Any], grouped: Dict[str, List[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+        for key in [facts.get("project_code"), facts.get("project_name")]:
+            if key and str(key) in grouped:
+                return grouped[str(key)][0]
+        return None
+
+    def _infer_lifecycle_stage(self, facts: Dict[str, Any]) -> str:
+        bid_status = str(facts.get("bid_status", ""))
+        contract_status = str(facts.get("contract_status", ""))
+        registration_status = str(facts.get("registration_status", ""))
+        if "弃标" in bid_status or "丢标" in bid_status or "未中标" in bid_status:
+            return "closed"
+        if "已签" in contract_status or facts.get("contract_code"):
+            return "execution"
+        if "已中标" in bid_status:
+            return "won_pending_contract"
+        if "已报名" in registration_status or "待开标" in bid_status:
+            return "bidding"
+        if "待报名" in registration_status:
+            return "lead_or_pending_registration"
+        return "unknown"
+
+    def _infer_risk_level(self, facts: Dict[str, Any]) -> str:
+        if facts.get("lifecycle_stage") in {"closed", "closed_lost"}:
+            return "low"
+        if facts.get("bid_bond_amount") and str(facts.get("bid_bond_paid", "")) not in {"是", "已支付", "✅ 已支付"}:
+            return "medium"
+        if facts.get("bid_status") == "已中标" and "未签" in str(facts.get("contract_status", "")):
+            return "medium"
+        if not facts.get("customer_name") or not facts.get("sales_owner"):
+            return "unknown"
+        return "low"
+
+    def _load_project_ledger_summaries(self, ledger_dir: str) -> List[Dict[str, Any]]:
+        projects = []
+        seen = set()
+        root = Path(ledger_dir)
+        state_paths = sorted(root.rglob("project_ledger.json")) if root.exists() else []
+        for state_path_obj in state_paths:
+            state_path = str(state_path_obj)
+            try:
+                with open(state_path, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            facts = state.get("current_facts") or {}
+            judgement = state.get("business_judgement") or {}
+            project_name = str(facts.get("project_name") or state.get("project_name") or state_path_obj.parent.parent.name)
+            if project_name in seen:
+                continue
+            seen.add(project_name)
+            row = {
+                "project_name": project_name,
+                "project_code": facts.get("project_code", ""),
+                "bpm_contract_code": facts.get("bpm_contract_code", ""),
+                "business_type": facts.get("business_type", ""),
+                "customer_name": facts.get("customer_name", ""),
+                "sales_owner": facts.get("sales_owner", ""),
+                "registration_deadline": facts.get("registration_deadline", ""),
+                "bid_open_time": facts.get("bid_open_time", ""),
+                "bid_bond_amount": facts.get("bid_bond_amount", ""),
+                "bid_bond_paid": facts.get("bid_bond_paid", ""),
+                "project_type": facts.get("project_type", ""),
+                "registration_status": facts.get("registration_status", ""),
+                "bid_status": facts.get("bid_status", ""),
+                "contract_status": facts.get("contract_status", ""),
+                "note": facts.get("note") or facts.get("execution_note", ""),
+                "project_amount": facts.get("project_amount") or facts.get("contract_amount", ""),
+                "lifecycle_stage": facts.get("lifecycle_stage", ""),
+                "business_stage": judgement.get("business_stage", facts.get("lifecycle_stage", "")),
+                "risk_level": judgement.get("risk_level", facts.get("risk_level", "")),
+                "risk_reasons": judgement.get("risk_reasons", []),
+                "next_actions": judgement.get("next_actions", []),
+                "human_review_required": judgement.get("human_review_required", False),
+                "planned_finish_date": facts.get("planned_finish_date", ""),
+                "actual_finish_date": facts.get("actual_finish_date", ""),
+                "ledger_path": state_path,
+            }
+            row["overview_status"] = judgement.get("display_status") or self._overview_status(row)
+            projects.append(row)
+        return sorted(projects, key=lambda p: (p["overview_status"], str(p.get("bid_open_time") or ""), p["project_name"]))
+
+    def _overview_status(self, facts: Dict[str, Any]) -> str:
+        bid_status = str(facts.get("bid_status", ""))
+        contract_status = str(facts.get("contract_status", ""))
+        lifecycle_stage = str(facts.get("lifecycle_stage", ""))
+        if "弃标" in bid_status:
+            return "已弃标"
+        if "丢标" in bid_status or "未中标" in bid_status:
+            return "已丢标"
+        if lifecycle_stage in {"closed", "closed_lost"}:
+            return "已丢标" if facts.get("closed_reason_type") == "lost_to_competitor" else "已弃标"
+        if "已中标" in bid_status or "已签" in contract_status or lifecycle_stage in {"execution", "won_pending_contract"}:
+            return "已中标"
+        return "参与中"
+
+    def _render_bid_progress_html(self, projects: List[Dict[str, Any]], groups: Dict[str, List[Dict[str, Any]]]) -> str:
+        generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+        won = len(groups.get("已中标", []))
+        lost = len(groups.get("已丢标", []))
+        win_rate_denominator = won + lost
+        win_rate = f"{(won / win_rate_denominator * 100):.1f}%" if win_rate_denominator else "0%"
+        review_count = len([p for p in projects if p.get("human_review_required")])
+        risk_count = len([p for p in projects if p.get("risk_level") in {"high", "medium"}])
+        stat_cards = [
+            ("全部项目", len(projects), "slate"),
+            ("已中标", len(groups.get("已中标", [])), "green"),
+            ("已丢标", len(groups.get("已丢标", [])), "orange"),
+            ("已弃标", len(groups.get("已弃标", [])), "red"),
+            ("参与中", len(groups.get("参与中", [])), "blue"),
+            ("中标率", win_rate, "amber"),
+            ("需复核", review_count, "violet"),
+        ]
+        cards_html = "\n".join(
+            (
+                f'<div class="stat-card {cls}">'
+                f'<div class="label">{html.escape(label)}</div>'
+                f'<div class="number">{count}</div>'
+                f'</div>'
+            )
+            for label, count, cls in stat_cards
+        )
+        tab_styles = {
+            "全部项目": ("#334155", "#f1f5f9"),
+            "已中标": ("#16a34a", "#dcfce7"),
+            "已丢标": ("#ea580c", "#ffedd5"),
+            "已弃标": ("#dc2626", "#fee2e2"),
+            "参与中": ("#2563eb", "#dbeafe"),
+        }
+        display_groups = {"全部项目": projects, **groups}
+        tabs_html = "\n".join(
+            (
+                f'<button class="tab-btn" data-tab="{html.escape(name)}" '
+                f'style="--active-color: {tab_styles[name][0]}; --active-bg: {tab_styles[name][1]}">'
+                f'{html.escape(name)} <span class="tab-count">{len(items)}</span></button>'
+            )
+            for name, items in display_groups.items()
+        )
+        sections_html = "\n".join(
+            (
+                f'<div class="tab-content" data-tab="{html.escape(name)}">'
+                f'<div class="section">'
+                f'<div class="section-title" style="--section-color: {tab_styles[name][0]}; --section-bg: {tab_styles[name][1]}">'
+                f'<h2>{html.escape(name)} <span class="count-badge">{len(items)}</span></h2>'
+                f'</div>'
+                f'{self._render_bid_progress_table(items)}'
+                f'<div class="detail-subsection"><h3>项目详情</h3>{self._render_project_detail_cards(items)}</div>'
+                f'</div></div>'
+            )
+            for name, items in display_groups.items()
+        )
+        sales_rows = self._render_sales_stats(projects)
+        return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>投标进度总览</title>
+  <style>
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    :root {{ color-scheme: light; --border: #d9e0ea; --muted: #64748b; --ink: #0f172a; --panel: #ffffff; --bg: #f6f8fb; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--ink); line-height: 1.55; padding: 20px; }}
+    .container {{ max-width: 1760px; margin: 0 auto; }}
+    .hero {{ background: linear-gradient(135deg, #0f172a 0%, #1f2937 56%, #0b7667 100%); color: #fff; border-radius: 8px; padding: 22px 26px; margin-bottom: 16px; box-shadow: 0 14px 30px rgba(15, 23, 42, .14); }}
+    .hero-row {{ display: flex; justify-content: space-between; gap: 20px; align-items: flex-end; flex-wrap: wrap; }}
+    h1 {{ font-size: 30px; line-height: 1.2; font-weight: 800; margin-bottom: 8px; }}
+    .meta {{ color: #dbeafe; font-size: 13px; }}
+    .stats-bar {{ display: grid; grid-template-columns: repeat(6, minmax(145px, 1fr)); gap: 12px; margin-bottom: 16px; }}
+    .stat-card {{ background: var(--panel); border-radius: 8px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(15, 23, 42, .07); border: 1px solid var(--border); border-top: 4px solid #64748b; min-height: 88px; }}
+    .stat-card .label {{ font-size: 12px; color: var(--muted); font-weight: 700; }}
+    .stat-card .number {{ font-size: 30px; line-height: 1.1; font-weight: 800; margin-top: 8px; color: #111827; }}
+    .stat-card.green {{ border-top-color: #16a34a; }} .stat-card.green .number {{ color: #15803d; }}
+    .stat-card.red {{ border-top-color: #dc2626; }} .stat-card.red .number {{ color: #b91c1c; }}
+    .stat-card.orange {{ border-top-color: #ea580c; }} .stat-card.orange .number {{ color: #c2410c; }}
+    .stat-card.blue {{ border-top-color: #2563eb; }} .stat-card.blue .number {{ color: #1d4ed8; }}
+    .stat-card.amber {{ border-top-color: #d97706; }} .stat-card.amber .number {{ color: #b45309; }}
+    .stat-card.violet {{ border-top-color: #7c3aed; }} .stat-card.violet .number {{ color: #6d28d9; }}
+    .stat-card.slate {{ border-top-color: #334155; }} .stat-card.slate .number {{ color: #0f172a; }}
+    .tab-nav {{ position: sticky; top: 0; z-index: 20; display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; background: rgba(255,255,255,.94); padding: 10px; border-radius: 8px; box-shadow: 0 8px 22px rgba(15, 23, 42, .08); border: 1px solid var(--border); backdrop-filter: blur(10px); }}
+    .tab-btn {{ min-height: 38px; padding: 8px 14px; border: 1px solid #d7dde6; border-radius: 7px; background: #fff; font-size: 13px; font-weight: 700; cursor: pointer; transition: all .16s; color: #334155; display: flex; align-items: center; gap: 6px; }}
+    .tab-btn:hover {{ border-color: #aab4c2; background: #f8fafc; }}
+    .tab-btn.active {{ border-color: var(--active-color); background: var(--active-bg); color: var(--active-color); }}
+    .tab-count {{ font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #f3f4f6; color: #6b7280; }}
+    .tab-btn.active .tab-count {{ background: #fff; color: var(--active-color); }}
+    .search-box {{ min-width: 280px; flex: 1; max-width: 460px; min-height: 38px; border: 1px solid #d7dde6; border-radius: 7px; padding: 0 12px; color: #111827; outline: none; background: #fff; }}
+    .search-box:focus {{ border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, .12); }}
+    .tab-content {{ display: none; }}
+    .tab-content.active {{ display: block; }}
+    .section {{ background: var(--panel); border-radius: 8px; padding: 18px; margin-bottom: 22px; box-shadow: 0 1px 3px rgba(15, 23, 42, .08); border: 1px solid var(--border); }}
+    .section-title {{ border-left: 4px solid var(--section-color); padding: 2px 0 2px 12px; margin-bottom: 14px; display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }}
+    .section-title h2 {{ font-size: 18px; color: #111827; display: flex; align-items: center; gap: 8px; }}
+    .count-badge {{ font-size: 12px; padding: 2px 10px; border-radius: 999px; font-weight: 800; background: var(--section-bg); color: var(--section-color); }}
+    .table-wrap {{ width: 100%; overflow-x: auto; border: 1px solid #e2e8f0; border-radius: 8px; }}
+    table {{ width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; min-width: 1460px; background: #fff; }}
+    .project-table {{ table-layout: fixed; min-width: 3040px; }}
+    .project-table .col-index {{ width: 72px; }}
+    .project-table .col-project {{ width: 300px; }}
+    .project-table .col-code {{ width: 132px; }}
+    .project-table .col-bpm {{ width: 190px; }}
+    .project-table .col-business {{ width: 110px; }}
+    .project-table .col-customer {{ width: 220px; }}
+    .project-table .col-owner {{ width: 96px; }}
+    .project-table .col-date {{ width: 118px; }}
+    .project-table .col-money {{ width: 120px; }}
+    .project-table .col-flag {{ width: 110px; }}
+    .project-table .col-type {{ width: 96px; }}
+    .project-table .col-status {{ width: 105px; }}
+    .project-table .col-action {{ width: 260px; }}
+    .project-table .col-review {{ width: 96px; }}
+    .project-table .col-note {{ width: 260px; }}
+    th {{ background: #eef3f8; padding: 9px 10px; text-align: left; font-weight: 800; color: #475569; border-bottom: 1px solid #cbd5e1; white-space: nowrap; font-size: 12px; }}
+    td {{ padding: 9px 10px; border-bottom: 1px solid #edf1f5; vertical-align: top; background: transparent; }}
+    tbody tr:hover {{ background: #f1f5f9 !important; }}
+    .center {{ text-align: center; }}
+    .name-cell {{ font-weight: 750; color: #111827; white-space: normal; overflow-wrap: anywhere; line-height: 1.35; }}
+    .note {{ min-width: 220px; max-width: 360px; color: #334155; line-height: 1.4; }}
+    .badge {{ display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; white-space: nowrap; }}
+    .badge-red, .badge-danger {{ background: #fee2e2; color: #dc2626; }}
+    .badge-yellow, .badge-warning {{ background: #fef3c7; color: #d97706; }}
+    .badge-green, .badge-success {{ background: #dcfce7; color: #16a34a; }}
+    .badge-blue, .badge-info {{ background: #dbeafe; color: #2563eb; }}
+    .badge-gray, .badge-neutral {{ background: #f3f4f6; color: #6b7280; }}
+    .text-red {{ color: #dc2626; font-weight: 700; }} .text-yellow {{ color: #d97706; font-weight: 700; }}
+    .muted {{ color: #94a3b8; font-style: italic; }}
+    .empty-state {{ padding: 28px; color: var(--muted); border: 1px dashed #cbd5e1; border-radius: 8px; background: #f8fafc; }}
+    .detail-subsection {{ margin-top: 18px; padding-top: 18px; border-top: 1px solid #e2e8f0; }}
+    .detail-subsection h3 {{ font-size: 16px; margin-bottom: 14px; color: #1a1a1a; }}
+    .detail-card {{ background: #fafbfc; border-radius: 8px; padding: 16px; margin-bottom: 12px; border: 1px solid #e2e8f0; }}
+    .detail-card.warning {{ border-left: 4px solid #f59e0b; background: #fffbeb; }}
+    .detail-card h3 {{ font-size: 15px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
+    .info-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 12px; margin-bottom: 12px; }}
+    .info-item {{ display: flex; flex-direction: column; }}
+    .info-item .label {{ font-size: 12px; color: #667085; margin-bottom: 2px; }}
+    .info-item .value {{ font-size: 13px; font-weight: 550; color: #111827; }}
+    .subsection {{ margin-top: 14px; padding-top: 14px; border-top: 1px solid #e5e7eb; }}
+    .subsection h4 {{ font-size: 13px; color: #667085; margin-bottom: 10px; }}
+    .sub-table {{ font-size: 12px; min-width: 720px; }}
+    .sub-table th {{ padding: 6px 10px; font-size: 11px; }}
+    .sub-table td {{ padding: 6px 10px; }}
+    .task-list {{ display: flex; flex-direction: column; gap: 3px; }}
+    .task-item {{ font-size: 12px; padding: 3px 0; }}
+    .risk-item {{ font-size: 12px; padding: 6px 10px; border-radius: 6px; margin-bottom: 3px; }}
+    .risk-high {{ background: #fee2e2; }} .risk-medium {{ background: #fef3c7; }} .risk-low {{ background: #dcfce7; }}
+    .weekly-content {{ font-size: 12px; color: #334155; padding: 10px; background: #f8fafc; border-radius: 8px; }}
+    .stats-table th {{ background: #7c3aed; color: #fff; font-size: 13px; }}
+    .stats-table td {{ padding: 12px; }}
+    @media (max-width: 1080px) {{ body {{ padding: 12px; }} .stats-bar {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} .hero {{ padding: 18px; }} .tab-nav {{ position: static; }} }}
+    @media print {{ body {{ background: #fff; padding: 0; }} .hero {{ color: #111827; background: #fff; box-shadow: none; border: 1px solid #e5e7eb; }} .section, .detail-card {{ box-shadow: none; border: 1px solid #e5e7eb; }} .tab-nav {{ display: none; }} .tab-content {{ display: block !important; }} }}
+  </style>
+</head>
+<body>
+  <main class="container">
+    <section class="hero">
+      <div class="hero-row">
+        <div>
+          <h1>投标进度总览</h1>
+          <div class="meta">生成时间: {html.escape(generated_at)} | 投标项目总数: {len(projects)}</div>
+        </div>
+      </div>
+    </section>
+    <div class="stats-bar">{cards_html}</div>
+    <div class="tab-nav">{tabs_html}<button class="tab-btn" data-tab="stats" style="--active-color: #7c3aed; --active-bg: #ede9fe">销售统计</button><input class="search-box" id="tableSearch" type="search" placeholder="搜索项目、客户、销售、编号"></div>
+    {sections_html}
+    <div class="tab-content" data-tab="stats">
+      <div class="section">
+        <div class="section-title" style="--section-color: #7c3aed; --section-bg: #ede9fe"><h2>销售统计</h2></div>
+        <div class="stats-bar" style="margin-bottom: 20px;">{cards_html}</div>
+        {sales_rows}
+      </div>
+    </div>
+  </main>
+  <script>
+    const tabs = document.querySelectorAll('.tab-btn');
+    const contents = document.querySelectorAll('.tab-content');
+    const search = document.getElementById('tableSearch');
+    function activateTab(name) {{
+      tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+      contents.forEach(c => c.classList.toggle('active', c.dataset.tab === name));
+      if (search) search.value = '';
+      filterRows('');
+    }}
+    tabs.forEach(btn => btn.addEventListener('click', () => activateTab(btn.dataset.tab)));
+    function filterRows(term) {{
+      const active = document.querySelector('.tab-content.active');
+      if (!active) return;
+      active.querySelectorAll('tbody tr').forEach(row => {{
+        row.style.display = row.innerText.toLowerCase().includes(term.toLowerCase()) ? '' : 'none';
+      }});
+    }}
+    if (search) search.addEventListener('input', event => filterRows(event.target.value));
+    activateTab(tabs[0]?.dataset.tab || '已中标');
+  </script>
+</body>
+</html>
+"""
+
+    def _render_bid_progress_table(self, rows: List[Dict[str, Any]]) -> str:
+        headers = [
+            "序号", "项目名称", "项目编号", "BPM销售合同号/非订单编号", "业务类型", "招标人/客户",
+            "负责销售", "报名截止", "开标时间", "投标保证金", "保证金已支付", "项目类型",
+            "报名状态", "中标状态", "签约状态", "风险等级", "下一步动作", "人工复核", "备注", "立项金额", "状态",
+        ]
+        if not rows:
+            return '<div class="empty-state">暂无项目</div>'
+        colgroup = "".join(
+            f'<col class="{cls}">'
+            for cls in [
+                "col-index", "col-project", "col-code", "col-bpm", "col-business", "col-customer",
+                "col-owner", "col-date", "col-date", "col-money", "col-flag", "col-type",
+                "col-status", "col-status", "col-status", "col-status", "col-action", "col-review",
+                "col-note", "col-money", "col-status",
+            ]
+        )
+        header_classes = ["center", "project-heading"] + [""] * (len(headers) - 2)
+        body = []
+        empty_cell = '<span class="muted">-</span>'
+        for idx, row in enumerate(rows, start=1):
+            values = [
+                ("center", idx, ""),
+                ("name-cell", row.get("project_name", ""), ""),
+                ("", row.get("project_code", ""), ""),
+                ("", row.get("bpm_contract_code", ""), ""),
+                ("", row.get("business_type", ""), "neutral"),
+                ("", row.get("customer_name", ""), ""),
+                ("", row.get("sales_owner", ""), ""),
+                ("", row.get("registration_deadline", ""), ""),
+                ("", row.get("bid_open_time", ""), ""),
+                ("", row.get("bid_bond_amount", ""), ""),
+                ("", row.get("bid_bond_paid", ""), "paid"),
+                ("", row.get("project_type", ""), "neutral"),
+                ("", row.get("registration_status", ""), "registration"),
+                ("", row.get("bid_status", ""), "bid"),
+                ("", row.get("contract_status", ""), "contract"),
+                ("", row.get("risk_level", ""), "risk"),
+                ("note", "；".join(row.get("next_actions") or []), ""),
+                ("", "是" if row.get("human_review_required") else "否", "review"),
+                ("note", row.get("note", ""), ""),
+                ("", row.get("project_amount", ""), ""),
+                ("", row.get("overview_status", ""), "overview"),
+            ]
+            cells = "".join(
+                f'<td class="{css_class}">{self._format_table_cell(value, badge_type, empty_cell)}</td>'
+                for css_class, value, badge_type in values
+            )
+            body.append(f'<tr style="background-color: {self._row_background(row)}">{cells}</tr>')
+        head = "".join(
+            f'<th class="{css_class}">{html.escape(header)}</th>' if css_class else f"<th>{html.escape(header)}</th>"
+            for header, css_class in zip(headers, header_classes)
+        )
+        return (
+            f'<div class="table-wrap"><table class="project-table"><colgroup>{colgroup}</colgroup>'
+            f'<thead><tr>{head}</tr></thead><tbody>{"".join(body)}</tbody></table></div>'
+        )
+
+    def _render_project_detail_cards(self, rows: List[Dict[str, Any]]) -> str:
+        if not rows:
+            return '<div class="detail-card"><span class="muted">暂无项目详情</span></div>'
+        return "\n".join(self._render_project_detail_card(row) for row in rows)
+
+    def _render_project_detail_card(self, row: Dict[str, Any]) -> str:
+        warning_class = " warning" if row.get("human_review_required") or row.get("risk_level") in {"high", "medium"} else ""
+        info_items = [
+            ("CRM 编号", row.get("project_code", "")),
+            ("BPM销售合同号/非订单编号", row.get("bpm_contract_code", "")),
+            ("业务类型", row.get("business_type", "")),
+            ("招标人/客户", row.get("customer_name", "")),
+            ("负责销售", row.get("sales_owner", "")),
+            ("报名截止", row.get("registration_deadline", "")),
+            ("开标时间", row.get("bid_open_time", "")),
+            ("投标保证金", row.get("bid_bond_amount", "")),
+            ("保证金已支付", row.get("bid_bond_paid", "")),
+            ("项目类型", row.get("project_type", "")),
+            ("报名状态", row.get("registration_status", "")),
+            ("中标状态", row.get("bid_status", "")),
+            ("签约状态", row.get("contract_status", "")),
+            ("风险等级", row.get("risk_level", "")),
+            ("人工复核", "是" if row.get("human_review_required") else "否"),
+            ("备注", row.get("note", "")),
+            ("立项金额", row.get("project_amount", "")),
+        ]
+        info_html = "".join(
+            f'<div class="info-item"><span class="label">{html.escape(label)}</span><span class="value">{self._plain_or_empty(value)}</span></div>'
+            for label, value in info_items
+        )
+        tasks = row.get("next_actions") or ["等待更多证据后更新下一步动作"]
+        task_html = "".join(f'<div class="task-item">{"☑" if idx == 0 and row.get("overview_status") == "已中标" else "☐"} {html.escape(str(task))}</div>' for idx, task in enumerate(tasks))
+        risk_html = self._risk_items(row)
+        latest = row.get("note") or "项目账本已更新，待进一步跟进"
+        return (
+            f'<div class="detail-card{warning_class}">'
+            f'<h3>{html.escape(str(row.get("project_name") or ""))} {self._status_badge(row)}</h3>'
+            f'<div class="info-grid detail-grid">{info_html}</div>'
+            f'<div class="subsection"><h4>里程碑进度</h4>{self._milestone_table(row)}</div>'
+            f'<div class="subsection"><h4>任务跟踪（{len(tasks)}）</h4><div class="task-list">{task_html}</div></div>'
+            f'<div class="subsection"><h4>风险与问题</h4>{risk_html}</div>'
+            f'<div class="subsection"><h4>最新进展</h4><p class="weekly-content">{html.escape(str(latest))}</p></div>'
+            f'</div>'
+        )
+
+    def _milestone_table(self, row: Dict[str, Any]) -> str:
+        planned = [
+            ("报名截止", row.get("registration_deadline", ""), row.get("registration_status", ""), "", "来自项目账本"),
+            ("开标", row.get("bid_open_time", ""), row.get("bid_status", ""), "", "来自项目账本"),
+            ("签约", "", row.get("contract_status", ""), "", "需 CRM/BPM 或合同文件补充"),
+            ("执行跟踪", row.get("planned_finish_date", ""), row.get("business_stage", ""), row.get("actual_finish_date", ""), "业务判断派生"),
+        ]
+        rows = "".join(
+            f"<tr><td>{html.escape(str(name))}</td><td>{self._plain_or_empty(deadline)}</td><td>{self._plain_or_empty(status)}</td><td>{self._plain_or_empty(done)}</td><td>{self._plain_or_empty(note)}</td></tr>"
+            for name, deadline, status, done, note in planned
+        )
+        return '<table class="sub-table"><thead><tr><th>里程碑</th><th>截止日期</th><th>状态</th><th>完成日期</th><th>备注</th></tr></thead><tbody>' + rows + "</tbody></table>"
+
+    def _risk_items(self, row: Dict[str, Any]) -> str:
+        risk_level = row.get("risk_level") or "low"
+        reasons = row.get("risk_reasons") or []
+        if not reasons:
+            if risk_level == "low":
+                reasons = ["当前无高风险，按下一步动作继续推进"]
+            else:
+                reasons = ["需结合项目证据进一步复核"]
+        css = {"high": "risk-high", "medium": "risk-medium", "low": "risk-low"}.get(str(risk_level), "risk-medium")
+        return "".join(f'<div class="risk-item {css}">{html.escape(str(reason))}</div>' for reason in reasons)
+
+    def _status_badge(self, row: Dict[str, Any]) -> str:
+        status = str(row.get("overview_status") or "")
+        if status == "已中标":
+            return '<span class="badge badge-green">已中标</span>'
+        if status == "已丢标":
+            return '<span class="badge badge-red">已丢标</span>'
+        if status == "已弃标":
+            return '<span class="badge badge-red">已弃标</span>'
+        if row.get("risk_level") == "high":
+            return '<span class="badge badge-red">高风险</span>'
+        return '<span class="badge badge-blue">参与中</span>'
+
+    def _row_background(self, row: Dict[str, Any]) -> str:
+        if row.get("risk_level") == "high":
+            return "#fef2f2"
+        if row.get("overview_status") == "已中标":
+            return "#f0fdf4"
+        if row.get("overview_status") in {"已丢标", "已弃标"}:
+            return "#fef2f2"
+        return "#f8fafc" if row.get("human_review_required") else "#ffffff"
+
+    def _plain_or_empty(self, value: Any) -> str:
+        if value in (None, ""):
+            return '<span class="muted">—</span>'
+        return html.escape(str(value))
+
+    def _format_table_cell(self, value: Any, badge_type: str, empty_cell: str) -> str:
+        if value in (None, ""):
+            return empty_cell
+        text = str(value)
+        if badge_type:
+            return f'<span class="badge {self._badge_class(text, badge_type)}">{html.escape(text)}</span>'
+        return html.escape(text)
+
+    def _badge_class(self, value: str, badge_type: str) -> str:
+        if badge_type == "overview":
+            if "丢标" in value or "弃标" in value or "未中标" in value:
+                return "badge-danger"
+            if "中标" in value:
+                return "badge-success"
+            return "badge-info"
+        if badge_type == "paid":
+            return "badge-success" if value in {"是", "已支付"} else "badge-warning"
+        if badge_type == "risk":
+            if value == "high":
+                return "badge-danger"
+            if value == "medium":
+                return "badge-warning"
+            if value == "low":
+                return "badge-success"
+            return "badge-neutral"
+        if badge_type == "review":
+            return "badge-warning" if value == "是" else "badge-success"
+        if badge_type == "bid":
+            if "丢标" in value or "弃标" in value or "未中标" in value:
+                return "badge-danger"
+            if "中标" in value:
+                return "badge-success"
+            if "待" in value:
+                return "badge-warning"
+            return "badge-info"
+        if badge_type == "contract":
+            if "已签" in value:
+                return "badge-success"
+            if "未签" in value or "待" in value:
+                return "badge-warning"
+            return "badge-neutral"
+        if badge_type == "registration":
+            if "已报名" in value:
+                return "badge-info"
+            if "待" in value:
+                return "badge-warning"
+            return "badge-neutral"
+        return "badge-neutral"
+
+    def _render_sales_stats(self, projects: List[Dict[str, Any]]) -> str:
+        stats: Dict[str, Dict[str, int]] = {}
+        for row in projects:
+            owner = self._sales_owner_display_name(row.get("sales_owner"))
+            status = row.get("overview_status", "参与中")
+            stats.setdefault(owner, {"total": 0, "已中标": 0, "已丢标": 0, "已弃标": 0, "参与中": 0})
+            stats[owner]["total"] += 1
+            stats[owner][status if status in stats[owner] else "参与中"] += 1
+        rows = []
+        for owner, item in sorted(stats.items(), key=lambda pair: (-pair[1]["total"], pair[0])):
+            denominator = item["已中标"] + item["已丢标"]
+            win_rate = f"{(item['已中标'] / denominator * 100):.1f}%" if denominator else "0%"
+            rows.append(
+                "<tr>"
+                f"<td>{html.escape(owner)}</td><td>{item['total']}</td><td>{item['已中标']}</td>"
+                f"<td>{item['已丢标']}</td><td>{item['已弃标']}</td><td>{item['参与中']}</td>"
+                f"<td>{win_rate}</td>"
+                "</tr>"
+            )
+        return '<div class="table-wrap"><table><thead><tr><th>负责销售</th><th>项目数</th><th>已中标</th><th>已丢标</th><th>已弃标</th><th>参与中</th><th>中标率</th></tr></thead><tbody>' + "".join(rows) + "</tbody></table></div>"
+
+    def _sales_owner_display_name(self, value: Any) -> str:
+        owner = str(value or "未指定").strip() or "未指定"
+        return "甄勇" if owner == "领导" else owner
+
+    def _cell_text(self, value: Any) -> str:
+        return "" if value is None else str(value).strip()
+
+    def _normalize_cell_value(self, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped in {"待录入", "待确认", "待补充", "（待补充）", "(待补充)", "nan", "NaN"}:
+                return None
+            return stripped if stripped else None
+        return value
+
+    def _first_field(self, items: List[Dict[str, Any]], field: str) -> str:
+        for item in items:
+            value = (item.get("fields") or {}).get(field)
+            if value:
+                return str(value)
+        return ""
+
+    def _safe_name(self, value: str) -> str:
+        safe = re.sub(r'[<>:"/\\|?*\s]+', "_", value).strip("_")
+        return safe or "unnamed"
+
+    def _save_structured_json(self, output_path: str, data: Dict[str, Any]) -> None:
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def classify_document(self, file_path: str) -> Dict:
+        """根据文件名/内容分类文档到业务领域"""
+        if not os.path.exists(file_path):
+            return {"error": f"File not found: {file_path}"}
+        
+        filename = os.path.basename(file_path).lower()
+        
+        # 先尝试文件名匹配
+        matched_category = None
+        for category, keywords in CLASSIFICATION_KEYWORDS.items():
+            for kw in keywords:
+                if kw in filename:
+                    matched_category = category
+                    break
+            if matched_category:
+                break
+        
+        # 如果文件名未匹配，尝试内容匹配（仅文本文件）
+        if not matched_category:
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read().lower()[:5000]
+                for category, keywords in CLASSIFICATION_KEYWORDS.items():
+                    for kw in keywords:
+                        if kw in content:
+                            matched_category = category
+                            break
+                    if matched_category:
+                        break
+            except:
+                pass
+        
+        if not matched_category:
+            matched_category = "未分类"
+        
+        return {
+            "file": file_path,
+            "category": matched_category,
+            "filename": filename,
+        }
+
+    def batch_process(self, source_dir: Optional[str] = None) -> Dict:
+        """批量处理目录中的文件：扫描 → 提取 → 分类 → 保存"""
+        scan_result = self.scan_raw_files(source_dir)
+        files = scan_result.get("files", [])
+        
+        processed = []
+        failed = []
+        
+        for f in files:
+            try:
+                # 提取
+                extract = self.extract_pdf(f["path"])
+                if "error" in extract:
+                    failed.append({"file": f["name"], "error": extract["error"]})
+                    continue
+                
+                # 分类
+                classification = self.classify_document(f["path"])
+                category = classification.get("category", "未分类")
+                
+                # 保存结构化数据
+                output = {
+                    "source_file": f["name"],
+                    "category": category,
+                    "extraction": extract,
+                    "processed_at": datetime.now().isoformat(),
+                }
+                
+                # 保存到对应分类目录
+                cat_dir = os.path.join(self.cleaned_dir, category)
+                os.makedirs(cat_dir, exist_ok=True)
+                base_name = os.path.splitext(f["name"])[0]
+                out_path = os.path.join(cat_dir, f"{base_name}_extracted.json")
+                with open(out_path, "w", encoding="utf-8") as of:
+                    json.dump(output, of, ensure_ascii=False, indent=2)
+                
+                # 保存 Markdown 版本
+                md_path = os.path.join(cat_dir, f"{base_name}_extracted.md")
+                with open(md_path, "w", encoding="utf-8") as mf:
+                    mf.write(f"# {f['name']}\n\n")
+                    mf.write(f"**分类**: {category}\n\n")
+                    mf.write(f"**提取时间**: {output['processed_at']}\n\n")
+                    mf.write(f"**文本长度**: {extract.get('text_length', 0)}\n\n")
+                    mf.write("## 提取字段\n\n")
+                    for k, v in extract.get("fields", {}).items():
+                        mf.write(f"- **{k}**: {v}\n")
+                    mf.write(f"\n## 原文摘录\n\n```\n{extract.get('extracted_text', '')}\n```\n")
+                
+                processed.append({
+                    "file": f["name"],
+                    "category": category,
+                    "output": out_path,
+                })
+                
+                # 移动到已处理
+                processed_dir = os.path.join(self.ocr_dir, f["name"])
+                shutil.move(f["path"], processed_dir)
+                
+            except Exception as e:
+                failed.append({"file": f["name"], "error": str(e)})
+        
+        return {
+            "scanned": len(files),
+            "processed": len(processed),
+            "failed": len(failed),
+            "items": processed,
+            "failures": failed,
+        }
+
+    def save_structured(self, data: Dict, output_path: str) -> str:
+        """将结构化数据保存到指定路径"""
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return f"Saved to {output_path}"
+
+    def update_project_ledger(
+        self,
+        project_name: str = "",
+        facts: Optional[Dict[str, Any]] = None,
+        evidence: Optional[List[Dict[str, Any]]] = None,
+        source_type: str = "local_file",
+    ) -> Dict[str, Any]:
+        """Submit cleaned candidate facts into the shared project ledger.
+
+        This tool does not move, rename, overwrite, or delete source files. It
+        records candidate facts, evidence, conflicts, and decisions in the shared
+        project ledger for later Excel/HTML/Word/CRM loops.
+        """
+        facts = facts or {}
+        if project_name and "project_name" not in facts:
+            facts = {**facts, "project_name": project_name}
+        if not project_name:
+            project_name = facts.get("project_name", "未命名项目")
+
+        ledger_dir = self.project_files_dir
+        ledger = ProjectLedger(base_dir=ledger_dir)
+        result = ledger.apply_patch({
+            "project_name": project_name,
+            "source_type": source_type,
+            "facts": facts,
+            "evidence": evidence or [],
+            "skill": "data_cleaning_file_organization",
+            "actor": "data_cleaning_file_organization",
+        })
+
+        return {
+            "schema_version": "project_ledger.update.v1",
+            "status": result["status"],
+            "project_name": result["project_name"],
+            "decisions": result["decisions"],
+            "current_facts": result["current_facts"],
+            "conflicts": result["conflicts"],
+            "artifacts": {
+                "project_overview_md": result["markdown_path"],
+                "project_ledger_json": result["state_path"],
+                "project_dir": result["project_dir"],
+            },
+            "next_steps": [
+                "review conflicts before overwriting high-risk facts",
+                "use project_overview_md as the evidence ledger for downstream Excel/HTML/CRM outputs",
+            ],
+        }

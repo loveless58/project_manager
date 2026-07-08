@@ -154,12 +154,14 @@ class TestToolRegistry(unittest.TestCase):
 
         reg = main._build_registry()
         tools = set(reg.list_tools())
-        self.assertEqual(len(tools), 35)
+        self.assertEqual(len(tools), 37)
         self.assertIn("cloudcc_session_probe", tools)
         self.assertIn("cloudcc_duplicate_check", tools)
         self.assertIn("cloudcc_fill_draft_gated", tools)
         self.assertIn("update_project_ledger", tools)
         self.assertIn("process_documents_to_ledger", tools)
+        self.assertIn("extract_structured_business_output", tools)
+        self.assertIn("semantic_structure_document", tools)
         self.assertIn("prepare_file_organization_run", tools)
         self.assertIn("apply_human_review", tools)
         self.assertIn("execute_archive_plan", tools)
@@ -180,6 +182,8 @@ class TestToolRegistry(unittest.TestCase):
             "batch_process",
             "save_structured",
             "process_documents_to_ledger",
+            "extract_structured_business_output",
+            "semantic_structure_document",
             "prepare_file_organization_run",
             "apply_human_review",
             "execute_archive_plan",
@@ -386,6 +390,8 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertEqual(result["status"], "success")
             self.assertEqual(result["decisions"]["customer_name"]["status"], "verified")
             self.assertTrue(os.path.exists(result["markdown_path"]))
+            self.assertIn(os.path.join("测试项目", "数字资产", "项目总览.md"), result["markdown_path"])
+            self.assertIn(os.path.join("测试项目", "数字资产", "project_ledger.json"), result["state_path"])
             with open(result["markdown_path"], "r", encoding="utf-8") as f:
                 content = f.read()
             self.assertIn("# 项目总览：测试项目", content)
@@ -413,6 +419,30 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertEqual(second["decisions"]["customer_name"]["status"], "conflict")
             self.assertEqual(second["current_facts"]["customer_name"], "正式客户名称")
             self.assertEqual(second["conflicts"][0]["field"], "customer_name")
+
+    def test_project_ledger_does_not_auto_merge_similar_project_names(self):
+        import tempfile
+        from pathlib import Path
+        from ledger import ProjectLedger
+
+        with tempfile.TemporaryDirectory() as td:
+            ledger = ProjectLedger(base_dir=td)
+            first = ledger.apply_patch({
+                "project_name": "居家药学服务系统_V1_0",
+                "facts": {"project_name": "居家药学服务系统_V1_0", "bid_status": "已弃标"},
+                "evidence": [{"field": "project_name", "source_ref": "lost", "confidence": 0.9}],
+                "source_type": "unit_test",
+            })
+            second = ledger.apply_patch({
+                "project_name": "居家药学服务系统项目",
+                "facts": {"project_name": "居家药学服务系统项目", "lifecycle_stage": "execution"},
+                "evidence": [{"field": "project_name", "source_ref": "execution", "confidence": 0.9}],
+                "source_type": "unit_test",
+            })
+
+            self.assertNotEqual(Path(first["project_dir"]), Path(second["project_dir"]))
+            self.assertTrue((Path(td) / "居家药学服务系统_V1_0" / "数字资产" / "project_ledger.json").exists())
+            self.assertTrue((Path(td) / "居家药学服务系统项目" / "数字资产" / "project_ledger.json").exists())
 
     def test_update_project_ledger_tool_returns_structured_artifacts(self):
         import tempfile
@@ -479,6 +509,67 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
         self.assertIn("准备合同签约", result["next_actions"])
         self.assertIn("补充 BPM 合同号", result["next_actions"])
 
+    def test_business_rules_identify_execution_from_lifecycle_stage(self):
+        from business_rules import BidProjectRuleEngine
+
+        result = BidProjectRuleEngine().evaluate({
+            "project_name": "执行阶段项目",
+            "customer_name": "测试客户",
+            "sales_owner": "陈丞",
+            "lifecycle_stage": "execution",
+        })
+
+        self.assertEqual(result["business_stage"], "execution")
+        self.assertEqual(result["display_status"], "已中标")
+        self.assertIn("跟踪执行里程碑", result["next_actions"])
+
+    def test_business_rules_distinguish_abandoned_from_lost_projects(self):
+        from business_rules import BidProjectRuleEngine
+
+        engine = BidProjectRuleEngine()
+
+        abandoned = engine.evaluate({"bid_status": "已弃标"})
+        lost = engine.evaluate({"bid_status": "已丢标"})
+
+        self.assertEqual(abandoned["business_stage"], "closed")
+        self.assertEqual(abandoned["display_status"], "已弃标")
+        self.assertFalse(abandoned["crm_required"])
+        self.assertEqual(lost["business_stage"], "closed")
+        self.assertEqual(lost["display_status"], "已丢标")
+        self.assertFalse(lost["crm_required"])
+
+    def test_business_rules_flag_closed_project_with_pending_registration_as_conflict(self):
+        from business_rules import BidProjectRuleEngine
+
+        result = BidProjectRuleEngine().evaluate({
+            "project_name": "状态冲突项目",
+            "registration_status": "待报名",
+            "bid_status": "已弃标",
+            "lifecycle_stage": "closed",
+            "closed_reason_type": "abandoned_by_us",
+        })
+
+        self.assertEqual(result["business_stage"], "closed")
+        self.assertEqual(result["risk_level"], "high")
+        self.assertTrue(result["human_review_required"])
+        self.assertIn("报名状态与中标状态冲突", result["data_quality_flags"])
+        self.assertIn("已弃标不能同时处于待报名", result["risk_reasons"])
+
+    def test_business_rules_flag_execution_project_with_closed_bid_status_as_conflict(self):
+        from business_rules import BidProjectRuleEngine
+
+        result = BidProjectRuleEngine().evaluate({
+            "project_name": "居家药学服务系统",
+            "lifecycle_stage": "execution",
+            "bid_status": "已弃标",
+        })
+
+        self.assertEqual(result["business_stage"], "closed")
+        self.assertEqual(result["risk_level"], "high")
+        self.assertTrue(result["human_review_required"])
+        self.assertIn("执行阶段与中标状态冲突", result["data_quality_flags"])
+        self.assertIn("执行阶段不能同时处于已弃标", result["risk_reasons"])
+
     def test_business_rules_flag_overdue_registration_and_missing_fields(self):
         from business_rules import BidProjectRuleEngine
 
@@ -496,8 +587,8 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
         self.assertTrue(result["human_review_required"])
         self.assertIn("报名截止已过但状态仍为待报名", result["risk_reasons"])
         self.assertIn("投标保证金存在但未确认支付", result["risk_reasons"])
-        self.assertIn("customer_name", result["missing_fields"])
-        self.assertIn("sales_owner", result["missing_fields"])
+        self.assertNotIn("customer_name", result["missing_fields"])
+        self.assertNotIn("sales_owner", result["missing_fields"])
         self.assertIn("确认报名是否完成", result["next_actions"])
 
     def test_project_ledger_writes_business_judgement_to_state_and_markdown(self):
@@ -531,6 +622,50 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
                 md = f.read()
             self.assertIn("## 6. 业务判断", md)
             self.assertIn("准备合同签约", md)
+
+    def test_project_overview_markdown_hides_maintenance_removed_candidates(self):
+        import json
+        import tempfile
+        from ledger import ProjectLedger
+
+        with tempfile.TemporaryDirectory() as td:
+            ledger = ProjectLedger(base_dir=td)
+            result = ledger.apply_patch({
+                "project_name": "维护清理展示项目",
+                "source_type": "local_file",
+                "facts": {
+                    "project_name": "维护清理展示项目",
+                    "customer_name": "待确认",
+                    "sales_owner": "待确认",
+                    "bid_status": "已弃标",
+                    "registration_status": "待报名",
+                },
+            })
+            with open(result["state_path"], "r", encoding="utf-8") as f:
+                state = json.load(f)
+            state["current_facts"].pop("customer_name", None)
+            state["current_facts"].pop("sales_owner", None)
+            state["current_facts"]["registration_status"] = "已弃标"
+            state["fact_meta"].pop("customer_name", None)
+            state["fact_meta"].pop("sales_owner", None)
+            state["maintenance_events"] = [{
+                "event": "field_quality_cleanup",
+                "removed_facts": [
+                    {"field": "customer_name", "value": "待确认"},
+                    {"field": "sales_owner", "value": "待确认"},
+                ],
+            }, {
+                "event": "state_consistency_cleanup",
+                "updated_facts": {"registration_status": "已弃标"},
+            }]
+
+            ledger._save_markdown(result["markdown_path"], state)
+
+            with open(result["markdown_path"], "r", encoding="utf-8") as f:
+                md = f.read()
+            self.assertNotIn("| customer_name | 待确认 |", md)
+            self.assertNotIn("| sales_owner | 待确认 |", md)
+            self.assertNotIn("| registration_status | 待报名 |", md)
 
     def test_import_project_detail_workbook_updates_multiple_ledgers(self):
         import tempfile
@@ -580,7 +715,10 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertEqual(result["projects"][0]["facts"]["bid_status"], "已中标")
             self.assertEqual(result["projects"][0]["facts"]["lifecycle_stage"], "execution")
             self.assertEqual(result["projects"][0]["facts"]["contract_code"], "HT-001")
-            self.assertEqual(result["projects"][1]["facts"]["lifecycle_stage"], "closed_lost")
+            self.assertEqual(result["projects"][1]["facts"]["lifecycle_stage"], "closed")
+            with open(result["projects"][1]["artifacts"]["project_ledger_json"], "r", encoding="utf-8") as f:
+                lost_state = json.load(f)
+            self.assertEqual(lost_state["business_judgement"]["display_status"], "已弃标")
             self.assertTrue(os.path.exists(result["projects"][0]["artifacts"]["project_overview_md"]))
 
     def test_import_project_detail_workbook_skips_placeholder_values(self):
@@ -669,6 +807,71 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertIn("任务跟踪", content)
             self.assertIn("风险与问题", content)
             self.assertIn("最新进展", content)
+
+    def test_generate_bid_progress_html_default_output_is_business_root_entry(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from ledger import ProjectLedger
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            business_root = Path(td) / "business"
+            runtime_workspace = Path(td) / "_project_manager_workspace"
+            project_files_dir = business_root / "项目文件"
+            business_root.mkdir()
+            project_files_dir.mkdir(parents=True)
+            ProjectLedger(base_dir=str(project_files_dir)).apply_patch({
+                "project_name": "默认入口测试项目",
+                "facts": {
+                    "project_name": "默认入口测试项目",
+                    "customer_name": "测试客户",
+                    "sales_owner": "陈丞",
+                    "bid_status": "已中标",
+                },
+                "evidence": [{"field": "bid_status", "source_ref": "test", "confidence": 0.9}],
+                "source_type": "unit_test",
+            })
+
+            with patch.dict(os.environ, {
+                "PROJECT_MANAGER_BUSINESS_ROOT": str(business_root),
+                "PROJECT_MANAGER_WORKSPACE_DIR": str(runtime_workspace),
+            }, clear=False):
+                result = DataCleaningTools().generate_bid_progress_html()
+
+            expected = business_root / "投标进度总览.html"
+            self.assertEqual(Path(result["output_file"]), expected)
+            self.assertTrue(expected.exists())
+            self.assertFalse((runtime_workspace / "数据清洗工作台" / "投标进度总览.html").exists())
+
+    def test_default_archive_plan_targets_business_project_files_not_runtime_workspace(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            business_root = Path(td) / "business"
+            runtime_workspace = Path(td) / "_project_manager_workspace"
+            project_name = "默认归档目标测试项目"
+            source_dir = business_root / "项目文件" / "项目丢标" / project_name
+            source_dir.mkdir(parents=True)
+            source = source_dir / "项目记录.md"
+            source.write_text(f"# 项目记录：{project_name}\n\n报名状态：已弃标\n", encoding="utf-8")
+
+            with patch.dict(os.environ, {
+                "PROJECT_MANAGER_BUSINESS_ROOT": str(business_root),
+                "PROJECT_MANAGER_WORKSPACE_DIR": str(runtime_workspace),
+            }, clear=False):
+                result = DataCleaningTools().prepare_file_organization_run([str(source)])
+
+            action = result["archive_actions"][0]
+            self.assertEqual(action["status"], "ready")
+            self.assertTrue(str(action["target_path"]).startswith(str(business_root / "项目文件")))
+            self.assertFalse(str(action["target_path"]).startswith(str(runtime_workspace)))
+            self.assertIn(os.path.join("项目丢标", project_name, "原始文件"), action["target_path"])
+            self.assertTrue((business_root / "项目文件" / "项目丢标" / project_name / "数字资产" / "project_ledger.json").exists())
 
     def test_prepare_file_organization_run_outputs_partial_package_and_archive_plan(self):
         import tempfile
@@ -859,6 +1062,990 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertTrue(os.path.exists(archived_path))
             self.assertTrue(os.path.exists(executed["artifacts"]["archive_result"]))
             self.assertTrue(os.path.exists(executed["artifacts"]["run_report"]))
+
+    def test_execute_archive_plan_writes_archive_status_ledger_under_archive_phase(self):
+        import tempfile
+        from pathlib import Path
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            tools = DataCleaningTools(workspace_dir=os.path.join(td, "workspace"))
+            project_name = "执行阶段测试项目"
+            source = Path(td) / "incoming" / "项目执行" / project_name / "合同.pdf"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"%PDF placeholder")
+
+            target = Path(tools.project_files_dir) / "项目执行" / project_name / "原始文件" / source.name
+            run_id = "test_execute_phase_ledger"
+            run_dir = Path(tools.workspace_dir) / "runs" / run_id
+            run_dir.mkdir(parents=True)
+            plan = {
+                "schema_version": "archive_plan.v1",
+                "run_id": run_id,
+                "actions": [{
+                    "schema_version": "archive_action.v1",
+                    "run_id": run_id,
+                    "status": "ready",
+                    "source_file": str(source),
+                    "project_name": project_name,
+                    "document_type": "合同",
+                    "target_dir": str(target.parent),
+                    "target_path": str(target),
+                    "blockers": [],
+                    "archive_decision": {
+                        "archive_phase": "项目执行",
+                    },
+                }],
+            }
+            with open(run_dir / "planned_archive_actions.json", "w", encoding="utf-8") as f:
+                json.dump(plan, f, ensure_ascii=False, indent=2)
+
+            executed = tools.execute_archive_plan(run_id, confirmed=True)
+
+            self.assertEqual(executed["status"], "success")
+            self.assertTrue(target.exists())
+            self.assertTrue((Path(tools.project_files_dir) / "项目执行" / project_name / "数字资产" / "project_ledger.json").exists())
+            self.assertFalse((Path(tools.project_files_dir) / project_name / "数字资产" / "project_ledger.json").exists())
+
+    def test_execute_archive_plan_records_archive_events_outside_business_facts(self):
+        import tempfile
+        from pathlib import Path
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            tools = DataCleaningTools(workspace_dir=os.path.join(td, "workspace"))
+            project_name = "多文件归档事件测试项目"
+            source_dir = Path(td) / "incoming" / "项目执行" / project_name
+            source_dir.mkdir(parents=True)
+            first = source_dir / "合同A.pdf"
+            second = source_dir / "合同B.pdf"
+            first.write_bytes(b"%PDF A")
+            second.write_bytes(b"%PDF B")
+
+            run_id = "test_archive_events_not_business_facts"
+            run_dir = Path(tools.workspace_dir) / "runs" / run_id
+            run_dir.mkdir(parents=True)
+            actions = []
+            for source in [first, second]:
+                target = Path(tools.project_files_dir) / "项目执行" / project_name / "原始文件" / source.name
+                actions.append({
+                    "schema_version": "archive_action.v1",
+                    "run_id": run_id,
+                    "status": "ready",
+                    "source_file": str(source),
+                    "project_name": project_name,
+                    "document_type": "合同",
+                    "target_dir": str(target.parent),
+                    "target_path": str(target),
+                    "blockers": [],
+                    "archive_decision": {
+                        "archive_phase": "项目执行",
+                    },
+                })
+            with open(run_dir / "planned_archive_actions.json", "w", encoding="utf-8") as f:
+                json.dump({"schema_version": "archive_plan.v1", "run_id": run_id, "actions": actions}, f, ensure_ascii=False, indent=2)
+
+            executed = tools.execute_archive_plan(run_id, confirmed=True)
+
+            self.assertEqual(executed["status"], "success")
+            asset_dir = Path(tools.project_files_dir) / "项目执行" / project_name / "数字资产"
+            state = json.loads((asset_dir / "project_ledger.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["current_facts"]["lifecycle_stage"], "execution")
+            self.assertEqual(state["business_judgement"]["display_status"], "已中标")
+            self.assertNotIn("last_archived_file", state["current_facts"])
+            self.assertNotIn("archive_status", state["current_facts"])
+            self.assertFalse(any(item["field"] == "last_archived_file" for item in state["conflicts"]))
+            events = (asset_dir / "archive_events.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(events), 2)
+
+    def test_default_tool_paths_use_workspace_config(self):
+        from common.workspace_config import resolve_workspace_config
+        from tools.data_cleaning_tools import DataCleaningTools
+        from tools.project_tools import ProjectTools
+        from tools.opportunity_tools import OpportunityManagerTools
+
+        config = resolve_workspace_config(config_file="")
+
+        self.assertEqual(DataCleaningTools().workspace_dir, str(config.data_cleaning_workspace))
+        self.assertEqual(ProjectTools().base_dir, str(config.project_files_dir))
+        self.assertEqual(OpportunityManagerTools().opportunity_dir, str(config.opportunity_dir))
+
+    def test_markdown_project_record_extracts_clean_lost_project_fields(self):
+        import tempfile
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
+        text = """# 项目记录：台式电脑采购
+
+## 基本信息
+- **项目名称**：台式电脑采购
+- **CRM 编号**：C000028118
+- **招标人/客户**：XXZYBDCGFW
+- **负责销售**：陈丞
+
+## 项目状态
+- 报名状态：已弃标
+- 中标状态：已弃标
+- 签约状态：未签约
+"""
+
+        fields = tools._extract_fields(text)
+
+        self.assertEqual(fields["project_name"], "台式电脑采购")
+        self.assertEqual(fields["project_code"], "C000028118")
+        self.assertEqual(fields["customer_name"], "XXZYBDCGFW")
+        self.assertEqual(fields["sales_owner"], "陈丞")
+        self.assertEqual(fields["registration_status"], "已弃标")
+        self.assertEqual(fields["bid_status"], "已弃标")
+        self.assertEqual(fields["closed_reason_type"], "abandoned_by_us")
+        self.assertEqual(fields["lifecycle_stage"], "closed")
+
+    def test_project_record_field_extraction_rejects_table_noise_sales_owner(self):
+        import tempfile
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
+        text = """# 项目记录：居家药学服务系统
+
+## 基本信息
+- **招标人/客户**：）普华和诚(北京)信息有限公司
+- **负责销售**：| | |
+"""
+
+        fields = tools._extract_fields(text)
+
+        self.assertEqual(fields["customer_name"], "普华和诚(北京)信息有限公司")
+        self.assertNotIn("sales_owner", fields)
+
+    def test_project_record_field_extraction_skips_placeholder_values(self):
+        import tempfile
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
+        text = """# 项目记录：居家药学服务系统
+
+## 基本信息
+- **招标人/客户**：待确认
+- **负责销售**：待确认
+"""
+
+        fields = tools._extract_fields(text)
+
+        self.assertNotIn("customer_name", fields)
+        self.assertNotIn("sales_owner", fields)
+
+    def test_contract_text_is_classified_as_contract_before_filename_bucket(self):
+        import tempfile
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
+        document_type = tools._classify_text_document(
+            "技术开发合同-居家药学服务系统20260626-关键页扫描.pdf",
+            "合同登记编号:\n技 术 开 发 合 同\n委托人: 普华和诚(北京)信息有限公司\n受托人: 北京华胜天成科技股份有限公司",
+        )
+
+        self.assertEqual(document_type, "合同")
+
+    def test_project_record_filename_is_not_reclassified_by_embedded_invoice_text(self):
+        import tempfile
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
+        document_type = tools._classify_text_document(
+            "项目记录.md",
+            "项目记录\n电子发票已开具\n发票号码：26112000002732686171",
+        )
+
+        self.assertEqual(document_type, "项目记录")
+
+    def test_invoice_text_is_classified_as_invoice_before_project_bucket(self):
+        import tempfile
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
+        document_type = tools._classify_text_document(
+            "电子发票-普华和诚至华胜天成-20260703-48000元.pdf",
+            "电子发票（增值税专用发票）\n发票号码：26112000002732686171",
+        )
+
+        self.assertEqual(document_type, "发票")
+
+    def test_markdown_project_record_distinguishes_lost_from_abandoned(self):
+        import tempfile
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
+        text = """# 项目记录：政务服务平台采购
+
+## 项目状态
+- 报名状态：已报名
+- 中标状态：未中标
+"""
+
+        fields = tools._extract_fields(text)
+
+        self.assertEqual(fields["registration_status"], "已报名")
+        self.assertEqual(fields["bid_status"], "已丢标")
+        self.assertEqual(fields["closed_reason_type"], "lost_to_competitor")
+        self.assertEqual(fields["lifecycle_stage"], "closed")
+
+    def test_project_lost_directory_context_overrides_record_status_and_keeps_outputs_unique(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "项目文件" / "项目丢标"
+            first = root / "台式电脑采购"
+            second = root / "四川银行2026-2027软件研发通用技术服务采购项目"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            (first / "项目记录.md").write_text(
+                "# 项目记录：台式电脑采购\n\n## 项目状态\n- 报名状态：待报名\n- 中标状态：待开标\n",
+                encoding="utf-8",
+            )
+            (second / "项目记录.md").write_text(
+                "# 项目记录：四川银行2026-2027软件研发通用技术服务采购项目\n\n## 项目状态\n- 报名状态：待报名\n- 中标状态：待开标\n",
+                encoding="utf-8",
+            )
+
+            tools = DataCleaningTools(workspace_dir=os.path.join(td, "workspace"))
+            result = tools.prepare_file_organization_run([
+                str(first / "项目记录.md"),
+                str(second / "项目记录.md"),
+            ])
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(len(result["structured_outputs"]), 2)
+            self.assertEqual(len(set(result["structured_outputs"])), 2)
+            for output_path in result["structured_outputs"]:
+                structured = json.loads(Path(output_path).read_text(encoding="utf-8"))
+                self.assertEqual(structured["extraction"]["fields"]["lifecycle_stage"], "closed")
+                self.assertEqual(structured["extraction"]["fields"]["bid_status"], "已弃标")
+                self.assertEqual(structured["extraction"]["fields"]["registration_status"], "已弃标")
+                self.assertEqual(structured["extraction"]["fields"]["closed_reason_type"], "abandoned_by_us")
+                self.assertEqual(structured["business_judgement"]["business_stage"], "closed")
+            for action in result["archive_actions"]:
+                self.assertEqual(action["status"], "ready")
+                self.assertEqual(action["archive_decision"]["archive_phase"], "项目丢标")
+                self.assertEqual(action["business_judgement"]["business_stage"], "closed")
+
+    def test_project_lost_directory_context_overrides_existing_pending_ledger_fact(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            project_name = "四川银行2026-2027软件研发通用技术服务采购项目"
+            bidding_dir = Path(td) / "项目文件" / "项目投标" / project_name
+            lost_dir = Path(td) / "项目文件" / "项目丢标" / project_name
+            bidding_dir.mkdir(parents=True)
+            lost_dir.mkdir(parents=True)
+            record_text = f"# 项目记录：{project_name}\n\n## 项目状态\n- 报名状态：待报名\n- 中标状态：待开标\n"
+            (bidding_dir / "项目记录.md").write_text(record_text, encoding="utf-8")
+            (lost_dir / "项目记录.md").write_text(record_text, encoding="utf-8")
+
+            tools = DataCleaningTools(workspace_dir=os.path.join(td, "workspace"))
+            tools.prepare_file_organization_run([str(bidding_dir / "项目记录.md")])
+            result = tools.prepare_file_organization_run([str(lost_dir / "项目记录.md")])
+
+            self.assertEqual(result["archive_actions"][0]["business_judgement"]["business_stage"], "closed")
+            ledger_path = Path(result["structured_outputs"][0]).read_text(encoding="utf-8")
+            structured = json.loads(ledger_path)
+            self.assertEqual(structured["business_judgement"]["business_stage"], "closed")
+            self.assertEqual(structured["extraction"]["fields"]["bid_status"], "已弃标")
+
+    def test_project_lost_nested_material_uses_parent_project_name(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            project_name = "四川银行2026-2027软件研发通用技术服务采购项目"
+            material_dir = Path(td) / "项目文件" / "项目丢标" / project_name / "报名材料"
+            material_dir.mkdir(parents=True)
+            material = material_dir / "四川银行报名材料.md"
+            material.write_text("# 报名材料\n\n单位名称：北京华胜天成软件技术有限公司\n", encoding="utf-8")
+
+            tools = DataCleaningTools(workspace_dir=os.path.join(td, "workspace"))
+            result = tools.prepare_file_organization_run([str(material)])
+
+            self.assertEqual(result["status"], "success")
+            action = result["archive_actions"][0]
+            self.assertEqual(action["status"], "ready")
+            self.assertEqual(action["project_name"], project_name)
+            self.assertEqual(action["archive_decision"]["archive_phase"], "项目丢标")
+            self.assertEqual(action["blockers"], [])
+            self.assertIn(project_name, action["target_path"])
+
+    def test_already_archived_source_file_does_not_create_target_exists_review(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            project_name = "已归档复核噪声测试项目"
+            project_dir = Path(td) / "workspace" / "项目文件" / "项目丢标" / project_name / "原始文件"
+            project_dir.mkdir(parents=True)
+            record = project_dir / "项目记录.md"
+            record.write_text(f"# 项目记录：{project_name}\n\n报名状态：已弃标\n", encoding="utf-8")
+
+            tools = DataCleaningTools(workspace_dir=os.path.join(td, "workspace"))
+            result = tools.prepare_file_organization_run([str(record)])
+
+            action = result["archive_actions"][0]
+            self.assertEqual(action["status"], "already_archived")
+            self.assertEqual(action["blockers"], [])
+            self.assertNotIn("target_exists", action["blockers"])
+            review_items = result["review_queue"]["items"]
+            self.assertFalse(any(item.get("type") == "archive_action_review" for item in review_items))
+
+    def test_project_lost_unsupported_nested_file_gets_metadata_archive_action(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            project_name = "2026年新疆哈密伊吾县智算中心项目运维服务"
+            material_dir = Path(td) / "项目文件" / "项目丢标" / project_name / "招标文件"
+            material_dir.mkdir(parents=True)
+            material = material_dir / "技术规范书附件.zip"
+            material.write_bytes(b"zip placeholder")
+
+            tools = DataCleaningTools(workspace_dir=os.path.join(td, "workspace"))
+            result = tools.prepare_file_organization_run([str(material)])
+
+            self.assertEqual(result["status"], "success")
+            action = result["archive_actions"][0]
+            self.assertEqual(action["status"], "ready")
+            self.assertEqual(action["project_name"], project_name)
+            self.assertEqual(action["archive_decision"]["archive_phase"], "项目丢标")
+            self.assertEqual(action["blockers"], [])
+            self.assertIn(os.path.join("项目丢标", project_name, "原始文件"), action["target_path"])
+            self.assertIn(project_name, action["target_path"])
+            self.assertEqual(result["failures"], [])
+            self.assertFalse((Path(tools.project_files_dir) / project_name / "数字资产" / "project_ledger.json").exists())
+
+    def test_known_phase_pdf_gets_archive_plan_without_blocking_on_ocr(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            project_name = "执行阶段OCR旁路测试项目"
+            material_dir = Path(td) / "项目文件" / "项目执行" / project_name / "合同文件"
+            material_dir.mkdir(parents=True)
+            material = material_dir / "盖章扫描件.pdf"
+            material.write_bytes(b"%PDF placeholder")
+
+            tools = DataCleaningTools(workspace_dir=os.path.join(td, "workspace"))
+            result = tools.prepare_file_organization_run([str(material)])
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["failures"], [])
+            action = result["archive_actions"][0]
+            self.assertEqual(action["status"], "ready")
+            self.assertEqual(action["project_name"], project_name)
+            self.assertEqual(action["archive_decision"]["archive_phase"], "项目执行")
+            self.assertIn(os.path.join("项目执行", project_name, "原始文件"), action["target_path"])
+            self.assertEqual(result["review_queue"]["items"][0]["type"], "extraction_quality_review")
+            self.assertEqual(result["review_queue"]["items"][0]["reason"], "metadata_passthrough_archive_only")
+
+    def test_project_execution_directory_context_marks_execution_stage(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            project_name = "执行路径上下文测试项目"
+            project_dir = Path(td) / "项目文件" / "项目执行" / project_name
+            project_dir.mkdir(parents=True)
+            record = project_dir / "项目记录.md"
+            record.write_text(
+                f"# 项目记录：{project_name}\n\n客户名称：测试客户\n负责销售：陈丞\n",
+                encoding="utf-8",
+            )
+
+            tools = DataCleaningTools(workspace_dir=os.path.join(td, "workspace"))
+            result = tools.prepare_file_organization_run([str(record)])
+
+            structured = json.loads(Path(result["structured_outputs"][0]).read_text(encoding="utf-8"))
+            self.assertEqual(structured["extraction"]["fields"]["lifecycle_stage"], "execution")
+            self.assertEqual(structured["business_judgement"]["business_stage"], "execution")
+            self.assertEqual(structured["business_judgement"]["display_status"], "已中标")
+
+    def test_structured_output_contains_business_case_for_status_conflict(self):
+        import os
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            project_name = "居家药学服务系统项目"
+            material_dir = Path(td) / "项目文件" / "项目执行" / project_name
+            material_dir.mkdir(parents=True)
+            record = material_dir / "项目记录.md"
+            record.write_text("# 项目记录\n", encoding="utf-8")
+            extracted = {
+                "filename": "项目记录.md",
+                "file_type": ".md",
+                "document_type": "项目记录",
+                "extracted_text": "项目名称：居家药学服务系统项目\n中标状态：已弃标",
+                "fields": {
+                    "project_name": project_name,
+                    "bid_status": "已弃标",
+                    "lifecycle_stage": "execution",
+                },
+                "extract_method": "unit_test",
+            }
+
+            tools = DataCleaningTools(workspace_dir=os.path.join(td, "workspace"))
+            with patch.object(tools, "_use_archive_metadata_passthrough", return_value=False):
+                with patch.object(tools, "extract_document", return_value=extracted):
+                    result = tools.prepare_file_organization_run([str(record)])
+
+            structured = json.loads(Path(result["structured_outputs"][0]).read_text(encoding="utf-8"))
+            cases = structured["business_cases"]
+
+            self.assertEqual(cases[0]["schema_version"], "business_case.v1")
+            self.assertEqual(cases[0]["case_type"], "status_conflict")
+            self.assertEqual(cases[0]["output"]["decision"], "needs_review")
+            self.assertIn("不自动合并", cases[0]["output"]["reason"])
+            self.assertEqual(cases[0]["entities"][0]["project_name"], project_name)
+
+    def test_low_quality_ocr_does_not_write_business_ledger_facts(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            project_name = "低质量OCR测试项目"
+            material_dir = Path(td) / "项目文件" / "项目丢标" / project_name / "图片材料"
+            material_dir.mkdir(parents=True)
+            material = material_dir / "扫描件.png"
+            material.write_bytes(b"fake image")
+
+            low_quality_extraction = {
+                "schema_version": "document.extract.v1",
+                "status": "success",
+                "file": str(material),
+                "filename": material.name,
+                "file_type": ".png",
+                "document_type": "项目投标",
+                "extract_method": "easyocr",
+                "text_length": 12,
+                "extracted_text": "佥式鱼脑罢购 @@",
+                "fields": {"project_name": "佥式鱼脑罢购", "customer_name": "@@"},
+                "needs_human_review": True,
+                "ocr": {
+                    "quality": {
+                        "needs_human_review": True,
+                        "flags": ["low_confidence"],
+                    }
+                },
+            }
+
+            tools = DataCleaningTools(workspace_dir=os.path.join(td, "workspace"))
+            with patch.object(tools, "_use_archive_metadata_passthrough", return_value=False):
+                with patch.object(tools, "extract_document", return_value=low_quality_extraction):
+                    result = tools.prepare_file_organization_run([str(material)])
+
+            self.assertEqual(result["status"], "success")
+            action = result["archive_actions"][0]
+            self.assertEqual(action["status"], "ready")
+            self.assertEqual(action["project_name"], project_name)
+            self.assertIn("low_quality_extraction", action["archive_decision"]["reasons"])
+            self.assertFalse((Path(tools.project_files_dir) / project_name / "数字资产" / "project_ledger.json").exists())
+            self.assertEqual(result["review_queue"]["status"], "needs_review")
+            self.assertEqual(result["review_queue"]["items"][0]["type"], "extraction_quality_review")
+
+    def test_field_quality_rejects_noisy_fields_before_ledger_write(self):
+        import json
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            project_name = "字段质量测试项目"
+            material_dir = Path(td) / "项目文件" / "项目执行" / project_name / "验收材料"
+            material_dir.mkdir(parents=True)
+            material = material_dir / "验收单.png"
+            material.write_bytes(b"fake image")
+
+            noisy_extraction = {
+                "schema_version": "document.extract.v1",
+                "status": "success",
+                "file": str(material),
+                "filename": material.name,
+                "file_type": ".png",
+                "document_type": "验收材料",
+                "extract_method": "easyocr",
+                "text_length": 200,
+                "extracted_text": "日      期： | 审核意见：⑭\n确认为中标标的。",
+                "fields": {
+                    "sales_owner": "日      期： | 审核意见：⑭",
+                    "customer_name": "确认为中标标的。",
+                },
+                "needs_human_review": False,
+                "ocr": {"quality": {"needs_human_review": False, "flags": []}},
+            }
+
+            tools = DataCleaningTools(workspace_dir=os.path.join(td, "workspace"))
+            with patch.object(tools, "_use_archive_metadata_passthrough", return_value=False):
+                with patch.object(tools, "extract_document", return_value=noisy_extraction):
+                    result = tools.prepare_file_organization_run([str(material)])
+
+            structured = json.loads(Path(result["structured_outputs"][0]).read_text(encoding="utf-8"))
+            accepted = structured["accepted_business_facts"]
+            self.assertEqual(accepted["project_name"], project_name)
+            self.assertEqual(accepted["lifecycle_stage"], "execution")
+            self.assertNotIn("sales_owner", accepted)
+            self.assertNotIn("customer_name", accepted)
+            rejected_fields = {item["field"] for item in structured["field_quality"]["rejected_fields"]}
+            self.assertEqual(rejected_fields, {"sales_owner", "customer_name"})
+
+            ledger_path = Path(structured["ledger_artifacts"]["project_ledger_json"])
+            state = json.loads(ledger_path.read_text(encoding="utf-8"))
+            self.assertNotIn("sales_owner", state["current_facts"])
+            self.assertNotIn("customer_name", state["current_facts"])
+            self.assertEqual(state["business_judgement"]["business_stage"], "execution")
+
+    def test_bid_progress_win_rate_excludes_abandoned_projects(self):
+        import tempfile
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
+        projects = [
+            {"project_name": "中标项目", "overview_status": "已中标"},
+            {"project_name": "丢标项目", "overview_status": "已丢标"},
+            {"project_name": "弃标项目", "overview_status": "已弃标"},
+        ]
+        groups = {
+            "已中标": [projects[0]],
+            "已丢标": [projects[1]],
+            "已弃标": [projects[2]],
+            "参与中": [],
+        }
+
+        html = tools._render_bid_progress_html(projects, groups)
+
+        self.assertIn("50.0%", html)
+
+    def test_sales_stats_show_hardcoded_leader_name_win_rate_as_sales_owner(self):
+        import tempfile
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
+        html = tools._render_sales_stats([
+            {"sales_owner": "领导", "overview_status": "已中标"},
+            {"sales_owner": "领导", "overview_status": "已丢标"},
+            {"sales_owner": "领导", "overview_status": "已弃标"},
+            {"sales_owner": "陈丞", "overview_status": "已中标"},
+        ])
+
+        self.assertIn("<th>中标率</th>", html)
+        self.assertIn("<td>甄勇</td><td>3</td><td>1</td><td>1</td><td>1</td><td>0</td><td>50.0%</td>", html)
+        self.assertIn("<td>陈丞</td><td>1</td><td>1</td><td>0</td><td>0</td><td>0</td><td>100.0%</td>", html)
+
+    def test_extract_structured_business_output_is_read_only_loop(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            project_name = "居家药学服务系统"
+            source_dir = Path(td) / "business" / "项目文件" / "项目执行" / project_name / "原始文件"
+            source_dir.mkdir(parents=True)
+            current = source_dir / "项目记录.md"
+            current.write_text(
+                "# 项目记录：居家药学服务系统\n"
+                "- **招标人/客户**：普华和诚(北京)信息有限公司\n"
+                "电子发票已开具\n发票号码：26112000002732686171\n",
+                encoding="utf-8",
+            )
+            old_lost = source_dir / "项目记录__from_项目丢标_居家药学服务系统_V1_0.md"
+            old_lost.write_text(
+                "# 项目记录：居家药学服务系统\n"
+                "- 报名状态：已弃标\n"
+                "- 中标状态：已弃标\n"
+                "- 签约状态：未签约\n"
+                "- 负责销售：待确认\n",
+                encoding="utf-8",
+            )
+            backup = source_dir / "项目记录.md.bak_state_consistency"
+            backup.write_text("backup", encoding="utf-8")
+
+            workspace = Path(td) / "workspace"
+            tools = DataCleaningTools(workspace_dir=str(workspace))
+            result = tools.extract_structured_business_output(source_dir=str(source_dir))
+
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["processed"], 2)
+            self.assertEqual(len(result["business_cases"]), 1)
+            self.assertTrue(result["boundary"]["updated_external_ledger"] is False)
+            self.assertTrue(result["boundary"]["archive_plan_created"] is False)
+
+            output_path = Path(result["artifacts"]["structured_business_output"])
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["schema_version"], "business_structured_output.run.v1")
+            self.assertEqual(payload["summary"]["skipped_total"], 1)
+            self.assertEqual(payload["documents"][0]["document_type"], "项目记录")
+            self.assertNotIn("sales_owner", payload["documents"][1]["accepted_business_facts"])
+            self.assertEqual(payload["business_cases"][0]["case_type"], "status_conflict")
+            self.assertFalse(list(workspace.rglob("project_ledger.json")))
+            self.assertFalse("archive_actions" in payload)
+
+    def test_semantic_structure_document_keeps_only_evidence_backed_fields(self):
+        import tempfile
+        from pathlib import Path
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        def fake_semantic_adapter(evidence_pack):
+            return {
+                "document_type": "合同",
+                "business_fields": {
+                    "project_name": {
+                        "value": "语义结构化项目",
+                        "confidence": 0.93,
+                        "evidence_refs": ["text:0"],
+                    },
+                    "customer_name": {
+                        "value": "测试客户有限公司",
+                        "confidence": 0.92,
+                        "evidence_refs": [],
+                    },
+                    "payment_amount": {
+                        "value": "48000.00",
+                        "confidence": 0.42,
+                        "evidence_refs": ["text:1"],
+                    },
+                },
+                "uncertain_fields": [],
+                "review_reasons": [],
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            source_path = Path(td) / "合同.md"
+            source_path.write_text("项目名称：语义结构化项目\n合同金额：48000.00\n", encoding="utf-8")
+            tools = DataCleaningTools(
+                workspace_dir=str(Path(td) / "workspace"),
+                semantic_adapter=fake_semantic_adapter,
+            )
+            evidence_pack = tools.build_evidence_pack(str(source_path))
+            result = tools.semantic_structure_document(evidence_pack)
+
+            self.assertEqual(result["schema_version"], "semantic_document.v1")
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["accepted_business_facts"], {"project_name": "语义结构化项目"})
+            rejected = {item["field"]: item["reason"] for item in result["semantic_guardrail"]["rejected_fields"]}
+            self.assertEqual(rejected["customer_name"], "missing_evidence_refs")
+            self.assertEqual(rejected["payment_amount"], "semantic_confidence_too_low")
+
+    def test_extract_structured_business_output_attaches_semantic_json_without_side_effects(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        def fake_semantic_adapter(evidence_pack):
+            return {
+                "document_type": "合同",
+                "business_fields": {
+                    "project_name": {
+                        "value": "语义只读项目",
+                        "confidence": 0.91,
+                        "evidence_refs": ["path:project_name"],
+                    },
+                    "customer_name": {
+                        "value": "测试客户有限公司",
+                        "confidence": 0.9,
+                        "evidence_refs": ["text:0"],
+                    },
+                },
+                "uncertain_fields": [],
+                "review_reasons": [],
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            source_dir = Path(td) / "business" / "项目文件" / "项目执行" / "语义只读项目" / "原始文件"
+            source_dir.mkdir(parents=True)
+            record = source_dir / "合同.md"
+            record.write_text(
+                "# 项目记录：语义只读项目\n招标人/客户：测试客户有限公司\n",
+                encoding="utf-8",
+            )
+
+            workspace = Path(td) / "workspace"
+            tools = DataCleaningTools(workspace_dir=str(workspace), semantic_adapter=fake_semantic_adapter)
+            result = tools.extract_structured_business_output(source_dir=str(source_dir))
+            payload = json.loads(Path(result["artifacts"]["structured_business_output"]).read_text(encoding="utf-8"))
+            document = payload["documents"][0]
+
+            self.assertEqual(document["semantic_structure"]["status"], "success")
+            self.assertEqual(document["semantic_structure"]["document_type"], "合同")
+            self.assertEqual(document["semantic_structure"]["accepted_business_facts"]["project_name"], "语义只读项目")
+            self.assertTrue(result["boundary"]["updated_external_ledger"] is False)
+            self.assertTrue(result["boundary"]["archive_plan_executed"] is False)
+            self.assertFalse(list(workspace.rglob("project_ledger.json")))
+
+    def test_semantic_structure_document_is_registered_read_only_tool(self):
+        from main import _build_registry_for_skill
+
+        reg = _build_registry_for_skill("data_cleaning_file_organization")
+        tools = reg.list_tools()
+
+        self.assertIn("semantic_structure_document", tools)
+        schema = reg.get("semantic_structure_document").to_schema()
+        self.assertIn("只读", schema["description"])
+        self.assertEqual(schema["parameters"]["properties"]["evidence_pack"]["type"], "object")
+
+    def test_extract_structured_business_output_keeps_per_file_project_name_with_aggregate_label(self):
+        import tempfile
+        from pathlib import Path
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            source_dir = Path(td) / "business" / "项目文件" / "项目执行" / "真实项目" / "原始文件"
+            source_dir.mkdir(parents=True)
+            record = source_dir / "项目记录.md"
+            record.write_text(
+                "# 项目记录：真实项目\n"
+                "- 报名状态：已弃标\n"
+                "- 中标状态：已弃标\n"
+                "- 签约状态：未签约\n",
+                encoding="utf-8",
+            )
+
+            tools = DataCleaningTools(workspace_dir=str(Path(td) / "workspace"))
+            result = tools.extract_structured_business_output(
+                source_dir=str(source_dir),
+                project_name="聚合复查标签",
+            )
+
+            self.assertEqual(result["business_cases"][0]["entities"][0]["project_name"], "真实项目")
+
+    def test_extract_structured_business_output_ocr_reads_known_phase_images(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        def fake_ocr(path):
+            return {
+                "status": "success",
+                "engine": "fake_ocr",
+                "text": "项目名称：图片结构化项目\n委托人：测试客户有限公司",
+                "pages": [{"page": 1, "text": "项目名称：图片结构化项目\n委托人：测试客户有限公司"}],
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            source_dir = Path(td) / "business" / "项目文件" / "项目执行" / "图片结构化项目" / "原始文件"
+            source_dir.mkdir(parents=True)
+            image = source_dir / "合同扫描.png"
+            image.write_bytes(b"fake image")
+
+            tools = DataCleaningTools(workspace_dir=str(Path(td) / "workspace"), ocr_adapter=fake_ocr)
+            result = tools.extract_structured_business_output(source_dir=str(source_dir))
+
+            payload = json.loads(Path(result["artifacts"]["structured_business_output"]).read_text(encoding="utf-8"))
+            document = payload["documents"][0]
+            self.assertEqual(document["extract_method"], "ocr")
+            self.assertGreater(document["text_length"], 0)
+            self.assertNotEqual(document["document_type"], "项目执行")
+            self.assertEqual(document["fields"]["customer_name"], "测试客户有限公司")
+
+    def test_execution_phase_document_type_uses_content_and_filename(self):
+        import tempfile
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
+
+        self.assertEqual(
+            tools._classify_text_document(
+                r"E:\SynologyDrive\项目文件\项目执行\测试项目\原始文件\工业互联网络基础条件购置合同.docx",
+                "买受人：首都航天机械有限公司\n出卖人：北京华胜天成科技股份有限公司\n合同编号：HT-001\n开户银行：中国银行\n账号：123456",
+            ),
+            "合同",
+        )
+        self.assertEqual(
+            tools._classify_text_document(
+                r"E:\SynologyDrive\项目文件\项目执行\测试项目\原始文件\银行账户开户凭证.jpg",
+                "账户名称：北京华胜天成科技股份有限公司\n开户银行：中国银行\n账号：123456",
+            ),
+            "账户凭证",
+        )
+        self.assertEqual(
+            tools._classify_text_document(
+                r"E:\SynologyDrive\项目文件\项目执行\测试项目\原始文件\工程款支付申请表.docx",
+                "工程款支付申请表\n申请金额：10000元\n收款单位：北京华胜天成科技股份有限公司",
+            ),
+            "付款申请",
+        )
+
+    def test_structured_output_isolates_low_confidence_ocr_business_fields(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            source_dir = Path(td) / "business" / "项目文件" / "项目执行" / "低置信OCR项目" / "原始文件"
+            source_dir.mkdir(parents=True)
+            image = source_dir / "付款凭证.png"
+            image.write_bytes(b"fake image")
+
+            low_quality_extraction = {
+                "schema_version": "document.extract.v1",
+                "status": "success",
+                "file": str(image),
+                "filename": image.name,
+                "file_type": ".png",
+                "document_type": "付款凭证",
+                "extract_method": "ocr",
+                "text_length": 20,
+                "extracted_text": "付款人：噪声客户\n交易金额：48OOO",
+                "fields": {
+                    "project_name": "噪声项目名",
+                    "customer_name": "@@",
+                    "payment_amount": "48000.00",
+                },
+                "needs_human_review": True,
+                "ocr": {"quality": {"needs_human_review": True, "flags": ["low_confidence"]}},
+            }
+
+            tools = DataCleaningTools(workspace_dir=str(Path(td) / "workspace"))
+            with patch.object(tools, "extract_document", return_value=low_quality_extraction):
+                result = tools.extract_structured_business_output(source_dir=str(source_dir))
+
+            payload = json.loads(Path(result["artifacts"]["structured_business_output"]).read_text(encoding="utf-8"))
+            document = payload["documents"][0]
+            self.assertEqual(document["fields"]["project_name"], "低置信OCR项目")
+            self.assertNotIn("customer_name", document["accepted_business_facts"])
+            self.assertNotIn("payment_amount", document["accepted_business_facts"])
+            self.assertEqual(document["field_quality"]["extraction_trust"]["trusted"], False)
+
+    def test_xlsx_and_xml_documents_extract_structured_text_in_business_phase(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from openpyxl import Workbook
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            source_dir = Path(td) / "business" / "项目文件" / "项目执行" / "表格发票项目" / "原始文件"
+            source_dir.mkdir(parents=True)
+
+            workbook_path = source_dir / "报价表.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.append(["项目名称", "客户名称", "报价"])
+            ws.append(["表格发票项目", "测试客户有限公司", "48000"])
+            wb.save(workbook_path)
+
+            xml_path = source_dir / "电子发票.xml"
+            xml_path.write_text(
+                "<Invoice><BuyerName>测试客户有限公司</BuyerName><InvoiceNo>2611200000</InvoiceNo><TotalAmount>48000.00</TotalAmount></Invoice>",
+                encoding="utf-8",
+            )
+
+            tools = DataCleaningTools(workspace_dir=str(Path(td) / "workspace"))
+            result = tools.extract_structured_business_output(source_dir=str(source_dir))
+            payload = json.loads(Path(result["artifacts"]["structured_business_output"]).read_text(encoding="utf-8"))
+            by_name = {doc["filename"]: doc for doc in payload["documents"]}
+
+            self.assertEqual(by_name["报价表.xlsx"]["extract_method"], "xlsx_table")
+            self.assertGreater(by_name["报价表.xlsx"]["text_length"], 0)
+            self.assertEqual(by_name["电子发票.xml"]["extract_method"], "xml_text")
+            self.assertEqual(by_name["电子发票.xml"]["document_type"], "发票")
+            self.assertEqual(payload["summary"]["skipped_total"], 0)
+
+    def test_prepare_file_organization_run_blocks_unreadable_source(self):
+        import tempfile
+        from unittest.mock import patch
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            source_path = os.path.join(td, "cloud-placeholder.pdf")
+            with open(source_path, "wb") as f:
+                f.write(b"placeholder")
+
+            blocked_probe = {
+                "status": "blocked",
+                "path": source_path,
+                "exists": True,
+                "is_file": True,
+                "readable": False,
+                "blocked_reason": "cloud_placeholder_or_sync_failure",
+                "error": "The cloud operation was unsuccessful.",
+            }
+            with patch("tools.data_cleaning_tools.probe_readable_file", return_value=blocked_probe):
+                tools = DataCleaningTools(workspace_dir=td)
+                result = tools.prepare_file_organization_run([source_path])
+
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["failed"], 1)
+            self.assertEqual(result["failures"][0]["stage"], "source_readiness")
+            self.assertEqual(result["failures"][0]["error"], "source_not_local_or_unreadable")
+            self.assertEqual(result["failures"][0]["blocked_reason"], "cloud_placeholder_or_sync_failure")
+            self.assertTrue(os.path.exists(result["artifacts"]["input_manifest"]))
+            self.assertTrue(os.path.exists(result["artifacts"]["review_queue"]))
+            self.assertTrue(os.path.exists(source_path))
+
+    def test_execute_archive_plan_blocks_unreadable_source_before_move(self):
+        import tempfile
+        from unittest.mock import patch
+        from docx import Document
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            source_dir = os.path.join(td, "source")
+            os.makedirs(source_dir)
+            doc_path = os.path.join(source_dir, "采购公告.docx")
+            doc = Document()
+            doc.add_paragraph("项目名称：云盘测试项目")
+            doc.save(doc_path)
+
+            tools = DataCleaningTools(workspace_dir=td)
+            prepared = tools.prepare_file_organization_run([doc_path], project_name="云盘测试项目")
+            tools.apply_human_review([
+                {
+                    "project_name": "云盘测试项目",
+                    "facts": {"project_name": "云盘测试项目"},
+                    "reason": "测试归档前源文件可读性二次校验",
+                }
+            ], run_id=prepared["run_id"])
+
+            blocked_probe = {
+                "status": "blocked",
+                "path": doc_path,
+                "exists": True,
+                "is_file": True,
+                "readable": False,
+                "blocked_reason": "cloud_placeholder_or_sync_failure",
+                "error": "The cloud operation was unsuccessful.",
+            }
+            with patch("tools.data_cleaning_tools.probe_readable_file", return_value=blocked_probe):
+                executed = tools.execute_archive_plan(prepared["run_id"], confirmed=True)
+
+            self.assertEqual(executed["status"], "failed")
+            self.assertEqual(executed["moved"], 0)
+            self.assertEqual(executed["results"][0]["status"], "blocked")
+            self.assertIn("source_not_local_or_unreadable", executed["results"][0]["blockers"])
+            self.assertTrue(os.path.exists(doc_path))
 
 
 # ────────────────────────────────────────────

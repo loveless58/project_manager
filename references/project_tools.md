@@ -1,9 +1,9 @@
 # 工具层详细 API
 
-本文件描述 35 个工具的完整 API。分四个受控工具域：
+本文件描述 37 个工具的完整 API。分四个受控工具域：
 
 - **ProjectTools**（10 个）：项目管理
-- **DataCleaningTools**（14 个）：数据清洗及文件整理
+- **DataCleaningTools**（16 个）：数据清洗及文件整理
 - **OpportunityManagerTools**（5 个）：商机检测
 - **CloudCCCrmTools**（6 个）：CloudCC/CRM 只读查重、草稿准备、提交前确认
 
@@ -189,14 +189,14 @@
 
 ## DataCleaningTools
 
-数据清洗工具，作用于 `数据清洗工作台/` 目录。
+数据清洗工具。默认源文件来自 `WorkspaceConfig.business_root`（例如 `E:\SynologyDrive`），运行包和结构化输出写入 `数据清洗工作台/runs` 及结构化输出目录。`00-原始文件（待处理）` 不再是标准工作区目录，仅在显式 `DataCleaningTools(workspace_dir=...)` 的兼容/测试场景中作为隔离入口使用。
 
 ### scan_raw_files(source_dir=None)
 
-扫描原始文件目录，列出待处理文件。
+扫描源文件目录，列出待处理文件。
 
 **参数**：
-- `source_dir` (str, optional): 默认 `数据清洗工作台/00-原始文件（待处理）`
+- `source_dir` (str, optional): 默认 `WorkspaceConfig.business_root`
 
 **返回**：
 ```json
@@ -205,7 +205,7 @@
     {"path": "...", "size": 1024, "ext": ".pdf", "modified": "2026-06-30"}
   ],
   "count": 5,
-  "source_dir": "数据清洗工作台/00-原始文件（待处理）"
+  "source_dir": "E:\\SynologyDrive"
 }
 ```
 
@@ -269,6 +269,25 @@
     "quality": "good|partial|poor",
     "needs_human_review": false
   }
+}
+```
+
+PDF/image extraction is routed through `ocr.provider_registry`. If the source file is
+readable but the current machine cannot parse it, `extract_document` returns structured
+provider diagnostics:
+
+```json
+{
+  "schema_version": "document.extract.v1",
+  "status": "blocked",
+  "blocked_reason": "ocr_adapter_unavailable",
+  "engine_candidates": [
+    {"engine": "sidecar_text", "available": false, "reason": "sidecar_missing"},
+    {"engine": "pymupdf_text", "available": false, "reason": "module_not_installed"},
+    {"engine": "tesseract", "available": false, "reason": "binary_not_found"},
+    {"engine": "easyocr", "available": false, "reason": "module_not_installed"}
+  ],
+  "next_action": "install_pymupdf_or_provide_ocr_sidecar"
 }
 ```
 
@@ -341,9 +360,91 @@
 }
 ```
 
+### extract_structured_business_output(file_paths=None, source_dir="", project_name="", output_dir="", skip_backups=true)
+
+只读提取文件结构化业务证据，生成 run 级 JSON。该工具用于“先解构文件、沉淀结构化证据、输出业务复核信号”的场景，不写项目账本、不生成归档计划、不移动文件。
+
+与 `prepare_file_organization_run` 不同，本工具不会对已知业务目录下的 PDF/图片做 metadata passthrough；PDF/图片仍会走真实文本提取或 OCR，以保证结构化输出质量。
+
+**参数**：
+- `file_paths` (array, optional): 源文件绝对路径列表
+- `source_dir` (str, optional): 源文件目录；提供后按文件名稳定排序读取目录内文件
+- `project_name` (str, optional): 手工指定项目名；为空时从字段或业务路径推断
+- `output_dir` (str, optional): 输出目录；为空时写入当前数据清洗 workspace 的 run 目录
+- `skip_backups` (bool, optional): 是否跳过 `.bak` / `.bak_` 备份文件，默认 `true`
+
+**返回**：
+```json
+{
+  "schema_version": "business_structured_output.result.v1",
+  "status": "success|partial|failed",
+  "processed": 10,
+  "failed": 0,
+  "business_cases": [],
+  "artifacts": {
+    "structured_business_output": ".../structured_business_output.json",
+    "output_dir": "..."
+  },
+  "boundary": {
+    "mode": "read_only_structured_output",
+    "moved_files": false,
+    "updated_external_ledger": false,
+    "archive_plan_created": false,
+    "archive_plan_executed": false
+  }
+}
+```
+
+### semantic_structure_document(evidence_pack)
+
+只读语义结构化 evidence pack，输出 `semantic_document.v1`。该工具是把硬编码 3/4/5 层逐步迁移到“LLM 语义结构化 + 确定性门控”的正式入口：LLM/adapter 负责语义候选，确定性门控负责 schema、置信度、`evidence_refs` 和字段质量校验。
+
+本工具不写项目账本、不生成归档计划、不移动文件；没有配置语义 adapter 时返回结构化 `blocked`，不伪造成功。
+
+**参数**：
+- `evidence_pack` (object, required): `document.evidence_pack.v1`，包含源文件路径、文本片段、路径上下文、候选字段和抽取质量信息
+
+**返回**：
+```json
+{
+  "schema_version": "semantic_document.v1",
+  "status": "success|blocked",
+  "document_type": "合同",
+  "business_fields": {
+    "project_name": {
+      "value": "项目名称",
+      "confidence": 0.92,
+      "evidence_refs": ["text:0"]
+    }
+  },
+  "accepted_business_facts": {
+    "project_name": "项目名称"
+  },
+  "semantic_guardrail": {
+    "schema_version": "semantic_guardrail.v1",
+    "status": "ready|partial|blocked",
+    "accepted_fields": ["project_name"],
+    "rejected_fields": []
+  }
+}
+```
+
 ### prepare_file_organization_run(file_paths, project_name="")
 
 准备一次文件整理闭环运行包。该工具会提取源文件结构化字段，写入项目账本并触发业务判断，生成复核队列、归档计划和运行报告，但不会移动源文件。
+
+Runtime paths come from `common.workspace_config`. The production default workspace is `E:\SynologyDrive\_project_manager_workspace`; pass `main.run(..., data_workspace_dir=...)` or construct `DataCleaningTools(workspace_dir=...)` to override it.
+
+Before extraction, each source file is checked with `probe_readable_file`. A cloud-drive placeholder or sync failure is recorded as a per-file failure instead of raising an unhandled exception:
+
+```json
+{
+  "file": "E:\\SynologyDrive\\...",
+  "stage": "source_readiness",
+  "error": "source_not_local_or_unreadable",
+  "blocked_reason": "cloud_placeholder_or_sync_failure"
+}
+```
 
 **参数**：
 - `file_paths` (array, required): 源文件绝对路径列表
@@ -419,6 +520,8 @@
 ### execute_archive_plan(run_id, confirmed=false)
 
 执行 `prepare_file_organization_run` 生成的归档计划。默认 `confirmed=false` 时只返回 `needs_confirmation`，不会移动文件；只有 `confirmed=true` 时才会重命名并移动源文件，同时把归档结果写入项目账本。
+
+When `confirmed=true`, archive execution rechecks source readability, target existence, target parent writability, and the human-review gate. If any check fails, that action is written to `archive_result.json` as `blocked` and the source file is not moved.
 
 **参数**：
 - `run_id` (str, required): 运行包 ID

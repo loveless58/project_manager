@@ -39,6 +39,8 @@
     "batch_process",
     "save_structured",
     "process_documents_to_ledger",
+    "extract_structured_business_output",
+    "semantic_structure_document",
     "prepare_file_organization_run",
     "apply_human_review",
     "execute_archive_plan",

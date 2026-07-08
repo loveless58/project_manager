@@ -49,13 +49,14 @@ class ProjectLedger:
     def apply_patch(self, patch: Dict[str, Any]) -> Dict[str, Any]:
         project_name = self._project_name_from_patch(patch)
         project_dir = self._project_dir(project_name)
-        os.makedirs(project_dir, exist_ok=True)
+        asset_dir = self._asset_dir(project_dir)
+        os.makedirs(asset_dir, exist_ok=True)
 
-        state_path = os.path.join(project_dir, "project_ledger.json")
+        state_path = os.path.join(asset_dir, "project_ledger.json")
         state = self._load_state(state_path, project_name)
 
         source_type = patch.get("source_type") or "local_file"
-        facts = patch.get("facts") or {}
+        facts = dict(patch.get("facts") or {})
         evidence = patch.get("evidence") or []
         submitted_at = datetime.now().isoformat()
 
@@ -87,22 +88,101 @@ class ProjectLedger:
             "decisions": decisions,
         })
 
-        markdown_path = os.path.join(project_dir, "项目总览.md")
+        markdown_path = os.path.join(asset_dir, "项目总览.md")
         self._save_json(state_path, state)
         self._save_markdown(markdown_path, state)
-        self._append_decision_log(project_dir, state, decisions, patch, submitted_at)
+        self._append_decision_log(asset_dir, state, decisions, patch, submitted_at)
 
         return {
             "schema_version": "project.ledger.result.v1",
             "status": "success",
             "project_name": project_name,
             "project_dir": project_dir,
+            "asset_dir": asset_dir,
             "state_path": state_path,
             "markdown_path": markdown_path,
             "current_facts": state["current_facts"],
             "business_judgement": state["business_judgement"],
             "decisions": decisions,
             "conflicts": state["conflicts"],
+        }
+
+    def record_archive_event(self, project_name: str, event: Dict[str, Any]) -> Dict[str, Any]:
+        project_dir = self._project_dir(project_name)
+        asset_dir = self._asset_dir(project_dir)
+        os.makedirs(asset_dir, exist_ok=True)
+
+        state_path = os.path.join(asset_dir, "project_ledger.json")
+        state = self._load_state(state_path, project_name)
+        now = event.get("archived_at") or datetime.now().isoformat()
+        if event.get("archive_phase") == "项目执行" and not state["current_facts"].get("lifecycle_stage"):
+            state["current_facts"]["lifecycle_stage"] = "execution"
+            state["fact_meta"]["lifecycle_stage"] = {
+                "field": "lifecycle_stage",
+                "value": "execution",
+                "source_type": "directory_context",
+                "effective_source_type": "directory_context",
+                "source_weight": 0.9,
+                "extract_confidence": 1.0,
+                "score": 0.94,
+                "source_ref": event.get("archived_path", ""),
+                "submitted_at": now,
+                "skill": event.get("skill", "data_cleaning_file_organization"),
+                "status": "verified",
+                "risk_level": "P2",
+            }
+        state["updated_at"] = now
+        state["business_judgement"] = BidProjectRuleEngine().evaluate(
+            state["current_facts"],
+            fact_meta=state["fact_meta"],
+            conflicts=state["conflicts"],
+            evidence_index=state["evidence_index"],
+        )
+        state["change_log"].append({
+            "timestamp": now,
+            "actor": event.get("actor", "archive_executor"),
+            "skill": event.get("skill", "data_cleaning_file_organization"),
+            "source_type": "archive_event",
+            "fields": [],
+            "decisions": {},
+        })
+
+        normalized_event = {
+            "schema_version": "project_archive.event.v1",
+            "timestamp": now,
+            "project_name": project_name,
+            **event,
+        }
+        events_path = os.path.join(asset_dir, "archive_events.jsonl")
+        with open(events_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(normalized_event, ensure_ascii=False) + "\n")
+
+        manifest_path = os.path.join(asset_dir, "archive_manifest.json")
+        manifest = self._load_archive_manifest(manifest_path, project_name)
+        manifest["updated_at"] = now
+        manifest["files"].append({
+            "original_path": event.get("original_path", ""),
+            "archived_path": event.get("archived_path", ""),
+            "document_type": event.get("document_type", ""),
+            "run_id": event.get("run_id", ""),
+            "archived_at": now,
+        })
+        self._save_json(manifest_path, manifest)
+
+        markdown_path = os.path.join(asset_dir, "项目总览.md")
+        self._save_json(state_path, state)
+        self._save_markdown(markdown_path, state)
+        return {
+            "schema_version": "project_archive.event.result.v1",
+            "status": "success",
+            "project_name": project_name,
+            "project_dir": project_dir,
+            "asset_dir": asset_dir,
+            "state_path": state_path,
+            "markdown_path": markdown_path,
+            "archive_events_path": events_path,
+            "archive_manifest_path": manifest_path,
+            "business_judgement": state["business_judgement"],
         }
 
     def _project_name_from_patch(self, patch: Dict[str, Any]) -> str:
@@ -113,9 +193,16 @@ class ProjectLedger:
         safe = re.sub(r'[<>:"/\\|?*\s]+', "_", project_name).strip("_")
         return os.path.join(self.base_dir, safe or "unnamed_project")
 
+    def _asset_dir(self, project_dir: str) -> str:
+        return os.path.join(project_dir, "数字资产")
+
     def _load_state(self, state_path: str, project_name: str) -> Dict[str, Any]:
         if os.path.exists(state_path):
             with open(state_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        legacy_path = os.path.join(os.path.dirname(os.path.dirname(state_path)), "project_ledger.json")
+        if os.path.exists(legacy_path):
+            with open(legacy_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         now = datetime.now().isoformat()
         return {
@@ -267,6 +354,19 @@ class ProjectLedger:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
 
+    def _load_archive_manifest(self, path: str, project_name: str) -> Dict[str, Any]:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        now = datetime.now().isoformat()
+        return {
+            "schema_version": "project_archive.manifest.v1",
+            "project_name": project_name,
+            "created_at": now,
+            "updated_at": now,
+            "files": [],
+        }
+
     def _save_markdown(self, path: str, state: Dict[str, Any]) -> None:
         lines = [
             f"# 项目总览：{state['project_name']}",
@@ -285,8 +385,11 @@ class ProjectLedger:
             meta = state["fact_meta"].get(field, {})
             lines.append(f"| {field} | {value} | {meta.get('status', '')} | {meta.get('source_type', '')} | {meta.get('score', '')} |")
 
+        removed_candidate_keys = self._maintenance_removed_candidate_keys(state)
         lines.extend(["", "## 2. 候选事实", "| 字段 | 候选值 | 来源类型 | 分数 | 来源引用 |", "|---|---|---|---:|---|"])
         for item in state["candidate_facts"]:
+            if (str(item.get("field", "")), str(item.get("value", ""))) in removed_candidate_keys:
+                continue
             lines.append(f"| {item['field']} | {item['value']} | {item['source_type']} | {item['score']} | {item.get('source_ref', '')} |")
 
         lines.extend(["", "## 3. 证据索引", "| 字段 | 来源类型 | 来源引用 | 提取方式 | 置信度 |", "|---|---|---|---|---:|"])
@@ -316,6 +419,21 @@ class ProjectLedger:
 
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
+
+    def _maintenance_removed_candidate_keys(self, state: Dict[str, Any]) -> set:
+        removed = set()
+        for event in state.get("maintenance_events") or []:
+            for item in event.get("removed_facts") or []:
+                field = str(item.get("field", ""))
+                value = str(item.get("value", ""))
+                if field and value:
+                    removed.add((field, value))
+            for field, value in (event.get("updated_facts") or {}).items():
+                current_value = str(value)
+                for candidate in state.get("candidate_facts") or []:
+                    if str(candidate.get("field", "")) == str(field) and str(candidate.get("value", "")) != current_value:
+                        removed.add((str(field), str(candidate.get("value", ""))))
+        return removed
 
     def _append_decision_log(
         self,

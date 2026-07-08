@@ -28,9 +28,14 @@ from typing import Dict, List, Tuple
 # 项目根目录（governance/ 的父目录）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# 工作目录基址（跟 main.py / README 一致）
-DEFAULT_BASE_DIR = Path("~/Desktop/工作文件").expanduser()
-BASE_DIR = Path(os.environ.get("LOOP_PROJECT_BASE_DIR", DEFAULT_BASE_DIR)).expanduser()
+sys.path.insert(0, str(PROJECT_ROOT))
+from common.workspace_config import resolve_workspace_config  # noqa: E402
+
+# 工作目录基址来自统一 workspace 配置；LOOP_PROJECT_BASE_DIR 仅保留为治理兼容入口。
+WORKSPACE_CONFIG = resolve_workspace_config(
+    runtime_workspace=os.environ.get("LOOP_PROJECT_BASE_DIR") or None
+)
+BASE_DIR = WORKSPACE_CONFIG.runtime_workspace
 
 
 def load_contract(filename: str) -> dict:
@@ -62,11 +67,30 @@ def validate_dirs(verbose: bool = True) -> Tuple[int, int, List[dict]]:
     error_count = 0
     warning_count = 0
 
+    def record_finding(finding: dict) -> None:
+        nonlocal error_count, warning_count
+        findings.append(finding)
+        level = finding.get("level", "warning")
+        if level == "error":
+            error_count += 1
+        elif level == "warning":
+            warning_count += 1
+
+    def marker_for(level: str) -> str:
+        if level == "error":
+            return "❌"
+        if level == "warning":
+            return "⚠️ "
+        return "ℹ️ "
+
     for key, spec in contract.get("required_dirs", {}).items():
         rel_path = spec["path"]
-        # scope=project 表示路径相对项目根目录，其他默认相对 BASE_DIR
+        # scope=project 表示路径相对项目根目录；scope=business 表示路径相对业务根；
+        # 其他默认相对 runtime workspace。
         if spec.get("scope") == "project":
             full_path = PROJECT_ROOT / rel_path
+        elif spec.get("scope") == "business":
+            full_path = WORKSPACE_CONFIG.business_root / rel_path
         else:
             full_path = BASE_DIR / rel_path
 
@@ -75,42 +99,38 @@ def validate_dirs(verbose: bool = True) -> Tuple[int, int, List[dict]]:
             msg = f"[{level.upper()}] {key}: {full_path} 不存在"
             finding = {"id": f"DIR-{key}", "level": level, "msg": msg,
                        "fix": f"创建目录 {full_path}"}
-            findings.append(finding)
-            if level == "error":
-                error_count += 1
-            else:
-                warning_count += 1
+            record_finding(finding)
             if verbose:
-                print(f"❌ {msg}")
+                print(f"{marker_for(level)} {msg}")
                 print(f"   修复: {finding['fix']}")
             continue
 
         if verbose:
             print(f"✅ {key}: {full_path} 存在")
 
-        # 检查必需子目录（仅 BASE_DIR scope）
+        # 检查必需子目录（项目根 scope 不检查业务运行子目录）
         if spec.get("scope") != "project":
             for subdir in spec.get("required_subdirs", []):
                 if not (full_path / subdir).is_dir():
-                    msg = f"[ERROR] {key}.{subdir}: 必需子目录不存在"
-                    finding = {"id": f"DIR-{key}-{subdir}", "level": "error", "msg": msg,
+                    level = spec.get("validation_level", "warning")
+                    msg = f"[{level.upper()}] {key}.{subdir}: 必需子目录不存在"
+                    finding = {"id": f"DIR-{key}-{subdir}", "level": level, "msg": msg,
                                "fix": f"创建 {full_path / subdir}"}
-                    findings.append(finding)
-                    error_count += 1
+                    record_finding(finding)
                     if verbose:
-                        print(f"❌ {msg}")
+                        print(f"{marker_for(level)} {msg}")
                         print(f"   修复: {finding['fix']}")
 
             # 检查必需文件
             for filename in spec.get("required_files", []):
                 if not (full_path / filename).is_file():
-                    msg = f"[ERROR] {key}.{filename}: 必需文件不存在"
-                    finding = {"id": f"DIR-{key}-{filename}", "level": "error", "msg": msg,
+                    level = spec.get("validation_level", "warning")
+                    msg = f"[{level.upper()}] {key}.{filename}: 必需文件不存在"
+                    finding = {"id": f"DIR-{key}-{filename}", "level": level, "msg": msg,
                                "fix": f"运行相关脚本生成 {full_path / filename}"}
-                    findings.append(finding)
-                    error_count += 1
+                    record_finding(finding)
                     if verbose:
-                        print(f"❌ {msg}")
+                        print(f"{marker_for(level)} {msg}")
                         print(f"   修复: {finding['fix']}")
 
     return error_count, warning_count, findings

@@ -1,10 +1,12 @@
-# macOS
+# macOS / Windows metadata
 .DS_Store
 .AppleDouble
 .LSOverride
 ._*
+desktop.ini
+.SynologyWorkingDirectory/
 
-# Python 构建产物
+# Python build artifacts
 __pycache__/
 *.py[cod]
 *$py.class
@@ -13,30 +15,29 @@ __pycache__/
 dist/
 build/
 
-# 测试缓存
+# Test and type-check caches
 .pytest_cache/
 .mypy_cache/
 .coverage
 htmlcov/
 
-# 编辑器
+# Editors
 .vscode/
 .idea/
 *.swp
 
-# 机密
+# Secrets
 .env
 .env.local
 secrets.yaml
 *.pem
 *.key
 
-# ===运行时产物（不入 git，本地审计用）===
-
-# 日志（按 agent_name 时间戳命名）
+# Runtime traces and local workspaces
 logs/project_manager_*.json
-
-# state/ 下所有运行时子目录
+runs/
+project_ledgers/
+数据清洗工作台/
 state/project_ledgers/
 state/runs/
 state/full_loop_simulation_workspace/
@@ -48,17 +49,19 @@ state/subagent_check_*.md
 state/structured_documents/
 state/structured_workbooks/
 
-# state/ 下临时笔记文件
+# Runtime notes under state; keep the documented state entrypoint.
 state/*.md
 !state/README.md
 
-# 运行时报告
+# Runtime reports
 reports/*.md
 
-# 历史评估报告（已迁移至 .runtime/archive/superpowers-reports/）
+# Historical local reports archived outside the repo.
 docs/superpowers/reports/
 !docs/superpowers/plans/
 
-# 外层本地运行时目录（不入 git）
+# Outer local runtime directory.
 .runtime/
 
+# Prevent accidental repo-in-repo copies from sync tools.
+/project_manager/
