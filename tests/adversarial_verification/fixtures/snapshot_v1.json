@@ -1,0 +1,59 @@
+{
+  "_comment": "Frozen snapshot v1 — adversarial_verification baseline stability fixture",
+  "_purpose": "验证 AdversarialVerification 在固定输入下产生稳定输出（PRD §7.5.5：10 次重放稳定率 ≥ 95%）",
+  "_input": {
+    "extracted_items": [
+      {
+        "file": "/tmp/fixtures/sample_bid_doc.pdf",
+        "filename": "sample_bid_doc.pdf",
+        "document_type": "投标文件",
+        "extracted_text": "项目名称：某智能监控系统建设项目\n预算金额：120万元\n客户：某科技公司\n截止日期：2026年9月30日",
+        "fields": {
+          "project_name": "某智能监控系统建设项目",
+          "budget": "120",
+          "customer": "某科技公司",
+          "deadline": "2026年9月30日"
+        },
+        "ocr": {
+          "pages": [{"confidence": 0.95}, {"confidence": 0.93}]
+        }
+      },
+      {
+        "file": "/tmp/fixtures/contract_doc.pdf",
+        "filename": "合同_华东电网.pdf",
+        "document_type": "合同",
+        "extracted_text": "合同名称：华东电网运维服务合同\n客户：华东电网有限公司\n合同状态：已签订",
+        "fields": {
+          "project_name": "华东电网运维服务合同",
+          "customer": "华东电网有限公司",
+          "contract_status": "已签订"
+        },
+        "ocr": {
+          "pages": [{"confidence": 0.92}]
+        }
+      }
+    ],
+    "archive_actions": [
+      {
+        "source_file": "/tmp/fixtures/sample_bid_doc.pdf",
+        "target_path": "/项目文件/某智能监控系统建设项目/投标/sample_bid_doc.pdf",
+        "document_type": "投标文件",
+        "project_name": "某智能监控系统建设项目"
+      },
+      {
+        "source_file": "/tmp/fixtures/contract_doc.pdf",
+        "target_path": "/项目文件/华东电网运维服务合同/合同/合同_华东电网.pdf",
+        "document_type": "合同",
+        "project_name": "华东电网运维服务合同"
+      }
+    ],
+    "ledger_results": []
+  },
+  "_expected_output": {
+    "_comment": "预期所有字段均提取完整且准确，archive 路径含项目名，无高严重度 finding → pass",
+    "overall_verdict": "pass",
+    "min_finding_count": 0,
+    "max_finding_count": 2,
+    "_acceptable_verdicts": ["pass", "pass_with_warnings"]
+  }
+}
