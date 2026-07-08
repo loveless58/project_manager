@@ -160,6 +160,10 @@ class LoopEngine:
         for attempt in range(max_attempts):
             try:
                 result = tool_func(**action_input)
+                # 截断 observation 避免 token 爆炸
+                if isinstance(result, dict):
+                    truncated = self._truncate_observation_dict(result)
+                    return str(truncated), True
                 return str(result), True
             except Exception as e:
                 last_error = e
@@ -176,6 +180,38 @@ class LoopEngine:
             f"[SUGGESTION] Please try a different approach or report this failure."
         )
         return structured_error, False
+
+    def _truncate_observation_dict(self, result: dict) -> dict:
+        """截断 dict 类型的 observation，避免 token 爆炸。"""
+        truncated = {}
+        for key, value in result.items():
+            if isinstance(value, str) and len(value) > 500:
+                truncated[key] = value[:500] + "... [truncated]"
+            elif isinstance(value, list) and len(value) > 10:
+                truncated[key] = value[:10]
+                truncated[key].append(f"... [{len(value) - 10} more items]")
+            elif isinstance(value, dict):
+                truncated[key] = self._truncate_nested(value, depth=2)
+            else:
+                truncated[key] = value
+        return truncated
+
+    def _truncate_nested(self, d: dict, depth: int) -> dict:
+        """递归截断嵌套 dict。"""
+        if depth <= 0:
+            return {"...": "[truncated]"}
+        result = {}
+        for k, v in d.items():
+            if isinstance(v, str) and len(v) > 300:
+                result[k] = v[:300] + "..."
+            elif isinstance(v, list) and len(v) > 5:
+                result[k] = v[:5]
+                result[k].append(f"... [{len(v) - 5} more]")
+            elif isinstance(v, dict):
+                result[k] = self._truncate_nested(v, depth - 1)
+            else:
+                result[k] = v
+        return result
 
     def _evaluate_observation(self, observation: str, success: bool) -> Dict[str, Any]:
         """Classify a raw tool observation into a planner-facing control signal."""

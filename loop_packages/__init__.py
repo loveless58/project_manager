@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -38,7 +38,7 @@ class LoopPackage:
         return str(self.manifest.get("runtime_registrar", ""))
 
 
-def discover_loop_packages(root: Path | None = None) -> Dict[str, LoopPackage]:
+def discover_loop_packages(root: Optional[Path] = None) -> Dict[str, LoopPackage]:
     root = Path(root or PACKAGE_ROOT)
     packages: Dict[str, LoopPackage] = {}
     for manifest_path in sorted(root.glob("*/manifest.json")):
@@ -47,7 +47,7 @@ def discover_loop_packages(root: Path | None = None) -> Dict[str, LoopPackage]:
     return packages
 
 
-def get_loop_package(name: str, root: Path | None = None) -> LoopPackage:
+def get_loop_package(name: str, root: Optional[Path] = None) -> LoopPackage:
     packages = discover_loop_packages(root)
     try:
         return packages[name]
@@ -65,21 +65,21 @@ def route_skill_from_packages(goal: str, default: str = "project_management") ->
     return default
 
 
-def build_skill_tool_map(root: Path | None = None) -> Dict[str, list[str]]:
+def build_skill_tool_map(root: Optional[Path] = None) -> Dict[str, list[str]]:
     return {
         name: package.expected_tools
         for name, package in discover_loop_packages(root).items()
     }
 
 
-def build_skill_descriptions(root: Path | None = None) -> Dict[str, str]:
+def build_skill_descriptions(root: Optional[Path] = None) -> Dict[str, str]:
     return {
         name: str(package.manifest.get("description", ""))
         for name, package in discover_loop_packages(root).items()
     }
 
 
-def build_skill_registrar_map(registrar_module: Any, root: Path | None = None) -> Dict[str, Any]:
+def build_skill_registrar_map(registrar_module: Any, root: Optional[Path] = None) -> Dict[str, Any]:
     registrars: Dict[str, Any] = {}
     for name, package in discover_loop_packages(root).items():
         registrar_name = package.runtime_registrar
@@ -92,7 +92,7 @@ def build_skill_registrar_map(registrar_module: Any, root: Path | None = None) -
     return registrars
 
 
-def validate_all_loop_packages(root: Path | None = None) -> Dict[str, Any]:
+def validate_all_loop_packages(root: Optional[Path] = None) -> Dict[str, Any]:
     packages = discover_loop_packages(root)
     errors: List[str] = []
 

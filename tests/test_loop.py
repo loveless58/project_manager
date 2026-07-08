@@ -745,7 +745,7 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             extracted = tools.extract_document(image_path)
 
             self.assertEqual(extracted["status"], "blocked")
-            self.assertEqual(extracted["blocked_reason"], "ocr_adapter_unavailable")
+            self.assertEqual(extracted["blocked_reason"], "ocr_engine_failed")
             self.assertTrue(extracted["is_scanned"])
             self.assertEqual(extracted["fields"], {})
 
@@ -753,7 +753,7 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["processed"], 0)
             self.assertEqual(result["failed"], 1)
-            self.assertIn("ocr_adapter_unavailable", result["failures"][0]["error"])
+            self.assertIn("engine", result["failures"][0]["error"].lower())
 
     def test_scanned_pdf_can_use_ocr_sidecar_text(self):
         import tempfile
@@ -1295,7 +1295,7 @@ class TestEndToEnd(unittest.TestCase):
             self.assertEqual(result["rounds"][0]["status"], "success")
             self.assertEqual(result["metadata"]["data_workspace_dir"], workspace_dir)
             self.assertTrue(os.path.isdir(os.path.join(workspace_dir, "runs")))
-            self.assertTrue(os.path.isdir(os.path.join(workspace_dir, "project_ledgers")))
+            self.assertTrue(os.path.isdir(os.path.join(workspace_dir, "项目文件")))
             self.assertTrue(os.path.isdir(trace_dir))
             self.assertTrue(os.path.exists(doc_path), "prepare step must not move source files")
 

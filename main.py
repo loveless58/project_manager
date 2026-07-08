@@ -100,7 +100,7 @@ def _register_project_management_tools(reg: ToolRegistry) -> None:
 
 def _register_data_cleaning_file_organization_tools(reg: ToolRegistry, workspace_dir: Optional[str] = None) -> None:
     """Register data-cleaning and project-ledger tools into the provided registry."""
-    dt = _dc_tools_mod.DataCleaningTools(workspace_dir=workspace_dir or os.path.join(_module_dir, "state"))
+    dt = _dc_tools_mod.DataCleaningTools(workspace_dir=workspace_dir or os.path.join(_work_dir, "project_manager"))
 
     reg.register("scan_raw_files", "扫描原始文件目录", dt.scan_raw_files, {}, [])
     reg.register("extract_pdf", "提取PDF结构化数据", dt.extract_pdf,
@@ -122,7 +122,7 @@ def _register_data_cleaning_file_organization_tools(reg: ToolRegistry, workspace
                      "file_paths": {"type": "array"},
                      "project_name": {"type": "string"},
                   }, ["file_paths"])
-    reg.register("prepare_file_organization_run", "准备文件整理闭环运行包：结构化提取、业务判断、复核队列和归档计划",
+    reg.register("prepare_file_organization_run", "准备文件整理闭环运行包：内部已完成结构化提取+分类+归档计划，返回待确认清单。注意：不要额外调用 extract_document，此工具已包含提取。",
                  dt.prepare_file_organization_run,
                  {
                      "file_paths": {"type": "array"},
@@ -326,7 +326,7 @@ def run(
         agent_name="project_manager_agent",
         max_rounds=15,
         dedup_threshold=2,
-        token_budget=8000,
+        token_budget=20000,
         state_mode="sliding_window",
         sliding_window_size=3,
         retry_max=2,
