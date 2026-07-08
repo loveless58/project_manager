@@ -212,6 +212,70 @@ class TestDataCleaningOcrProvider(unittest.TestCase):
 
         self.assertEqual(fields["payment_amount"], "800.00")
 
+    def test_project_text_fields_are_enriched_by_contract_parsers(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        fields = DataCleaningTools(workspace_dir=tempfile.mkdtemp())._extract_fields(
+            "\n".join([
+                "项目金额：2,000,000 元（预算）",
+                "报名截止：2026-05-20",
+                "投标截止/开标：2026-05-26 09:30",
+            ])
+        )
+
+        self.assertEqual(fields["amount"], 2_000_000.0)
+        self.assertEqual(fields["amount_label"], "预算")
+        self.assertEqual(fields["registration_deadline"], "2026-05-20")
+        self.assertEqual(fields["bid_deadline"], "2026-05-26")
+        self.assertEqual(fields["bid_open_time"], "2026-05-26")
+        self.assertEqual(fields["deadline"], "2026-05-26")
+
+    def test_ocr_provider_fields_are_mapped_to_contract_ledger_fields(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            image_path = os.path.join(td, "招标公告.png")
+            with open(image_path, "wb") as f:
+                f.write(b"fake image bytes")
+
+            provider_result = {
+                "schema_version": "document.extract.v1",
+                "status": "success",
+                "file": image_path,
+                "filename": "招标公告.png",
+                "file_type": ".png",
+                "document_type": "招标公告",
+                "extract_method": "ocr",
+                "text_length": 18,
+                "extracted_text": "招标公告\n项目名称：OCR字段映射项目",
+                "is_scanned": True,
+                "fields": {
+                    "buyer": "测试客户",
+                    "date": "2026-05-26",
+                    "project_no": "ABC12345",
+                    "amount": "800 元",
+                },
+                "ocr": {
+                    "schema_version": "ocr.result.v1",
+                    "status": "success",
+                    "engine": "fake-provider",
+                    "text": "",
+                    "pages": [],
+                    "quality": {"needs_human_review": False},
+                },
+                "engine_candidates": [],
+            }
+
+            with patch("ocr.provider_registry.extract_pdf_or_image", return_value=provider_result):
+                extracted = DataCleaningTools(workspace_dir=td).extract_document(image_path)
+
+            self.assertEqual(extracted["document_type"], "招标公告")
+            self.assertEqual(extracted["fields"]["customer"], "测试客户")
+            self.assertEqual(extracted["fields"]["bid_deadline"], "2026-05-26")
+            self.assertEqual(extracted["fields"]["deadline"], "2026-05-26")
+            self.assertEqual(extracted["fields"]["bid_code"], "ABC12345")
+            self.assertEqual(extracted["fields"]["amount"], 800.0)
+
     def test_internal_project_markdown_builds_ready_archive_action(self):
         from tools.data_cleaning_tools import DataCleaningTools
 

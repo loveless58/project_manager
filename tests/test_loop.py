@@ -154,7 +154,7 @@ class TestToolRegistry(unittest.TestCase):
 
         reg = main._build_registry()
         tools = set(reg.list_tools())
-        self.assertEqual(len(tools), 37)
+        self.assertEqual(len(tools), 43)
         self.assertIn("cloudcc_session_probe", tools)
         self.assertIn("cloudcc_duplicate_check", tools)
         self.assertIn("cloudcc_fill_draft_gated", tools)
@@ -163,6 +163,12 @@ class TestToolRegistry(unittest.TestCase):
         self.assertIn("extract_structured_business_output", tools)
         self.assertIn("semantic_structure_document", tools)
         self.assertIn("prepare_file_organization_run", tools)
+        self.assertIn("verify_file_organization_run", tools)
+        self.assertIn("audit_file_organization_run", tools)
+        self.assertIn("prepare_feedback_form", tools)
+        self.assertIn("apply_feedback_form", tools)
+        self.assertIn("apply_feedback_decisions", tools)
+        self.assertIn("generate_candidate_tests", tools)
         self.assertIn("apply_human_review", tools)
         self.assertIn("execute_archive_plan", tools)
         self.assertIn("import_project_detail_workbook", tools)
@@ -185,6 +191,12 @@ class TestToolRegistry(unittest.TestCase):
             "extract_structured_business_output",
             "semantic_structure_document",
             "prepare_file_organization_run",
+            "verify_file_organization_run",
+            "audit_file_organization_run",
+            "prepare_feedback_form",
+            "apply_feedback_form",
+            "apply_feedback_decisions",
+            "generate_candidate_tests",
             "apply_human_review",
             "execute_archive_plan",
             "import_project_detail_workbook",
