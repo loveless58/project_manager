@@ -226,6 +226,8 @@ _DEADLINE_PATTERNS = {
     "bid_open_time": [
         re.compile(rf"开标时间[：:]\s*{_ISO_DATETIME_RE}"),
         re.compile(rf"开标\s*[|｜]\s*{_ISO_DATE_RE}"),
+        # "投标截止/开标：日期 时间"  真实数据样本（与 bid_deadline 共享日期）
+        re.compile(rf"投标截止[^：:|｜]*开标[^：:|｜]*[：:]\s*{_ISO_DATETIME_RE}"),
     ],
 }
 

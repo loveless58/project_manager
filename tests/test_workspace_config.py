@@ -14,6 +14,7 @@ sys.path.insert(0, PROJECT_DIR)
 
 
 class TestWorkspaceConfig(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only default paths")
     def test_defaults_to_synology_workspace(self):
         with patch.dict(os.environ, {}, clear=True):
             from common.workspace_config import resolve_workspace_config
@@ -29,6 +30,7 @@ class TestWorkspaceConfig(unittest.TestCase):
         self.assertEqual(config.state_dir, config.runtime_workspace / "state")
         self.assertFalse(str(config.project_files_dir).startswith(str(config.runtime_workspace)))
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only default paths")
     def test_environment_overrides_business_root_and_workspace(self):
         env = {
             "PROJECT_MANAGER_BUSINESS_ROOT": r"D:\BusinessRoot",
@@ -43,6 +45,7 @@ class TestWorkspaceConfig(unittest.TestCase):
         self.assertEqual(config.runtime_workspace, Path(r"D:\BusinessRoot\.pm_workspace"))
         self.assertEqual(config.project_files_dir, Path(r"D:\BusinessRoot\项目文件"))
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only default paths")
     def test_explicit_arguments_override_environment(self):
         env = {
             "PROJECT_MANAGER_BUSINESS_ROOT": r"D:\EnvRoot",
@@ -61,6 +64,7 @@ class TestWorkspaceConfig(unittest.TestCase):
         self.assertEqual(config.runtime_workspace, Path(r"E:\ExplicitWorkspace"))
         self.assertEqual(config.project_files_dir, Path(r"E:\ExplicitRoot\项目文件"))
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only default paths")
     def test_repo_local_config_is_used_when_environment_is_absent(self):
         with tempfile.TemporaryDirectory() as td:
             config_path = Path(td) / "workspace.local.json"
@@ -96,6 +100,7 @@ class TestWorkspaceConfig(unittest.TestCase):
         self.assertTrue(config.business_root.is_absolute())
         self.assertTrue(config.runtime_workspace.is_absolute())
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows-only default paths")
     def test_data_cleaning_default_scan_source_is_business_root(self):
         env = {
             "PROJECT_MANAGER_BUSINESS_ROOT": r"D:\BusinessRoot",
