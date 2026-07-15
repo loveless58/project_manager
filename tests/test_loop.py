@@ -1119,7 +1119,9 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertTrue((Path(tools.project_files_dir) / "项目执行" / project_name / "数字资产" / "project_ledger.json").exists())
             self.assertFalse((Path(tools.project_files_dir) / project_name / "数字资产" / "project_ledger.json").exists())
 
-    def test_execute_archive_plan_records_archive_events_outside_business_facts(self):
+    def test_execute_archive_plan_updates_business_state_without_event_log(self):
+        """execute_archive_plan 应更新业务账本（state + 项目总览.md），
+        但不再写 archive_events.jsonl 事件日志（2026-07-15 用户决策）。"""
         import tempfile
         from pathlib import Path
         from tools.data_cleaning_tools import DataCleaningTools
@@ -1167,8 +1169,12 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertNotIn("last_archived_file", state["current_facts"])
             self.assertNotIn("archive_status", state["current_facts"])
             self.assertFalse(any(item["field"] == "last_archived_file" for item in state["conflicts"]))
-            events = (asset_dir / "archive_events.jsonl").read_text(encoding="utf-8").splitlines()
-            self.assertEqual(len(events), 2)
+            # archive_events.jsonl 不再生成（2026-07-15 用户决策）
+            self.assertFalse((asset_dir / "archive_events.jsonl").exists())
+            # archive_manifest.json 仍生成
+            self.assertTrue((asset_dir / "archive_manifest.json").exists())
+            # 项目总览.md 仍生成
+            self.assertTrue((asset_dir / "项目总览.md").exists())
 
     def test_default_tool_paths_use_workspace_config(self):
         from common.workspace_config import resolve_workspace_config

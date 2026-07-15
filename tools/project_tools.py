@@ -17,7 +17,7 @@ from common.workspace_config import default_business_root, default_project_files
 
 PROJECT_BASE_DIR = default_project_files_dir()
 INDEX_PATH = os.path.join(PROJECT_BASE_DIR, "index.json")
-PHASES = ["项目投标", "项目执行", "项目归档"]
+PHASES = ["项目投标", "项目弃标", "项目丢标", "项目执行"]
 
 ARCHIVE_SUBDIRS = {
     "招标": "招标文件",
@@ -411,14 +411,6 @@ class ArchiveTools:
     def _detect_migrations(self) -> List[str]:
         """检测可能需要迁移的项目"""
         migrations = []
-        # 检查项目执行目录是否有验收文档
-        exec_dir = os.path.join(self.base_dir, "项目执行")
-        if os.path.exists(exec_dir):
-            for name in os.listdir(exec_dir):
-                accept_dir = os.path.join(exec_dir, name, "验收文档")
-                if os.path.exists(accept_dir) and os.listdir(accept_dir):
-                    migrations.append(f"建议迁移: {name} -> 项目归档（已验收）")
-        
         # 检查项目投标目录是否有中标文件
         bid_dir = os.path.join(self.base_dir, "项目投标")
         if os.path.exists(bid_dir):
@@ -426,7 +418,7 @@ class ArchiveTools:
                 win_dir = os.path.join(bid_dir, name, "中标文件")
                 if os.path.exists(win_dir) and os.listdir(win_dir):
                     migrations.append(f"建议迁移: {name} -> 项目执行（已中标）")
-        
+
         return migrations
 
 
@@ -503,7 +495,7 @@ class ReportTools:
             f"# 项目总览",
             f"",
             f"> **生成日期**: {today}",
-            f"> **项目总数**: {projects['count']}（投标 {projects['phase_counts'].get('项目投标', 0)} / 执行 {projects['phase_counts'].get('项目执行', 0)} / 归档 {projects['phase_counts'].get('项目归档', 0)}）",
+            f"> **项目总数**: {projects['count']}（投标 {projects['phase_counts'].get('项目投标', 0)} / 弃标 {projects['phase_counts'].get('项目弃标', 0)} / 丢标 {projects['phase_counts'].get('项目丢标', 0)} / 执行 {projects['phase_counts'].get('项目执行', 0)}）",
             f"",
             "---",
             "",

@@ -65,14 +65,15 @@ class ContractAliasTests(unittest.TestCase):
     def test_ledger_namespace_exposes_authoritative_phase_and_field_metadata(self):
         from contracts.ledger_namespace import (
             LEDGER_FIELDS,
-            LEGACY_PHASE_ALIASES,
             PHASE_LABELS,
             get_en_name,
             get_zh_name,
         )
 
-        self.assertEqual(PHASE_LABELS, ["项目投标", "项目执行", "项目丢标"])
-        self.assertEqual(LEGACY_PHASE_ALIASES["项目归档"], "项目丢标")
+        self.assertEqual(
+            PHASE_LABELS,
+            ["项目投标", "项目弃标", "项目丢标", "项目执行"],
+        )
         self.assertGreaterEqual(len(LEDGER_FIELDS), 18)
         self.assertEqual(get_zh_name("project_name"), "项目名称")
         self.assertEqual(get_en_name("投标截止"), "bid_deadline")

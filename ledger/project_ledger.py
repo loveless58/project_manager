@@ -142,20 +142,10 @@ class ProjectLedger:
             "timestamp": now,
             "actor": event.get("actor", "archive_executor"),
             "skill": event.get("skill", "data_cleaning_file_organization"),
-            "source_type": "archive_event",
+            "source_type": "archive_manifest",
             "fields": [],
             "decisions": {},
         })
-
-        normalized_event = {
-            "schema_version": "project_archive.event.v1",
-            "timestamp": now,
-            "project_name": project_name,
-            **event,
-        }
-        events_path = os.path.join(asset_dir, "archive_events.jsonl")
-        with open(events_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(normalized_event, ensure_ascii=False) + "\n")
 
         manifest_path = os.path.join(asset_dir, "archive_manifest.json")
         manifest = self._load_archive_manifest(manifest_path, project_name)
@@ -180,7 +170,6 @@ class ProjectLedger:
             "asset_dir": asset_dir,
             "state_path": state_path,
             "markdown_path": markdown_path,
-            "archive_events_path": events_path,
             "archive_manifest_path": manifest_path,
             "business_judgement": state["business_judgement"],
         }

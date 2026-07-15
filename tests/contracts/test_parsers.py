@@ -281,14 +281,9 @@ class TestLedgerNamespace:
     """账本字段命名空间测试。"""
 
     def test_phase_labels_authoritative(self):
-        """phase 权威命名 = 项目投标/项目执行/项目丢标（用户拍板）。"""
+        """phase 权威命名 = 项目投标/项目弃标/项目丢标/项目执行（用户拍板，2026-07-15 5→4 全口径统一）。"""
         from contracts.ledger_namespace import PHASE_LABELS
-        assert PHASE_LABELS == ["项目投标", "项目执行", "项目丢标"]
-
-    def test_legacy_phase_alias(self):
-        """旧 index.json 用 '项目归档' → 映射到 '项目丢标'。"""
-        from contracts.ledger_namespace import LEGACY_PHASE_ALIASES
-        assert LEGACY_PHASE_ALIASES["项目归档"] == "项目丢标"
+        assert PHASE_LABELS == ["项目投标", "项目弃标", "项目丢标", "项目执行"]
 
     def test_field_metadata_completeness(self):
         """LEDGER_FIELDS 至少 18 个字段（基于 28 项目样本）。"""

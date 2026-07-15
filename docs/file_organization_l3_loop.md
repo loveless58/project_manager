@@ -63,10 +63,8 @@ prepare_file_organization_run
 - `archive_execution_gate.json`
 
 只有 gate 通过后才会写：
-
 - `archive_result.json`
 - 更新 `run_report.md`
-- 根据归档结果写项目归档事件 ledger
 
 ## 权限边界
 
@@ -82,7 +80,7 @@ prepare_file_organization_run
 
 会产生真实外部副作用的步骤：
 
-- `execute_archive_plan(run_id, confirmed=True)`：在 `archive_execution_gate.json` 通过后才移动文件，并写归档事件。
+- `execute_archive_plan(run_id, confirmed=True)`：在 `archive_execution_gate.json` 通过后才移动文件，并写项目总览.md。
 
 阻断条件：
 

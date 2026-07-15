@@ -287,11 +287,12 @@ class TestDataCleaningOcrProvider(unittest.TestCase):
             result = DataCleaningTools(workspace_dir=td).prepare_file_organization_run([source_path])
 
             self.assertEqual(result["status"], "success")
-            self.assertEqual(result["archive_actions"][0]["status"], "ready")
+            self.assertEqual(result["archive_actions"][0]["status"], "needs_review")
             self.assertEqual(result["archive_actions"][0]["project_name"], "project_manager")
             self.assertEqual(result["archive_actions"][0]["document_type"], "项目治理文档")
-            self.assertEqual(result["archive_actions"][0]["blockers"], [])
-            self.assertIn(os.path.join("项目归档", "project_manager", "原始文件"), result["archive_actions"][0]["target_dir"])
+            self.assertIn("pm_internal_archive_pending_redesign", result["archive_actions"][0]["blockers"])
+            self.assertIsNone(result["archive_actions"][0]["target_dir"])
+            self.assertIsNone(result["archive_actions"][0]["target_path"])
 
 
 if __name__ == "__main__":

@@ -2382,19 +2382,32 @@ class DataCleaningTools:
         document_type = decision.get("document_type") or extracted.get("document_type") or "未分类"
         target_dir = decision["target_dir"]
         target_path = decision["target_path"]
-        proposed_name = os.path.basename(target_path)
         project_name = decision.get("subject_name") or project_name
         blockers = list(decision.get("blockers", []))
         fact_gate = extracted.get("business_fact_gate") or {}
         if fact_gate.get("blocked_reason"):
             decision.setdefault("reasons", []).append(fact_gate["blocked_reason"])
+
+        if decision.get("archive_phase") is None:
+            # archive_decision 返回了未决标记（如 PM 内部文档归档待重做），
+            # target_dir / target_path 暂时为 None，等 phase 重设计后再算。
+            proposed_name = ""
+            target_abs = ""
+            already_archived = False
+        else:
+            proposed_name = os.path.basename(target_path)
+            target_abs = os.path.normcase(os.path.abspath(target_path))
+
         source_abs = os.path.normcase(os.path.abspath(source_file))
-        target_abs = os.path.normcase(os.path.abspath(target_path))
-        already_archived = source_abs == target_abs
+        if target_path is not None:
+            already_archived = source_abs == target_abs
+            if os.path.exists(target_path) and not already_archived:
+                blockers.append("target_exists")
+        else:
+            already_archived = False
+
         if not os.path.exists(source_file):
             blockers.append("source_missing")
-        if os.path.exists(target_path) and not already_archived:
-            blockers.append("target_exists")
         return {
             "schema_version": "archive_action.v1",
             "run_id": run_id,

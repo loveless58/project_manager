@@ -19,23 +19,27 @@ def evaluate_archive_decision(
     fields = extracted.get("fields") or {}
 
     if _is_project_manager_internal_document(filename, text):
-        return _decision(
-            source_file=source_file,
-            subject_type="internal_project",
-            subject_name=INTERNAL_PROJECT_NAME,
-            archive_phase="项目归档",
-            document_type="项目治理文档",
-            confidence=0.86,
-            project_files_dir=project_files_dir,
-            blockers=[],
-            human_review_required=False,
-            reasons=["matched_project_manager_internal_document"],
-        )
+        # TODO: PM 内部文档归档 phase 待重新设计 (2026-07-15)
+        # 原"项目归档"作为业务状态删除后，这里临时返回未决标记，
+        # 避免 PM 内部文档被错误归档到业务项目目录。
+        return {
+            "schema_version": "archive_decision.v1",
+            "subject_type": "internal_project",
+            "subject_name": INTERNAL_PROJECT_NAME,
+            "archive_phase": None,
+            "document_type": "项目治理文档",
+            "confidence": 0.0,
+            "target_dir": None,
+            "target_path": None,
+            "blockers": ["pm_internal_archive_pending_redesign"],
+            "human_review_required": True,
+            "reasons": ["pm_internal_archive_needs_redesign"],
+        }
 
     project_name = fields.get("project_name") or ""
     if not project_name and filename == "项目记录.md":
         parent_name = Path(source_file).parent.name
-        if parent_name and parent_name not in {"项目投标", "项目执行", "项目丢标"}:
+        if parent_name and parent_name not in {"项目投标", "项目弃标", "项目丢标", "项目执行"}:
             project_name = parent_name
 
     archive_phase = _archive_phase_for_bid_project(source_file, fields, business_judgement)

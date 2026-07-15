@@ -29,11 +29,12 @@ class TestArchiveDecision(unittest.TestCase):
             self.assertEqual(decision["schema_version"], "archive_decision.v1")
             self.assertEqual(decision["subject_type"], "internal_project")
             self.assertEqual(decision["subject_name"], "project_manager")
-            self.assertEqual(decision["archive_phase"], "项目归档")
+            self.assertIsNone(decision["archive_phase"])
             self.assertEqual(decision["document_type"], "项目治理文档")
-            self.assertEqual(decision["blockers"], [])
-            self.assertFalse(decision["human_review_required"])
-            self.assertIn(os.path.join("项目归档", "project_manager", "原始文件"), decision["target_dir"])
+            self.assertIn("pm_internal_archive_pending_redesign", decision["blockers"])
+            self.assertTrue(decision["human_review_required"])
+            self.assertIsNone(decision["target_dir"])
+            self.assertIsNone(decision["target_path"])
 
     def test_unknown_business_document_keeps_unknown_project_blocker(self):
         from business_rules.archive_decision import evaluate_archive_decision
