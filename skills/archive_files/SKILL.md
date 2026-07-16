@@ -1,6 +1,6 @@
 ---
 name: archive_files
-version: 0.1.0
+version: 0.2.0
 description: |
   文件归档能力模块。负责评估文件归档动作、执行文件移动、生成归档清单。
   不写项目账本（属于 ledger skill），不调 CloudCC/CRM（属于 crm skill），
@@ -47,6 +47,18 @@ description: |
 3. **execute 必须等 execution_gate 通过**才能移动文件
 4. **capability_request 不符合 schema → exit 3**（untrusted request）
 5. **archive_phase 必须是 4 状态之一**（项目投标/项目弃标/项目丢标/项目执行）
+6. **LLM 通用兜底仅在业务知识库真正缺失时触发**（`reason ∈ {knowledge_base_missing, knowledge_base_no_match}`）；`knowledge_base_low_confidence` 不触发 LLM，避免噪声→幻觉
+
+## 业务知识库（v0.2.0 新增）
+
+物理位置：`<项目根>/business_knowledge/*.md`
+
+三层 fallback（按 `scripts/build_archive_decision.py` 实现）：
+1. 业务知识库（LLM 读 md 总结）—— 高置信度（≥0.7）直接用
+2. 硬编码规则（`business_rules/archive_decision.py`）—— 置信度 ≥0.5 时用
+3. LLM 通用兜底 —— 仅在知识库缺失/无结果时触发
+
+边界约束（硬规则 #6）：低置信度（`kb_low_confidence`）走硬编码，**不触发 LLM 兜底**，避免知识库噪声被 LLM 放大成幻觉。
 
 ## 软规则
 
