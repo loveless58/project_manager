@@ -1,0 +1,87 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "archive_action",
+  "description": "archive_files skill 的单文件归档动作决策（archive_action.v1）。由 build_archive_decision.py 输出，写入 archive_manifest.json。",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "status",
+    "source_file",
+    "reason"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "archive_action.v1"
+    },
+    "run_id": {
+      "type": "string",
+      "description": "本次 archive_files run 的唯一标识（prepare_run_package.py 生成）"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["already_archived", "ready", "needs_review"],
+      "description": "归档动作的最终状态"
+    },
+    "source_file": {
+      "type": "string",
+      "description": "源文件的绝对路径"
+    },
+    "project_name": {
+      "type": "string",
+      "description": "归档目标项目名"
+    },
+    "document_type": {
+      "type": "string",
+      "description": "文件类型（业务判断或'未分类'）"
+    },
+    "proposed_name": {
+      "type": "string",
+      "description": "建议的归档文件名"
+    },
+    "target_dir": {
+      "type": ["string", "null"],
+      "description": "归档目标目录"
+    },
+    "target_path": {
+      "type": ["string", "null"],
+      "description": "归档目标完整路径"
+    },
+    "blockers": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "阻碍归档动作的标记列表（target_exists / source_missing / human_review_recommended 等）"
+    },
+    "business_judgement": {
+      "type": "object",
+      "description": "业务判断层（来自 ledger skill）的原始输出"
+    },
+    "archive_decision": {
+      "type": "object",
+      "description": "evaluate_archive_decision 的原始输出（archive_decision.v1）"
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "success",
+        "knowledge_base_missing",
+        "knowledge_base_no_match",
+        "knowledge_base_low_confidence",
+        "human_review_required",
+        "internal_document_pending_redesign",
+        "target_exists",
+        "source_missing"
+      ],
+      "description": "归档决策的原因标记。LLM 通用能力兜底仅在 knowledge_base_missing 或 knowledge_base_no_match 时触发。"
+    },
+    "knowledge_base_used": {
+      "type": ["boolean", "null"],
+      "description": "本次判断是否使用了业务知识库（PageIndex）"
+    },
+    "pageindex_query_id": {
+      "type": ["string", "null"],
+      "description": "PageIndex 业务知识库查询 ID（用于追溯）"
+    }
+  }
+}
