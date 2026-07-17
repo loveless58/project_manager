@@ -315,14 +315,41 @@ def _resolve_final_reason(
     final: Dict[str, Any],
     blockers: List[str],
 ) -> str:
-    """根据 blockers 确定最终 reason（blockers 优先于 fallback reason）。"""
+    """根据决策层结果 + blockers 确定最终 reason。
+
+    决策层语义:
+    - reason=success → 业务决策成功(可能文件本身有问题,但决策有效)
+    - reason=knowledge_base_low_confidence → 知识库低置信度(决策层不确定)
+    - reason=knowledge_base_missing / no_match + LLM 兜底也失败 → 所有路径都失败
+
+    blockers 语义(纯文件系统层):
+    - source_missing → 源文件不存在
+    - target_exists → 目标路径已存在
+    - human_review_recommended → 业务层建议人核
+
+    优先级: 决策层成功 → 用决策层 reason;决策层失败 + 文件系统错 → 提升为文件系统 reason。
+    """
+    final_reason = final.get("reason", "success")
+    final_phase = final.get("phase")
+    llm_fallback_used = final.get("llm_fallback_used", False)
+
+    # 决策层真成功 → reason=success
+    if final_reason == "success":
+        return "success"
+
+    # 决策层知识库低置信度(LLM 兜底未触发)→ 保留
+    if final_reason == "knowledge_base_low_confidence" and not llm_fallback_used:
+        return "knowledge_base_low_confidence"
+
+    # 决策层失败:LLM 兜底触发但未救回 / kb_missing / kb_no_match
+    # → 提升为文件系统 reason(如果有 blocker)
     if "source_missing" in blockers:
         return "source_missing"
     if "target_exists" in blockers:
         return "target_exists"
     if blockers:
         return "human_review_required"
-    return final.get("reason", "success")
+    return final_reason
 
 
 def build_archive_action(
