@@ -1,5 +1,6 @@
 """Optional OCR providers for project-level document extraction."""
 
 from .easyocr_provider import EasyOcrProvider
+from .rapidocr_provider import RapidOcrProvider
 
-__all__ = ["EasyOcrProvider"]
+__all__ = ["EasyOcrProvider", "RapidOcrProvider"]
