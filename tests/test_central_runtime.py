@@ -38,6 +38,7 @@ print(json.dumps(result, ensure_ascii=False))
         cwd=PROJECT_ROOT,
         env=_central_environment(tmp_path / "runtime"),
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )
@@ -69,6 +70,7 @@ raise SystemExit("expected legacy workspace capability error")
         cwd=PROJECT_ROOT,
         env=_central_environment(tmp_path / "runtime"),
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )
@@ -97,6 +99,7 @@ print(json.dumps(result, ensure_ascii=False))
         cwd=PROJECT_ROOT,
         env=_central_environment(tmp_path / "runtime"),
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )
@@ -129,6 +132,7 @@ raise SystemExit("expected legacy workspace capability error")
         cwd=PROJECT_ROOT,
         env=_central_environment(tmp_path / "runtime"),
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )

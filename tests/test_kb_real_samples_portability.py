@@ -39,6 +39,7 @@ def test_real_sample_tool_requires_explicit_sample_root():
         env=environment,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
 
@@ -57,6 +58,7 @@ def test_real_sample_tool_fails_when_manifest_files_are_missing():
             env=environment,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
         )
 

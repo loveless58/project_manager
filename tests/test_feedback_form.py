@@ -168,6 +168,7 @@ class FeedbackFormTests(unittest.TestCase):
                     "--prepare-only",
                 ],
                 text=True,
+                encoding="utf-8",
                 capture_output=True,
                 check=False,
             )

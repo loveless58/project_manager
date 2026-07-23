@@ -163,6 +163,7 @@ class TestDataCleaningLoopPackage(unittest.TestCase):
             [sys.executable, "-X", "utf8", "-B", "governance/validate.py", "loop-packages"],
             cwd=PROJECT_DIR,
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
         )

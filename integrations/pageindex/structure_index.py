@@ -13,6 +13,18 @@ from .pageindex_client import PageIndexClient, PageIndexError
 ClientFactory = Callable[[str], PageIndexClient]
 _PROVIDER_UNAVAILABLE = "PageIndex provider is unavailable."
 _PROVIDER_FAILED = "PageIndex provider failed."
+_UNAVAILABLE_RESULT_CODES = {"PAGEINDEX.CONFIG.MISSING"}
+_UNAVAILABLE_RESULT_PREFIX = "PAGEINDEX.RUNTIME."
+
+
+def _is_provider_unavailable_result(raw: object) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    error_code = raw.get("error_code")
+    return isinstance(error_code, str) and (
+        error_code in _UNAVAILABLE_RESULT_CODES
+        or error_code.startswith(_UNAVAILABLE_RESULT_PREFIX)
+    )
 
 
 class PageIndexStructureIndex:
@@ -66,6 +78,15 @@ class PageIndexStructureIndex:
                 _PROVIDER_UNAVAILABLE,
             )
 
+        if _is_provider_unavailable_result(raw):
+            return StructureIndexResult(
+                "blocked",
+                self.name,
+                "",
+                (),
+                "INDEX.PROVIDER_UNAVAILABLE",
+                _PROVIDER_UNAVAILABLE,
+            )
         if raw.get("status") != "success":
             return StructureIndexResult(
                 "failed",

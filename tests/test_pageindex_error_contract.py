@@ -171,3 +171,69 @@ def test_structure_index_never_forwards_provider_error_text(tmp_path):
     assert result.error == "PageIndex provider failed."
     _assert_sanitized(probe, provider_error, "alice", SENSITIVE_ENDPOINT)
     _assert_sanitized(result, provider_error, "alice", SENSITIVE_ENDPOINT)
+
+
+def test_real_missing_pageindex_runtime_is_blocked_by_adapter_for_probe_and_index(
+    tmp_path,
+):
+    """A real client runtime failure is unavailable, not a provider execution failure."""
+    from integrations.pageindex.structure_index import PageIndexStructureIndex
+
+    source_path = tmp_path / "existing.pdf"
+    source_path.touch()
+    adapter = PageIndexStructureIndex(tmp_path / "missing-pageindex-runtime")
+    request = StructureIndexRequest(
+        "dv-1", "hash-1", str(source_path), "application/pdf"
+    )
+
+    probe = adapter.probe()
+    result = adapter.index(request)
+
+    assert probe.status == "blocked"
+    assert result.status == "blocked"
+    assert result.error_code == "INDEX.PROVIDER_UNAVAILABLE"
+    assert result.error == "PageIndex provider is unavailable."
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        "not-a-document",
+        {"doc_name": "report", "structure": {}},
+        {"doc_name": "report", "structure": ["not-a-node"]},
+        {"doc_name": "report", "structure": [{"nodes": "not-a-list"}]},
+        {"doc_name": "report", "structure": [{"nodes": [{"nodes": [7]}]}]},
+        {"doc_name": 7, "structure": []},
+    ],
+)
+def test_invalid_pageindex_result_schema_is_stable_sanitized_and_maps_to_provider_failed(
+    tmp_path, monkeypatch, payload
+):
+    from integrations.pageindex.structure_index import PageIndexStructureIndex
+
+    client = _runtime_client(tmp_path)
+    source_path = tmp_path / "Documents" / "private.pdf"
+    source_path.parent.mkdir()
+    source_path.touch()
+    result_path = Path(client.pageindex_dir) / "results" / "private_structure.json"
+    result_path.parent.mkdir()
+    result_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 0, "", ""),
+    )
+
+    raw = client.index_pdf(str(source_path))
+    adapter = PageIndexStructureIndex(client.pageindex_dir)
+    mapped = adapter.index(
+        StructureIndexRequest("dv-1", "hash-1", str(source_path), "application/pdf")
+    )
+
+    assert raw["status"] == "failed"
+    assert raw["error_code"] == "PAGEINDEX.RESULT.INVALID_SCHEMA"
+    assert raw["error"] == "PageIndex structure result has an invalid schema."
+    assert mapped.status == "failed"
+    assert mapped.error_code == "INDEX.PROVIDER_FAILED"
+    _assert_sanitized(raw, "private", "not-a-document", "not-a-node", "not-a-list")

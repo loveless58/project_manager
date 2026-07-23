@@ -319,13 +319,13 @@ def _skills_prompt_text() -> str:
 def _make_api_llm():
     """构建真实 LLM 适配器。需要环境变量 LLM_API_KEY。"""
     api_key = os.getenv("LLM_API_KEY")
-    base_url = resolve_llm_base_url(required=True)
-    model = os.getenv("LLM_MODEL", "minimax-m3-mxfp8")
     if not api_key:
         raise RuntimeError(
             "LLM_API_KEY 未设置。如需真实 LLM 驱动，请设置环境变量；"
             "如需测试，请使用 planner_mode='rule'。"
         )
+    base_url = resolve_llm_base_url(required=True)
+    model = os.getenv("LLM_MODEL", "minimax-m3-mxfp8")
     return APIAdapter(
         model_name=model,
         api_key=api_key,

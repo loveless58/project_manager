@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Mapping
 import subprocess
 import time
 import uuid
@@ -46,6 +47,9 @@ _ERROR_MESSAGES = {
     ),
     "PAGEINDEX.RESULT.READ_FAILED": "PageIndex structure result could not be read.",
     "PAGEINDEX.RESULT.INVALID_JSON": "PageIndex structure result is invalid.",
+    "PAGEINDEX.RESULT.INVALID_SCHEMA": (
+        "PageIndex structure result has an invalid schema."
+    ),
     "PAGEINDEX.CONTENT.PDF_NOT_FOUND": "PDF file not found.",
     "PAGEINDEX.CONTENT.READ_FAILED": "PDF content could not be read.",
 }
@@ -248,15 +252,43 @@ class PageIndexClient:
         except json.JSONDecodeError:
             return self._failed("PAGEINDEX.RESULT.INVALID_JSON", elapsed)
 
+        if not self._has_valid_result_schema(data):
+            return self._failed("PAGEINDEX.RESULT.INVALID_SCHEMA", elapsed)
+
+        doc_name = data.get("doc_name")
+        if doc_name is None:
+            doc_name = source_name
         return {
             "status": "success",
             "engine": "pageindex",
-            "doc_name": data.get("doc_name", source_name),
+            "doc_name": doc_name,
             "doc_id": str(uuid.uuid4()),
             "structure": data.get("structure", []),
             "structure_json_path": structure_json_path,
             "elapsed_seconds": elapsed,
         }
+
+    @classmethod
+    def _has_valid_result_schema(cls, data: Any) -> bool:
+        """Validate only the JSON fields consumed by the public client result."""
+        if not isinstance(data, Mapping):
+            return False
+        doc_name = data.get("doc_name")
+        if doc_name is not None and not isinstance(doc_name, str):
+            return False
+        structure = data.get("structure", [])
+        return isinstance(structure, list) and cls._has_valid_nodes(structure)
+
+    @classmethod
+    def _has_valid_nodes(cls, nodes: List[Any]) -> bool:
+        for node in nodes:
+            if not isinstance(node, Mapping):
+                return False
+            if "nodes" in node:
+                children = node["nodes"]
+                if not isinstance(children, list) or not cls._has_valid_nodes(children):
+                    return False
+        return True
 
     def get_page_content(self, pdf_path: str, pages: str) -> List[Dict[str, Any]]:
         """Read PDF text without requiring a PageIndex CLI environment."""

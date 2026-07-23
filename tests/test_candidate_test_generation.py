@@ -97,6 +97,7 @@ class CandidateTestGenerationTests(unittest.TestCase):
                 completed = subprocess.run(
                     [sys.executable, "-X", "utf8", "-B", draft_path],
                     text=True,
+                    encoding="utf-8",
                     capture_output=True,
                     check=False,
                 )

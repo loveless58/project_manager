@@ -22,6 +22,7 @@ assert not any(name == "integrations" or name.startswith("integrations.") for na
     completed = subprocess.run(
         [sys.executable, "-X", "utf8", "-c", script],
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )

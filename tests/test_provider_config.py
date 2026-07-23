@@ -76,6 +76,5 @@ def test_archive_llm_fallback_reports_stable_missing_url(monkeypatch):
     result = archive._llm_general_fallback("proposal.pdf", None)
 
     assert result["llm_fallback_used"] is False
-    assert result["llm_error"] == (
-        "PROJECT_MANAGER_LLM_BASE_URL is required when LLM is enabled"
-    )
+    assert result["llm_error"] == "ARCHIVE.LLM.REQUEST_FAILED"
+    assert result["reasoning"] == "LLM request failed."

@@ -31,6 +31,8 @@ BUSINESS_KNOWLEDGE_DIR = Path(__file__).resolve().parents[3] / "business_rules" 
 # 模型和超时可按归档能力覆盖；endpoint 由统一 provider 配置解析。
 _LLM_MODEL = os.getenv("ARCHIVE_LLM_MODEL", "openai/minimax-m3")
 _LLM_TIMEOUT = int(os.getenv("ARCHIVE_LLM_TIMEOUT", "10"))
+_LLM_REQUEST_FAILED = "ARCHIVE.LLM.REQUEST_FAILED"
+_LLM_REQUEST_FAILED_MESSAGE = "LLM request failed."
 
 
 def _path_parts(source_path: str) -> List[str]:
@@ -165,13 +167,14 @@ REASONING: <一句话理由>
             "reason": "knowledge_base_missing",
             "reasoning": "litellm 未安装",
         }
-    except Exception as e:
+    except Exception:
         return {
             "knowledge_base_used": False,
             "phase": "unknown",
             "confidence": 0.0,
             "reason": "knowledge_base_missing",
-            "reasoning": f"LLM 调用异常: {e}",
+            "reasoning": _LLM_REQUEST_FAILED_MESSAGE,
+            "llm_error": _LLM_REQUEST_FAILED,
         }
 
 
@@ -229,13 +232,13 @@ REASONING: <一句话理由>
             "llm_fallback_used": True,
             "reasoning": reasoning,
         }
-    except Exception as e:
+    except Exception:
         return {
             "phase": "unknown",
             "confidence": 0.0,
             "llm_fallback_used": False,
-            "llm_error": str(e),
-            "reasoning": "",
+            "llm_error": _LLM_REQUEST_FAILED,
+            "reasoning": _LLM_REQUEST_FAILED_MESSAGE,
         }
 
 
