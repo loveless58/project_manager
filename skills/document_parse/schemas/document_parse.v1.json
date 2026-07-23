@@ -1,0 +1,111 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://project_manager.local/schemas/document_parse.v1.json",
+  "title": "DocumentParseResult",
+  "description": "文档解析结果契约 — skill document_parse 的标准输出",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "status",
+    "source_type",
+    "source_path",
+    "file_type",
+    "executor_used",
+    "executor_implementation_status",
+    "parse_intent",
+    "extracted_data",
+    "business_judgement",
+    "validation",
+    "reason",
+    "knowledge_base_used",
+    "elapsed_seconds"
+  ],
+  "properties": {
+    "schema_version": {"const": "document_parse.v1"},
+    "run_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["success", "needs_review", "blocked"]},
+    "source_type": {"enum": ["file", "url"]},
+    "source_path": {"type": "string", "minLength": 1},
+    "file_type": {"type": "string"},
+    "executor_used": {
+      "enum": ["docx", "xlsx", "pdf", "wps", "url", "unknown"]
+    },
+    "executor_implementation_status": {"enum": ["implemented", "stub"]},
+    "parse_intent": {
+      "enum": ["structured_business_fields", "raw_content", "metadata_only"]
+    },
+    "extracted_data": {
+      "type": "object",
+      "properties": {
+        "paragraphs": {"type": "array", "items": {"type": "string"}},
+        "tables": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {"type": "string"}
+            }
+          }
+        },
+        "sheets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "rows"],
+            "properties": {
+              "name": {"type": "string"},
+              "rows": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "items": {"type": "string"}
+                }
+              }
+            }
+          }
+        },
+        "metadata": {"type": "object"},
+        "raw_text": {"type": "string"}
+      }
+    },
+    "business_judgement": {
+      "type": "object",
+      "properties": {
+        "category": {"type": "string"},
+        "extracted_fields": {"type": "object"},
+        "confidence": {"enum": ["high", "medium", "low"]},
+        "rule_source": {
+          "enum": ["knowledge_base", "hard_code", "llm", "none"]
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "required": ["schema_valid", "required_fields_present", "missing_fields", "warnings"],
+      "properties": {
+        "schema_valid": {"type": "boolean"},
+        "required_fields_present": {"type": "boolean"},
+        "missing_fields": {"type": "array", "items": {"type": "string"}},
+        "warnings": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "blockers": {"type": "array", "items": {"type": "string"}},
+    "reason": {
+      "enum": [
+        "success",
+        "knowledge_base_no_match",
+        "knowledge_base_low_confidence",
+        "executor_not_implemented",
+        "human_review_required",
+        "parse_error",
+        "source_missing",
+        "schema_invalid"
+      ]
+    },
+    "knowledge_base_used": {"type": "boolean"},
+    "elapsed_seconds": {"type": "number", "minimum": 0}
+  },
+  "additionalProperties": false
+}
