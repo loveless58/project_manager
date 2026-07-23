@@ -8,6 +8,7 @@ from .models import (
     StructureIndexResult,
 )
 from .ports import DocumentStore, ProjectionWriter, Repository, StructureIndex, UnitOfWork
+from .registry import AdapterKind, AdapterRegistry, AdapterRegistryError
 from .settings import (
     AppSettings,
     DatabaseSettings,
@@ -17,6 +18,9 @@ from .settings import (
 )
 
 __all__ = [
+    "AdapterKind",
+    "AdapterRegistry",
+    "AdapterRegistryError",
     "AppSettings",
     "CapabilityReport",
     "DatabaseSettings",
