@@ -9,10 +9,11 @@ from pathlib import Path
 import re
 import subprocess
 from typing import Iterable, Iterator, List, Mapping, Optional
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 
 _HTTP_URL = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
+_FILE_URI = re.compile(r"file:[^\s<>\"'`]+", re.IGNORECASE)
 _RFC1918_NETWORKS = (
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
@@ -43,6 +44,7 @@ _MANAGED_TEXT_SUFFIXES = {
     ".py",
     ".sh",
     ".sql",
+    ".swift",
     ".toml",
     ".tsv",
     ".txt",
@@ -78,6 +80,10 @@ class RepositoryHygieneResult:
         yield self.errors
         yield self.warnings
         yield self.findings
+
+
+class _ManagedTextDecodeError(ValueError):
+    """Managed text uses an unsupported or unsafe decoded representation."""
 
 
 def _git_environment(project_root: Path) -> Mapping[str, str]:
@@ -131,11 +137,17 @@ def _is_managed_text(relative_path: str) -> bool:
 
 
 def _decode_managed_text(payload: bytes) -> str:
+    if payload.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        raise _ManagedTextDecodeError("UTF-32 is not a managed text encoding")
     if payload.startswith(codecs.BOM_UTF8):
-        return payload.decode("utf-8-sig")
-    if payload.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
-        return payload.decode("utf-16")
-    return payload.decode("utf-8")
+        text = payload.decode("utf-8-sig")
+    elif payload.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        text = payload.decode("utf-16")
+    else:
+        text = payload.decode("utf-8")
+    if "\0" in text:
+        raise _ManagedTextDecodeError("managed text contains a NUL character")
+    return text
 
 
 def _non_target_is_binary(payload: bytes) -> bool:
@@ -157,6 +169,32 @@ def _contains_rfc1918_url(text: str) -> bool:
             continue
         if isinstance(address, ipaddress.IPv4Address) and any(
             address in network for network in _RFC1918_NETWORKS
+        ):
+            return True
+    return False
+
+
+def _overlaps_http_url(match: re.Match[str], http_spans: List[tuple[int, int]]) -> bool:
+    start, end = match.span()
+    return any(start < http_end and end > http_start for http_start, http_end in http_spans)
+
+
+def _contains_personal_path(text: str) -> bool:
+    http_spans = [match.span() for match in _HTTP_URL.finditer(text)]
+    for pattern in (_POSIX_PERSONAL_PATH, _WINDOWS_PERSONAL_PATH):
+        if any(
+            not _overlaps_http_url(match, http_spans)
+            for match in pattern.finditer(text)
+        ):
+            return True
+
+    for match in _FILE_URI.finditer(text):
+        try:
+            uri_path = unquote(urlsplit(match.group(0)).path)
+        except ValueError:
+            continue
+        if _POSIX_PERSONAL_PATH.search(uri_path) or _WINDOWS_PERSONAL_PATH.search(
+            uri_path
         ):
             return True
     return False
@@ -206,13 +244,13 @@ def validate_repository_hygiene(
 
         try:
             text = _decode_managed_text(payload)
-        except UnicodeDecodeError:
+        except (UnicodeDecodeError, _ManagedTextDecodeError):
             decode_error_count += 1
             findings.append(
                 _finding(
                     "REPO-TEXT-DECODE",
                     normalized,
-                    "managed tracked text must be UTF-8 or BOM-marked UTF-16",
+                    "managed text must be UTF-8 or BOM-marked UTF-16 without NUL",
                 )
             )
             continue
@@ -222,7 +260,7 @@ def validate_repository_hygiene(
             findings.append(
                 _finding("REPO-RFC1918-URL", normalized, "RFC1918 URL is forbidden")
             )
-        if _POSIX_PERSONAL_PATH.search(text) or _WINDOWS_PERSONAL_PATH.search(text):
+        if _contains_personal_path(text):
             findings.append(
                 _finding(
                     "REPO-PERSONAL-PATH",
