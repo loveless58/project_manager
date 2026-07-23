@@ -181,6 +181,12 @@ class PageIndexClient:
         try:
             with open(structure_json_path, "r", encoding="utf-8") as source:
                 data = json.load(source)
+        except UnicodeError:
+            return self._failed(
+                "PageIndex structure result could not be decoded.", elapsed
+            )
+        except OSError:
+            return self._failed("PageIndex structure result could not be read.", elapsed)
         except json.JSONDecodeError as exc:
             return self._failed(f"structure.json could not be parsed: {exc}", elapsed)
 
