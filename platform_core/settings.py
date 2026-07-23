@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
@@ -175,6 +176,9 @@ def load_app_settings(
             "PROJECT_MANAGER_DATABASE_DSN",
         )
     )
+
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", dsn_env_var):
+        raise SettingsError("database_dsn_env_var must be a valid environment variable name")
 
     document_store = str(
         _pick(
