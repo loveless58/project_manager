@@ -181,6 +181,7 @@ SKILL.md 描述契约 + 工作流;具体实现在 `scripts/`:
 - **[references/examples/01-bid-contract.md](references/examples/01-bid-contract.md)** — 真实案例:投标合同归档
 - **[references/examples/02-internal-pm-doc.md](references/examples/02-internal-pm-doc.md)** — PM 内部文档(待 redesign)
 - **[references/examples/03-source-missing.md](references/examples/03-source-missing.md)** — 文件缺失场景
+- **[docs/ocr-baseline.md](../../docs/ocr-baseline.md)** — OCR 引擎优先级链 + Vision vs RapidOCR 对比基线 (v0.4.0, 2026-07-23)
 
 ## Known Limitations
 
@@ -198,6 +199,7 @@ SKILL.md 描述契约 + 工作流;具体实现在 `scripts/`:
 
 ## Iteration Log
 
+- **v0.4.0 (2026-07-23)**: OCR 优先级链调整 (Vision → RapidOCR → EasyOCR → Tesseract);PyObjC VNRecognizeTextRequest 中文识别乱码 bug 标记废弃;新增 `integrations/macos_vision_bridge/swift_ocr_bridge` Swift 子进程桥接;实测 Vision 4.62x 快于 RapidOCR (6 份样本 / 44 页)。详见 [docs/ocr-baseline.md](../../docs/ocr-baseline.md)
 - **v0.3.0 (2026-07-17)**: 重写 SKILL.md 为 financial-services 风格;新增 archive_manifest.v1 / capability_request.v1 / capability_result.v1 schema;修复 _resolve_final_reason 决策层/文件系统层语义混淆 bug(4 个失败测试变绿)
 - **v0.2.0 (2026-07-16)**: 三层 fallback 实现 + LLM 边界硬规则
 - **v0.1.0 (2026-07-15)**: skill baseline(build_archive_decision.py + archive_action.schema.json)
