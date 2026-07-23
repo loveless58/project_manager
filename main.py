@@ -29,6 +29,28 @@ from platform_core.composition import build_runtime_adapters
 
 SKILL_TOOL_MAP = build_skill_tool_map()
 SKILL_DESCRIPTIONS = build_skill_descriptions()
+LEGACY_WORKSPACE_SKILLS = frozenset({
+    "data_cleaning_file_organization",
+    "opportunity_management",
+    "project_management",
+})
+
+
+class RuntimeCapabilityError(RuntimeError):
+    """Raised when a selected skill lacks a required runtime capability."""
+
+
+def _resolve_legacy_workspace_for_skill(active_skill: str, app_settings):
+    """Resolve legacy business paths only for skills that still need them."""
+    if active_skill not in LEGACY_WORKSPACE_SKILLS:
+        return None
+    try:
+        return resolve_workspace_config(app_settings=app_settings)
+    except ValueError as exc:
+        raise RuntimeCapabilityError(
+            f"skill {active_skill!r} requires PROJECT_MANAGER_BUSINESS_ROOT "
+            "for legacy workspace capabilities"
+        ) from exc
 
 # ────────────────────────────────────────────
 # 动态导入所有工具模块（避免模块名冲突）
@@ -344,9 +366,13 @@ def run(
 
     app_settings = load_app_settings()
     runtime_adapters = build_runtime_adapters(app_settings)
-    workspace_config = resolve_workspace_config(app_settings=app_settings)
+    workspace_config = _resolve_legacy_workspace_for_skill(active_skill, app_settings)
     effective_data_workspace_dir = data_workspace_dir
     if active_skill == "data_cleaning_file_organization" and effective_data_workspace_dir is None:
+        if workspace_config is None:
+            raise RuntimeCapabilityError(
+                "data_cleaning_file_organization requires a configured legacy workspace"
+            )
         effective_data_workspace_dir = str(workspace_config.data_cleaning_workspace)
 
     # 1. 渐进式披露：先路由 Skill，再只暴露该 Skill 的工具。
@@ -372,7 +398,7 @@ def run(
         return planner.get_response(msgs)
 
     # 4. 运行循环
-    actual_trace_dir = trace_dir or str(workspace_config.logs_dir)
+    actual_trace_dir = trace_dir or str(app_settings.runtime_workspace / "logs")
     os.makedirs(actual_trace_dir, exist_ok=True)
     engine = LoopEngine(
         agent_name="project_manager_agent",

@@ -27,7 +27,7 @@ from typing import Callable, Dict, List, Any, Optional
 from datetime import datetime
 
 from common.file_readiness import probe_readable_file, probe_writable_dir
-from common.workspace_config import default_data_cleaning_workspace, resolve_workspace_config
+from common.workspace_config import resolve_workspace_config
 from agents import AdversarialAgent, AuditAgent
 from business_rules.archive_decision import evaluate_archive_decision
 from business_rules.bid_project_rules import BidProjectRuleEngine
@@ -59,11 +59,7 @@ from ocr import normalize_ocr_result
 from ocr import provider_registry
 
 
-# 工作目录
-WORKSPACE_DIR = default_data_cleaning_workspace()
-RAW_DIR = os.path.join(WORKSPACE_DIR, "00-原始文件（待处理）")
-OCR_DIR = os.path.join(WORKSPACE_DIR, "01-OCR输出（待清洗）")
-CLEANED_DIR = os.path.join(WORKSPACE_DIR, "02-已清洗（结构化数据）")
+# 工作目录在 DataCleaningTools 实例化时按实际路由解析。
 
 # 分类关键词映射（新三层架构：项目投标/项目执行/项目丢标）
 CLASSIFICATION_KEYWORDS = {

@@ -26,10 +26,7 @@ from datetime import datetime
 
 from common.workspace_config import default_opportunity_dir
 
-# 工作目录
-OPPORTUNITY_DIR = default_opportunity_dir()
-BID_NOTICE_DIR = os.path.join(OPPORTUNITY_DIR, "招标公告")
-BID_CONTEXT_DIR = os.path.join(OPPORTUNITY_DIR, "bid_contexts")
+# 工作目录在 OpportunityManagerTools 实例化时按实际路由解析。
 
 
 class OpportunityManagerTools:

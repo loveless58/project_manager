@@ -15,8 +15,7 @@ from common.workspace_config import default_business_root, default_project_files
 
 # ============= 常量配置 =============
 
-PROJECT_BASE_DIR = default_project_files_dir()
-INDEX_PATH = os.path.join(PROJECT_BASE_DIR, "index.json")
+# Legacy workspace paths are resolved only when a project tool is instantiated.
 PHASES = ["项目投标", "项目弃标", "项目丢标", "项目执行"]
 
 ARCHIVE_SUBDIRS = {
