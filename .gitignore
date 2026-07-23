@@ -69,5 +69,10 @@ docs/superpowers/reports/
 # Outer local runtime directory.
 .runtime/
 
+# KB runtime cache (auto-generated from PageIndex index_md).
+# Source of truth: business_rules/document_parse/kb.md (git-tracked).
+# Cache is auto-rebuilt when md mtime changes.
+skills/document_parse/kb_cache.json
+
 # Prevent accidental repo-in-repo copies from sync tools.
 /project_manager/
