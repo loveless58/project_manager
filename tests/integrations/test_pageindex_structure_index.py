@@ -1,3 +1,5 @@
+import subprocess
+
 from platform_core.models import StructureIndexRequest
 from platform_core.ports import StructureIndex
 
@@ -23,6 +25,7 @@ class FakePageIndexClient:
     def index_md(self, source_path):
         return self.index_pdf(source_path)
 
+
 def test_pageindex_adapter_probe_checks_the_client_environment(tmp_path):
     from integrations.pageindex.structure_index import PageIndexStructureIndex
 
@@ -33,6 +36,8 @@ def test_pageindex_adapter_probe_checks_the_client_environment(tmp_path):
 
     assert report.status == "ready"
     assert client.environment_checked is True
+
+
 def test_pageindex_adapter_maps_success_without_exposing_path_as_identity(tmp_path):
     from integrations.pageindex.structure_index import PageIndexStructureIndex
 
@@ -65,6 +70,25 @@ def test_pageindex_adapter_returns_blocked_when_provider_is_unavailable(tmp_path
     result = adapter.index(request)
     assert result.status == "blocked"
     assert result.error_code == "INDEX.PROVIDER_UNAVAILABLE"
+
+
+def test_pageindex_adapter_probe_blocks_when_runtime_file_cannot_start(tmp_path, monkeypatch):
+    from integrations.pageindex.structure_index import PageIndexStructureIndex
+
+    python_bin = tmp_path / ".venv" / "Scripts" / "python.exe"
+    python_bin.parent.mkdir(parents=True)
+    python_bin.touch()
+    (tmp_path / "run_pageindex.py").touch()
+
+    def cannot_start(*args, **kwargs):
+        raise OSError("broken executable")
+
+    monkeypatch.setattr(subprocess, "run", cannot_start)
+    report = PageIndexStructureIndex(tmp_path).probe()
+
+    assert report.status == "blocked"
+    assert report.provider == "pageindex"
+    assert report.reason == "PageIndex runtime probe could not be started."
 
 
 def test_pageindex_adapter_rejects_unsupported_media_type_before_provider_probe(tmp_path):

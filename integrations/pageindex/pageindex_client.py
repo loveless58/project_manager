@@ -24,6 +24,8 @@ class PageIndexError(Exception):
 class PageIndexClient:
     """PageIndex adapter with pure-Python retrieval and traversal helpers."""
 
+    runtime_probe_timeout_seconds = 5
+
     def __init__(
         self,
         pageindex_dir: Optional[str] = None,
@@ -43,17 +45,25 @@ class PageIndexClient:
         self.timeout_seconds = timeout_seconds
 
     def check_environment(self) -> None:
-        """Validate the external runtime required by CLI-backed operations."""
+        """Validate that the external PageIndex runtime can start safely."""
         if not os.path.isfile(self.python_bin):
-            raise PageIndexError(
-                f"PageIndex Python interpreter not found: {self.python_bin}. "
-                f"Create the PageIndex virtual environment in {self.pageindex_dir}."
-            )
+            raise PageIndexError("PageIndex Python interpreter is unavailable.")
         if not os.path.isfile(self.cli_script):
-            raise PageIndexError(
-                f"PageIndex CLI script not found: {self.cli_script}. "
-                "Check that the configured PageIndex repository is complete."
+            raise PageIndexError("PageIndex CLI script is unavailable.")
+        try:
+            process = subprocess.run(
+                [self.python_bin, "--version"],
+                cwd=self.pageindex_dir,
+                capture_output=True,
+                text=True,
+                timeout=min(self.timeout_seconds, self.runtime_probe_timeout_seconds),
             )
+        except subprocess.TimeoutExpired as exc:
+            raise PageIndexError("PageIndex runtime probe timed out.") from exc
+        except (OSError, UnicodeError) as exc:
+            raise PageIndexError("PageIndex runtime probe could not be started.") from exc
+        if process.returncode != 0:
+            raise PageIndexError("PageIndex runtime probe failed.")
 
     def index_pdf(
         self,
@@ -113,7 +123,9 @@ class PageIndexClient:
             "summary_token_threshold",
             "model",
         }
-        self._append_options(command, {key: value for key, value in kwargs.items() if key in supported})
+        self._append_options(
+            command, {key: value for key, value in kwargs.items() if key in supported}
+        )
         return self._run_index(command, md_path)
 
     @staticmethod
@@ -143,7 +155,11 @@ class PageIndexClient:
             )
         except subprocess.TimeoutExpired:
             return self._failed(
-                f"PageIndex timeout ({self.timeout_seconds}s): {source_path}",
+                "PageIndex execution timed out.", round(time.time() - start, 2)
+            )
+        except (OSError, UnicodeError):
+            return self._failed(
+                "PageIndex execution could not be started.",
                 round(time.time() - start, 2),
             )
 

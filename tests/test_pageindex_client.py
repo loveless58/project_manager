@@ -8,6 +8,7 @@ are supplied by the caller.
 
 import json
 import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -37,6 +38,14 @@ class PageIndexSlowTestConfigurationError(RuntimeError):
 def _client() -> PageIndexClient:
     """Create a client for pure/helper tests without probing PageIndex."""
     return PageIndexClient(pageindex_dir=str(Path.cwd()))
+
+
+def _client_with_runtime_files(tmp_path: Path) -> PageIndexClient:
+    python_bin = tmp_path / ".venv" / "Scripts" / "python.exe"
+    python_bin.parent.mkdir(parents=True)
+    python_bin.touch()
+    (tmp_path / "run_pageindex.py").touch()
+    return PageIndexClient(pageindex_dir=str(tmp_path))
 
 
 def validate_slow_test_configuration(environ=None):
@@ -105,6 +114,40 @@ class TestEnvironment(unittest.TestCase):
         configured = str(Path.cwd())
         client = PageIndexClient(pageindex_dir=configured)
         self.assertEqual(client.pageindex_dir, str(Path(configured).resolve()))
+
+
+def test_check_environment_rejects_runtime_that_cannot_start(tmp_path, monkeypatch):
+    client = _client_with_runtime_files(tmp_path)
+
+    def cannot_start(*args, **kwargs):
+        raise OSError("broken executable")
+
+    monkeypatch.setattr(subprocess, "run", cannot_start)
+
+    with pytest.raises(PageIndexError) as error:
+        client.check_environment()
+
+    assert str(error.value) == "PageIndex runtime probe could not be started."
+    assert str(tmp_path) not in str(error.value)
+
+
+def test_index_pdf_returns_stable_failure_when_runtime_cannot_start(tmp_path, monkeypatch):
+    client = _client_with_runtime_files(tmp_path)
+    source_path = tmp_path / "source.pdf"
+    source_path.touch()
+
+    def run(command, **kwargs):
+        if command[-1] == "--version":
+            return subprocess.CompletedProcess(command, 0, "Python 3.12", "")
+        raise OSError("broken executable")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+    result = client.index_pdf(str(source_path))
+
+    assert result["status"] == "failed"
+    assert result["error"] == "PageIndex execution could not be started."
+    assert str(tmp_path) not in result["error"]
 
 
 class TestIndexInputValidation(unittest.TestCase):
