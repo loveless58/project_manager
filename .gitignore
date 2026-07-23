@@ -32,6 +32,8 @@ htmlcov/
 secrets.yaml
 *.pem
 *.key
+config/project-manager.local.json
+config/workspace.local.json
 
 # Runtime traces and local workspaces
 logs/project_manager_*.json

@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Project Manager Agent - Directory Contract",
-  "description": "Runtime directory contract. Business paths are resolved through common.workspace_config instead of legacy Desktop defaults.",
-  "version": "2.0.0",
-  "config_source": "common.workspace_config.resolve_workspace_config",
+  "description": "Runtime paths are resolved by platform_core.settings and mapped per deployment node.",
+  "version": "3.0.0",
+  "config_source": "platform_core.settings.load_app_settings",
   "business_root_env": "PROJECT_MANAGER_BUSINESS_ROOT",
   "workspace_dir_env": "PROJECT_MANAGER_WORKSPACE_DIR",
   "compat_base_dir_env": "LOOP_PROJECT_BASE_DIR",
-  "base_dir_default": "E:\\SynologyDrive\\_project_manager_workspace",
+  "base_dir_default": "${HOME}/ProjectManagerData/.project_manager",
   "required_dirs": {
     "project_files": {
       "path": "项目文件",
@@ -16,14 +16,14 @@
       "optional_subdirs": ["新机会与线索", "公司通用财务"],
       "optional_files": ["index.json"],
       "validation_level": "info",
-      "description": "Business project data root resolved from WorkspaceConfig.business_root. Runtime workspace must not own real archived project files."
+      "description": "Business project data root resolved from AppSettings.business_root. Runtime workspace must not own real archived project files."
     },
     "data_cleaning_workbench": {
       "path": "数据清洗工作台",
       "required_subdirs": ["runs"],
       "optional_subdirs": ["structured_documents", "structured_workbooks"],
       "validation_level": "info",
-      "description": "Data cleaning workbench for run packages and structured outputs. Source files are read from WorkspaceConfig.business_root by default."
+      "description": "Data-cleaning workbench for run packages and structured outputs under the configured runtime workspace."
     },
     "new_opportunities": {
       "path": "新机会与线索",
@@ -31,7 +31,7 @@
       "optional_subdirs": ["bid_contexts"],
       "optional_files": ["商机列表.md", "重复检测记录.md"],
       "validation_level": "info",
-      "description": "Opportunity workbench derived from WorkspaceConfig.opportunity_dir."
+      "description": "Opportunity workbench derived from the configured runtime workspace."
     },
     "agent_state": {
       "path": "state",
@@ -48,8 +48,8 @@
     {
       "id": "DIR-001",
       "level": "info",
-      "check": "workspace paths resolve through common.workspace_config",
-      "fix": "Set PROJECT_MANAGER_BUSINESS_ROOT or PROJECT_MANAGER_WORKSPACE_DIR when defaults do not match this machine."
+      "check": "workspace paths resolve through platform_core.settings",
+      "fix": "Set PROJECT_MANAGER_BUSINESS_ROOT and PROJECT_MANAGER_WORKSPACE_DIR explicitly for this deployment node."
     },
     {
       "id": "DIR-002",

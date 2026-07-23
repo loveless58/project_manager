@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Project Manager Agent - Tool Schema",
-  "description": "37 个工具的 schema 契约。校验注册到 ToolRegistry 的工具参数与文档一致。",
-  "version": "1.0.0",
+  "description": "43 个工具的 schema 契约。校验注册到 ToolRegistry 的工具参数与文档一致。",
+  "version": "1.1.0",
   "tools": {
     "scan_projects": {
       "domain": "project",
@@ -180,6 +180,58 @@
       },
       "required": ["file_paths"]
     },
+    "verify_file_organization_run": {
+      "domain": "data_cleaning",
+      "description": "只读验证已生成的文件整理运行包，写入 adversarial_verification.json",
+      "params": {
+        "run_id": {"type": "string"}
+      },
+      "required": ["run_id"]
+    },
+    "audit_file_organization_run": {
+      "domain": "data_cleaning",
+      "description": "只读审计已生成并验证的文件整理运行包，写入 audit_review.json",
+      "params": {
+        "run_id": {"type": "string"}
+      },
+      "required": ["run_id"]
+    },
+    "prepare_feedback_form": {
+      "domain": "data_cleaning",
+      "description": "为文件整理运行生成可编辑反馈表和人读 Markdown",
+      "params": {
+        "run_id": {"type": "string"}
+      },
+      "required": ["run_id"]
+    },
+    "apply_feedback_form": {
+      "domain": "data_cleaning",
+      "description": "应用已填写的反馈表并可生成候选测试草案，不执行归档",
+      "params": {
+        "run_id": {"type": "string"},
+        "feedback_form": {"type": "object"},
+        "feedback_form_path": {"type": "string"},
+        "generate_tests": {"type": "boolean"}
+      },
+      "required": ["run_id"]
+    },
+    "apply_feedback_decisions": {
+      "domain": "data_cleaning",
+      "description": "标准化并落盘人工批量反馈，生成反馈事件和规则候选，不执行归档",
+      "params": {
+        "run_id": {"type": "string"},
+        "feedback_decisions": {"type": "array"}
+      },
+      "required": ["run_id", "feedback_decisions"]
+    },
+    "generate_candidate_tests": {
+      "domain": "data_cleaning",
+      "description": "将人工反馈生成的 parser/rule candidates 转成运行包内测试草案",
+      "params": {
+        "run_id": {"type": "string"}
+      },
+      "required": ["run_id"]
+    },
     "apply_human_review": {
       "domain": "data_cleaning",
       "description": "应用人工复核修正，将复核结果写入项目总览账本并生成规则候选",
@@ -319,7 +371,7 @@
       "id": "TOOL-001",
       "level": "error",
       "check": "schema 声明的工具必须可注册到 debug_all_tools ToolRegistry；运行时只暴露 active skill 的工具子集",
-      "expected_count": 37
+      "expected_count": 43
     },
     {
       "id": "TOOL-002",

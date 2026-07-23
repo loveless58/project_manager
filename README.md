@@ -1,33 +1,31 @@
 # Project Manager Agent
 
-`project_manager` is a local project-management agent built around one ReAct-style `LoopEngine`, active-skill tool disclosure, structured observations, and auditable project artifacts.
+`project_manager` 是一个本地优先、可演进为中心化部署的项目管理与办公自动化 Agent 平台。当前运行时仍以一个 `LoopEngine` 和按业务 Skill 暴露工具的方式工作；平台基础层已经将路径、数据库和可替换能力收口到显式 Settings 与适配器组合根。
 
-It currently covers four domains:
+当前业务能力覆盖：
 
-- project status, risks, milestones, reports, and local project views
-- data cleaning and file organization into project ledgers
-- opportunity parsing and local bid context preparation
-- controlled CloudCC/CRM read-only checks, drafts, confirmation gates, and readback boundaries
+- 项目状态、风险、里程碑、报告和本地项目视图；
+- 数据清理、文档整理、结构化提取和归档计划；
+- 商机/投标资料解析与本地上下文准备；
+- 受确认门控的 CloudCC/CRM 只读检查、草稿和回读。
 
-## Quick Start
+## 快速开始
 
-Install dependencies:
+安装依赖：
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-Run through `main.run()`:
+在仓库根目录调用：
 
 ```python
-import sys
-sys.path.insert(0, r"E:\Dev\Projects\project_manager")
 from main import run
 
 result = run("今天有什么风险项目", planner_mode="rule")
 ```
 
-Run a file-organization task in an isolated workspace:
+需要整理文件时，请为本次运行显式传入临时工作区；归档仍需经过 `execute_archive_plan(..., confirmed=True)` 的人工确认门：
 
 ```python
 result = run(
@@ -38,151 +36,113 @@ result = run(
 )
 ```
 
-Default business workspace for synced business files:
+## 跨平台配置与部署
+
+配置优先级为：显式参数 → `PROJECT_MANAGER_*` 环境变量 → `config/project-manager.local.json` → 跨平台默认值。
+
+Windows、macOS 和群晖挂载路径都通过本地配置提供。仓库不再默认 `E:\SynologyDrive`。如需继续使用该目录，请在本机设置：
 
 ```powershell
 $env:PROJECT_MANAGER_BUSINESS_ROOT = "E:\SynologyDrive"
 $env:PROJECT_MANAGER_WORKSPACE_DIR = "E:\SynologyDrive\_project_manager_workspace"
 ```
 
-When these variables are unset, runtime paths are resolved by `common.workspace_config`.
-The production default is:
+可从 [config/project-manager.example.json](config/project-manager.example.json) 复制配置样例并改名为 `config/project-manager.local.json`。样例只保存 `PROJECT_MANAGER_DATABASE_DSN` 这个环境变量名，不保存实际 DSN、口令、令牌或私钥；实际 DSN 由节点的运行环境注入。
 
-```text
-business root: E:\SynologyDrive
-runtime workspace: E:\SynologyDrive\_project_manager_workspace
-```
+| 场景 | 权威数据库 | 运行方式 |
+|---|---|---|
+| Windows/macOS 单机 | 本地 SQLite | 一个设备同时运行应用、控制平面和执行能力；SQLite 文件放在本地运行目录，而非同步盘。 |
+| 群晖中心化部署 | PostgreSQL 17 | 群晖侧 PostgreSQL 17 保存权威状态；异地执行节点通过控制平面 API 领取任务和提交结果，不直接连接数据库。 |
 
-The runtime workspace owns generated run packages, project ledgers, data-cleaning outputs,
-opportunity context, state, logs, and HTML overviews. Source files under `E:\SynologyDrive`
-are read as inputs; physical moves still require `execute_archive_plan(..., confirmed=True)`.
+群晖目标包标识为 `PostgreSQL 17.19-4` 时，部署验收必须用 `SHOW server_version` 和 `SHOW server_version_num` 确认实际服务器主版本为 17；包标识本身不是容器镜像标签。数据库端口不应暴露公网，跨地点节点应通过 VPN、私有网络或安全网关访问控制平面。
 
-## Architecture
+## 数据、能力与可替换边界
+
+业务根目录、运行工作区、原始文件物理位置和归档位置都不是仓库常量。业务数据通过稳定的文档 ID、逻辑 URI、内容哈希和节点侧存储映射识别；DocumentStore 只在实际执行的节点把逻辑位置解析为本地路径。文件可以移动、缺失或等待归档，不能仅凭某个盘符或文件名推断身份。
+
+`platform_core.settings.load_app_settings()` 负责解析部署配置，`platform_core.composition.build_runtime_adapters()` 从显式注册表组合当前节点的能力。首期已注册的适配器包括：
+
+- `local` / `disabled` DocumentStore；
+- `filesystem` ProjectionWriter；
+- `pageindex` / `disabled` StructureIndex。
+
+OCR、`document_parse`、PageIndex 和投影器都是可替换的服务/适配器，而不是固定的业务规则或独立业务 Agent。处理策略由内容和能力决定：文本型 PDF、DOCX、XLSX、CSV、JSON/XML 与网页 DOM 不默认 OCR；只有具备文本、章节结构和局部查询需求的长文档才适合 PageIndex。
+
+SQL 数据库保存权威业务状态、文档身份/版本/位置、审批、任务和审计元数据。原始文件和大型产物属于 DocumentStore；PageIndex 负责文档章节树、页码定位和局部检索；JSON / Markdown / HTML 是可重建的投影视图和审计快照，不是主存储或第二权威源。
+
+## 当前架构
 
 ```text
 main.run(goal)
+  -> load_app_settings()
+  -> build_runtime_adapters()
   -> route one active skill
   -> build active ToolRegistry
   -> choose LLMPlanner or RuleBasedPlanner
-  -> LoopEngine plan/act/observe
-  -> write trace and domain artifacts
+  -> LoopEngine plan / act / observe
+  -> write trace and derived artifacts
 ```
 
-The runtime source of truth is intentionally narrow:
+业务 Agent 的职责边界与执行节点的技术能力边界分离：办公/项目管理主助手可以协同文件与文档分析、项目账本、归档执行和后续浏览器自动化职责；一个节点只声明自己实际可用的解析、OCR、PageIndex、浏览器和存储能力。归档执行必须基于已批准的结构化动作，不根据不确定的物理路径猜测目标。
 
-| Concern | Source |
-|---|---|
-| active skill ownership | `main.SKILL_TOOL_MAP` |
-| executable tools and parameters | `ToolRegistry` registrations in `main.py` |
-| rule-mode fallback sequencing | `skill_policies/` |
-| observation evaluation and trace | `common/loop_engine.py` |
-| runtime workspace and business paths | `common/workspace_config.py` |
-| cloud/synced file readiness gates | `common/file_readiness.py` |
-| schema drift checks | `governance/validate.py` |
+## 安全与运行规则
 
-Skill markdown files describe boundaries and model guidance. They are not complete tool registries.
+- 只有当前激活 Skill 的工具对 Loop 暴露。
+- `blocked` 不是成功，也不是负面业务结论。
+- `needs_confirmation` 会在人工边界停止。
+- CRM/CloudCC 写入必须保持确认门控。
+- 文件移动、重命名、覆盖和删除必须先生成动作计划，再经人工确认。
+- 项目账本事实先以带证据的候选事实进入流程；LLM 摘要不能直接覆盖权威状态。
+- 节点能力缺失时返回明确的 `blocked` 诊断，不能为了“成功”擅自切换为语义不同的解析策略。
 
-## Hard Rules
-
-- Only the active skill's tools are exposed to the loop.
-- `blocked` is not success and not a negative finding.
-- `needs_confirmation` stops at the human boundary.
-- CRM/CloudCC writes must remain gated.
-- File moves, renames, overwrites, and deletes require an explicit action plan and confirmation gate.
-- Project ledger facts must enter as candidate facts with evidence; LLM summaries do not directly overwrite ledger state.
-
-## File Organization Loop
-
-The validated file-organization path is:
+## 文件整理闭环
 
 ```text
-prepare run package
-  -> extract structured fields
-  -> update project ledger
-  -> emit review queue and archive plan
-  -> apply human review when required
-  -> execute archive plan only after confirmation
-  -> generate derived progress views
+准备运行包
+  -> 提取结构化字段
+  -> 更新候选账本事实
+  -> 输出复核队列和归档计划
+  -> 应用人工复核
+  -> 确认后执行归档动作
+  -> 生成派生进度视图
 ```
 
-Partial failures still preserve successful structured outputs, failure evidence, review queues, archive plans, traces, and run reports.
+部分失败也应保留成功的结构化产物、失败证据、复核队列、归档计划、trace 和运行报告。源文件在提取或归档前会进行可读性检查；云盘占位、同步失败或权限问题必须以结构化 `blocked` / failure 结果返回。
 
-Source files are read from `WorkspaceConfig.business_root` by default. The data-cleaning
-workspace is for generated artifacts such as `runs/` and structured outputs; it does
-not require a visible `00-原始文件（待处理）` intake directory.
+## 验证与真实样本
 
-Before extracting or archiving synced files, the loop probes source readability. If a cloud-drive
-placeholder or failed sync makes a visible file unreadable, the run records a structured failure:
-
-```json
-{
-  "stage": "source_readiness",
-  "error": "source_not_local_or_unreadable",
-  "blocked_reason": "cloud_placeholder_or_sync_failure"
-}
-```
-
-Archive execution repeats the source-readability check and validates the target directory is writable before moving any file.
-
-## OCR/PDF Provider Boundary
-
-PDF and image extraction is routed through the project-level `ocr.provider_registry`
-module. This keeps OCR capability checks separate from business rules and archive
-execution.
-
-Provider order is intentionally conservative:
-
-1. `.ocr.txt` sidecar files next to the source document.
-2. PyMuPDF text extraction for text-based PDFs when `fitz` is installed.
-3. A caller-provided `ocr_adapter`, used by tests or an explicitly configured runtime.
-4. Structured `blocked` diagnostics when no provider can handle the file.
-
-When a PDF or image is readable but cannot be parsed on the current machine, the
-run records provider diagnostics instead of throwing an unhandled exception:
-
-```json
-{
-  "status": "blocked",
-  "blocked_reason": "ocr_adapter_unavailable",
-  "engine_candidates": [
-    {"engine": "sidecar_text", "available": false, "reason": "sidecar_missing"},
-    {"engine": "pymupdf_text", "available": false, "reason": "module_not_installed"},
-    {"engine": "tesseract", "available": false, "reason": "binary_not_found"},
-    {"engine": "easyocr", "available": false, "reason": "module_not_installed"}
-  ],
-  "next_action": "install_pymupdf_or_provide_ocr_sidecar"
-}
-```
-
-## Verification
-
-Run the three standard gates after each refactor round:
+Windows 控制台请使用 UTF-8 模式，避免中文诊断受 GBK 默认编码影响：
 
 ```powershell
-python -X utf8 -B tests\test_loop.py
-python -X utf8 -B tests\test_workspace_config.py
-python -X utf8 -B tests\test_file_readiness.py
-python -X utf8 -B tests\test_ocr_provider_registry.py
-python -X utf8 -B tests\test_data_cleaning_ocr_provider.py
-python -X utf8 -B -m unittest tests.test_goal_validation
+python -X utf8 -B -m pytest -q -p no:cacheprovider
 python -X utf8 -B governance\validate.py tools
 python -X utf8 -B governance\validate.py dirs
 ```
 
-Use `python -X utf8` on Windows so Chinese output and emoji in existing diagnostics do not fail under a GBK console.
+PageIndex、OCR、真实业务样本和外部服务集成测试不是普通快速测试的隐式依赖。它们必须通过明确的本地配置、环境变量、测试 marker 或受控样本目录启用；仓库不提交客户业务原件、运行日志、真实 DSN 或节点私密配置。
 
-## Environment
+## 环境变量
 
-| Variable | Required | Default | Purpose |
-|---|---:|---|---|
-| `LLM_API_KEY` | only for LLM mode | unset | API key for `LLMPlanner` |
-| `LLM_BASE_URL` | no | `http://172.18.125.202:9990/v1` | API endpoint |
-| `LLM_MODEL` | no | `minimax-m3-mxfp8` | model name |
-| `PROJECT_MANAGER_BUSINESS_ROOT` | no | `E:\SynologyDrive` | root containing real business files |
-| `PROJECT_MANAGER_WORKSPACE_DIR` | no | `E:\SynologyDrive\_project_manager_workspace` | generated runtime artifacts, ledgers, logs, and outputs |
-| `LOOP_PROJECT_BASE_DIR` | no | unset | governance compatibility override for directory validation |
+| 变量 | 必需性 | 用途 |
+|---|---:|---|
+| `LLM_API_KEY` | 仅 LLM 模式 | LLMPlanner API 密钥。 |
+| `LLM_BASE_URL` | 否 | LLM API 端点。 |
+| `LLM_MODEL` | 否 | LLM 模型名。 |
+| `PROJECT_MANAGER_DEPLOYMENT_MODE` | 否 | `local`（SQLite）或 `central`（PostgreSQL）。 |
+| `PROJECT_MANAGER_BUSINESS_ROOT` | 否 | 当前节点可访问的业务根目录。 |
+| `PROJECT_MANAGER_WORKSPACE_DIR` | 否 | 当前节点的运行工作区。 |
+| `PROJECT_MANAGER_DATABASE_PROVIDER` | 否 | `sqlite` 或 `postgresql`，必须与部署模式匹配。 |
+| `PROJECT_MANAGER_SQLITE_PATH` | 否 | 单机 SQLite 文件位置。 |
+| `PROJECT_MANAGER_DATABASE_DSN_ENV` | 否 | 保存实际 DSN 的环境变量名称，默认 `PROJECT_MANAGER_DATABASE_DSN`。 |
+| `PROJECT_MANAGER_DATABASE_DSN` | 仅中心化运行时 | 由节点环境注入的实际 PostgreSQL DSN，不写入配置文件。 |
+| `PROJECT_MANAGER_DOCUMENT_STORE` | 否 | `local` 或 `disabled`。 |
+| `PROJECT_MANAGER_STRUCTURE_INDEX` | 否 | `pageindex` 或 `disabled`。 |
+| `PROJECT_MANAGER_PAGEINDEX_DIR` | PageIndex 启用时 | 当前节点的 PageIndex 安装目录。 |
+| `PROJECT_MANAGER_PROJECTION_WRITER` | 否 | 当前为 `filesystem`。 |
+| `PROJECT_MANAGER_PROJECTION_ROOT` | 否 | JSON / Markdown 等派生投影输出位置。 |
+| `LOOP_PROJECT_BASE_DIR` | 治理兼容入口 | 仅覆盖目录治理的运行工作区，不替代新的配置优先级。 |
 
-Without `LLM_API_KEY`, `planner_mode="auto"` falls back to `RuleBasedPlanner`.
+没有 `LLM_API_KEY` 时，`planner_mode="auto"` 会回退到 `RuleBasedPlanner`。
 
 ## License
 

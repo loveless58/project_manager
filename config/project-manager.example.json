@@ -1,0 +1,17 @@
+{
+  "deployment_mode": "local",
+  "business_root": "~/ProjectManagerData",
+  "runtime_workspace": "~/ProjectManagerData/.project_manager",
+  "database": {
+    "provider": "sqlite",
+    "sqlite_path": "~/ProjectManagerData/.project_manager/state/project_manager.sqlite3",
+    "dsn_env_var": "PROJECT_MANAGER_DATABASE_DSN"
+  },
+  "providers": {
+    "document_store": "local",
+    "structure_index": "disabled",
+    "pageindex_dir": null,
+    "projection_writer": "filesystem",
+    "projection_root": "~/ProjectManagerData/.project_manager/projections"
+  }
+}
