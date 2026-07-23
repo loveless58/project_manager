@@ -2503,6 +2503,13 @@ class TestEndToEnd(unittest.TestCase):
             self.assertTrue(os.path.isdir(os.path.join(workspace_dir, "项目文件")))
             self.assertTrue(os.path.isdir(trace_dir))
             self.assertTrue(os.path.exists(doc_path), "prepare step must not move source files")
+            self.assertEqual(result["metadata"]["deployment"]["deployment_mode"], "local")
+            self.assertEqual(result["metadata"]["adapters"], {
+                "document_store": "local",
+                "structure_index": "disabled",
+                "projection_writer": "filesystem",
+            })
+            self.assertNotIn("PROJECT_MANAGER_DATABASE_DSN", json.dumps(result))
 
 
 # ────────────────────────────────────────────

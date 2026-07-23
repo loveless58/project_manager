@@ -24,6 +24,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from common import LoopEngine, ToolRegistry, build_react_prompt, APIAdapter, resolve_workspace_config
 from loop_packages import build_skill_descriptions, build_skill_registrar_map, build_skill_tool_map
+from platform_core import load_app_settings
+from platform_core.composition import build_runtime_adapters
 
 SKILL_TOOL_MAP = build_skill_tool_map()
 SKILL_DESCRIPTIONS = build_skill_descriptions()
@@ -340,8 +342,18 @@ def run(
     print(f"Disclosure: progressive")
     print(f"{'='*60}")
 
+    app_settings = load_app_settings()
+    runtime_adapters = build_runtime_adapters(app_settings)
+    workspace_config = resolve_workspace_config(app_settings=app_settings)
+    effective_data_workspace_dir = data_workspace_dir
+    if active_skill == "data_cleaning_file_organization" and effective_data_workspace_dir is None:
+        effective_data_workspace_dir = str(workspace_config.data_cleaning_workspace)
+
     # 1. 渐进式披露：先路由 Skill，再只暴露该 Skill 的工具。
-    reg = _build_registry_for_skill(active_skill, data_workspace_dir=data_workspace_dir)
+    reg = _build_registry_for_skill(
+        active_skill,
+        data_workspace_dir=effective_data_workspace_dir,
+    )
     memory_text = _skills_prompt_text() + f"\n\nActive Skill: {active_skill}\n"
     sys_prompt = build_react_prompt(goal=goal, tools_text=reg.to_prompt_text(), memory_text=memory_text)
 
@@ -360,7 +372,6 @@ def run(
         return planner.get_response(msgs)
 
     # 4. 运行循环
-    workspace_config = resolve_workspace_config()
     actual_trace_dir = trace_dir or str(workspace_config.logs_dir)
     os.makedirs(actual_trace_dir, exist_ok=True)
     engine = LoopEngine(
@@ -383,8 +394,12 @@ def run(
     trace.metadata["active_skill"] = active_skill
     trace.metadata["disclosure_mode"] = "progressive"
     trace.metadata["exposed_tools"] = reg.list_tools()
-    if data_workspace_dir and active_skill == "data_cleaning_file_organization":
-        trace.metadata["data_workspace_dir"] = data_workspace_dir
+    deployment_metadata = app_settings.redacted_summary()
+    deployment_metadata["database"].pop("dsn_env_var", None)
+    trace.metadata["deployment"] = deployment_metadata
+    trace.metadata["adapters"] = runtime_adapters.summary()
+    if effective_data_workspace_dir and active_skill == "data_cleaning_file_organization":
+        trace.metadata["data_workspace_dir"] = effective_data_workspace_dir
 
     trace.save(os.path.join(actual_trace_dir, f"project_manager_{trace.trace_id}.json"))
     trace.print_summary()
