@@ -10,6 +10,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 class TestDataCleaningOcrProvider(unittest.TestCase):
+    def setUp(self):
+        # 清空 OCR provider 模块级缓存, 避免 mock 替换模块时跨测试污染 (commit bb579fe 后浮出)
+        from ocr.providers.rapidocr_provider import _ENGINE_CACHE
+        from ocr.providers.easyocr_provider import _READER_CACHE
+        _ENGINE_CACHE.clear()
+        _READER_CACHE.clear()
+
     def test_extract_document_routes_pdf_through_project_ocr_provider(self):
         from tools.data_cleaning_tools import DataCleaningTools
 
