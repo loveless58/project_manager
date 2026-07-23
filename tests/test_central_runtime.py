@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 from pathlib import Path
@@ -57,6 +58,66 @@ from main import run
 
 try:
     run("今天有哪些项目风险", planner_mode="rule")
+except Exception as exc:
+    print(f"{type(exc).__name__}: {exc}")
+    raise SystemExit(0)
+raise SystemExit("expected legacy workspace capability error")
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-X", "utf8", "-c", script],
+        cwd=PROJECT_ROOT,
+        env=_central_environment(tmp_path / "runtime"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "RuntimeCapabilityError" in completed.stdout
+    assert "PROJECT_MANAGER_BUSINESS_ROOT" in completed.stdout
+
+
+def test_central_data_cleaning_uses_explicit_workspace_without_business_root(tmp_path):
+    data_workspace = tmp_path / "data-workspace"
+    script = f"""
+import json
+from main import run
+
+result = run(
+    "扫描文件",
+    planner_mode="rule",
+    data_workspace_dir={str(data_workspace)!r},
+)
+print(json.dumps(result, ensure_ascii=False))
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-X", "utf8", "-c", script],
+        cwd=PROJECT_ROOT,
+        env=_central_environment(tmp_path / "runtime"),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert result["status"] == "completed"
+    assert result["metadata"]["active_skill"] == "data_cleaning_file_organization"
+    assert result["metadata"]["data_workspace_dir"] == str(data_workspace)
+    assert result["rounds"][0]["action"] == "scan_raw_files"
+    assert result["rounds"][0]["status"] == "success"
+    observation = ast.literal_eval(result["rounds"][0]["observation"])
+    assert observation["source"] == str(data_workspace / "00-原始文件（待处理）")
+
+
+def test_central_data_cleaning_without_explicit_workspace_has_capability_error(tmp_path):
+    script = """
+from main import run
+
+try:
+    run("扫描文件", planner_mode="rule")
 except Exception as exc:
     print(f"{type(exc).__name__}: {exc}")
     raise SystemExit(0)

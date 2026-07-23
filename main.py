@@ -23,9 +23,9 @@ from typing import Dict, List, Any, Optional
 sys.path.insert(0, os.path.dirname(__file__))
 
 from common import LoopEngine, ToolRegistry, build_react_prompt, APIAdapter, resolve_workspace_config
+from app_bootstrap.composition import build_runtime_adapters
 from loop_packages import build_skill_descriptions, build_skill_registrar_map, build_skill_tool_map
 from platform_core import load_app_settings
-from platform_core.composition import build_runtime_adapters
 
 SKILL_TOOL_MAP = build_skill_tool_map()
 SKILL_DESCRIPTIONS = build_skill_descriptions()
@@ -366,14 +366,13 @@ def run(
 
     app_settings = load_app_settings()
     runtime_adapters = build_runtime_adapters(app_settings)
-    workspace_config = _resolve_legacy_workspace_for_skill(active_skill, app_settings)
     effective_data_workspace_dir = data_workspace_dir
-    if active_skill == "data_cleaning_file_organization" and effective_data_workspace_dir is None:
-        if workspace_config is None:
-            raise RuntimeCapabilityError(
-                "data_cleaning_file_organization requires a configured legacy workspace"
-            )
-        effective_data_workspace_dir = str(workspace_config.data_cleaning_workspace)
+    if active_skill == "data_cleaning_file_organization":
+        if effective_data_workspace_dir is None:
+            workspace_config = _resolve_legacy_workspace_for_skill(active_skill, app_settings)
+            effective_data_workspace_dir = str(workspace_config.data_cleaning_workspace)
+    else:
+        _resolve_legacy_workspace_for_skill(active_skill, app_settings)
 
     # 1. 渐进式披露：先路由 Skill，再只暴露该 Skill 的工具。
     reg = _build_registry_for_skill(

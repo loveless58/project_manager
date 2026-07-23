@@ -192,11 +192,17 @@ class DataCleaningTools:
         ocr_adapter: Optional[Callable[[str], Dict[str, Any]]] = None,
         semantic_adapter: Optional[Callable[[Dict[str, Any]], Any]] = None,
     ):
-        config = resolve_workspace_config()
-        self.workspace_dir = workspace_dir or str(config.data_cleaning_workspace)
-        self.project_files_dir = os.path.join(self.workspace_dir, "项目文件") if workspace_dir else str(config.project_files_dir)
-        self.business_root = self.workspace_dir if workspace_dir else str(config.business_root)
-        self.raw_dir = os.path.join(self.workspace_dir, "00-原始文件（待处理）") if workspace_dir else str(config.business_root)
+        if workspace_dir is None:
+            config = resolve_workspace_config()
+            self.workspace_dir = str(config.data_cleaning_workspace)
+            self.project_files_dir = str(config.project_files_dir)
+            self.business_root = str(config.business_root)
+            self.raw_dir = str(config.business_root)
+        else:
+            self.workspace_dir = workspace_dir
+            self.project_files_dir = os.path.join(self.workspace_dir, "项目文件")
+            self.business_root = self.workspace_dir
+            self.raw_dir = os.path.join(self.workspace_dir, "00-原始文件（待处理）")
         self.ocr_dir = os.path.join(self.workspace_dir, "01-OCR输出（待清洗）")
         self.cleaned_dir = os.path.join(self.workspace_dir, "02-已清洗（结构化数据）")
         self.ocr_adapter = ocr_adapter

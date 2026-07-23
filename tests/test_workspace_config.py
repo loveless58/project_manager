@@ -137,6 +137,25 @@ class TestWorkspaceConfig(unittest.TestCase):
 
             self.assertEqual(tools.raw_dir, os.path.join(td, "00-原始文件（待处理）"))
 
+    def test_explicit_data_cleaning_workspace_needs_no_legacy_business_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = {
+                "PROJECT_MANAGER_DEPLOYMENT_MODE": "central",
+                "PROJECT_MANAGER_DATABASE_PROVIDER": "postgresql",
+                "PROJECT_MANAGER_WORKSPACE_DIR": str(Path(td) / "runtime"),
+                "PROJECT_MANAGER_DOCUMENT_STORE": "disabled",
+                "HOME": td,
+                "USERPROFILE": td,
+            }
+            with patch.dict(os.environ, env, clear=True):
+                from tools.data_cleaning_tools import DataCleaningTools
+
+                tools = DataCleaningTools(workspace_dir=td)
+
+        self.assertEqual(tools.workspace_dir, td)
+        self.assertEqual(tools.business_root, td)
+        self.assertEqual(tools.project_files_dir, os.path.join(td, "项目文件"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,7 +5,7 @@ from platform_core.settings import load_app_settings
 
 
 def test_local_runtime_builds_declared_adapters(tmp_path):
-    from platform_core.composition import build_runtime_adapters
+    from app_bootstrap.composition import build_runtime_adapters
 
     settings = load_app_settings(
         config_file="",
@@ -31,7 +31,7 @@ def test_local_runtime_builds_declared_adapters(tmp_path):
 
 
 def test_central_control_plane_can_disable_document_store(tmp_path):
-    from platform_core.composition import build_runtime_adapters
+    from app_bootstrap.composition import build_runtime_adapters
 
     settings = load_app_settings(
         config_file="",
@@ -49,7 +49,7 @@ def test_central_control_plane_can_disable_document_store(tmp_path):
 
 
 def test_unknown_provider_remains_an_explicit_configuration_error(tmp_path):
-    from platform_core.composition import build_runtime_adapters
+    from app_bootstrap.composition import build_runtime_adapters
     from platform_core.registry import AdapterRegistryError
 
     settings = load_app_settings(
