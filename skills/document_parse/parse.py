@@ -88,6 +88,7 @@ def parse(
     # Step 4: 应用业务规则(3-layer fallback)
     business_judgement = _apply_business_rules(
         raw_data=executor_result["raw_data"],
+        source_path=source,
         knowledge_base=knowledge_base,
         llm_extractor=llm_extractor,
     )
@@ -130,35 +131,45 @@ def parse(
 
 def _apply_business_rules(
     raw_data: Dict[str, Any],
+    source_path: str = "",
     knowledge_base=None,
     llm_extractor=None,
 ) -> Dict[str, Any]:
     """3-layer fallback: 知识库(L1) → 硬编码(L2) → LLM(L3)。
 
-    MVP 实现: 只用 L2 硬编码关键词分类。L1 和 L3 留接口,后续 Step 5 接入。
+    L1: 默认调 skills.document_parse.kb.query_kb(基于 PageIndex + 文件名前缀)
+    L2: _hardcoded_classify(MVP 占位,KB 不可用时降级)
+    L3: llm_extractor(GPUStack LLM,可选,KB + hard_code 都不高时降级)
     """
-    # L1: 知识库匹配
-    if knowledge_base is not None:
-        try:
-            judgement = knowledge_base.match(raw_data)
-            if judgement is not None:
-                return judgement
-        except Exception:
-            pass  # 知识库失败,降级 L2
+    # L1: KB 匹配(默认本地 PageIndex KB)
+    try:
+        if knowledge_base is None:
+            from skills.document_parse.kb import query_kb as default_kb
+            kb_result = default_kb(raw_data, source_path=source_path)
+        elif callable(knowledge_base):
+            # 兼容旧的 callable 接口(单参数 raw_data)
+            kb_result = knowledge_base(raw_data)
+        else:
+            # 旧 .match() 接口(archive_files 风格)
+            kb_result = knowledge_base.match(raw_data) if hasattr(knowledge_base, "match") else None
+
+        if kb_result is not None and kb_result.get("confidence") in ("high", "medium"):
+            return kb_result
+    except Exception:
+        pass  # KB 失败,降级 L2
 
     # L2: 硬编码 fallback
     judgement = _hardcoded_classify(raw_data)
     if judgement["confidence"] == "high":
         return judgement
 
-    # L3: LLM 提取(暂未实现,留接口)
+    # L3: LLM fallback(可选)
     if llm_extractor is not None:
         try:
             return llm_extractor(raw_data)
         except Exception:
             pass
 
-    # L3 也失败,返回 L2 结果(confidence=low → needs_review)
     return judgement
 
 
