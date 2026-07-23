@@ -101,7 +101,7 @@ Phase 7: 执行         execute_archive.py        (规划中)
 Phase 2-6 已实现(build_archive_decision.py 单文件决策 + batch 聚合)。
 Phase 1 / 7 是规划中,当前通过直接调 `build_archive_action()` 跳过(由 data_cleaning_tools.py 调用)。
 
-详见 [references/workflow.md](references/workflow.md)。
+详见 [../../../business_rules/archive_files/workflow.md](../../../business_rules/archive_files/workflow.md)。
 
 ## Three-Layer Fallback(数据驱动核心)
 
@@ -124,8 +124,8 @@ Phase 1 / 7 是规划中,当前通过直接调 `build_archive_action()` 跳过(�
 2. **渐进过渡**: 历史归档结果反向抽取到 business_knowledge/*.md,知识库覆盖硬编码
 3. **目标**: 知识库是 ground truth,硬编码是 fallback,LLM 仅在冷启动期使用
 
-详见 [references/three-layer-fallback.md](references/three-layer-fallback.md)。
-反向抽取流程见 [references/knowledge-base-pattern.md](references/knowledge-base-pattern.md)。
+详见 [../../../business_rules/archive_files/three-layer-fallback.md](../../../business_rules/archive_files/three-layer-fallback.md)。
+反向抽取流程见 [../../../business_rules/archive_files/knowledge-base-pattern.md](../../../business_rules/archive_files/knowledge-base-pattern.md)。
 
 ## Critical Requirements(硬规则)
 
@@ -175,12 +175,12 @@ SKILL.md 描述契约 + 工作流;具体实现在 `scripts/`:
 - **[schemas/archive_manifest.schema.json](schemas/archive_manifest.schema.json)** — 批量清单契约
 - **[schemas/capability_request.schema.json](schemas/capability_request.schema.json)** — capability 入口契约
 - **[schemas/capability_result.schema.json](schemas/capability_result.schema.json)** — capability 出口契约
-- **[references/workflow.md](references/workflow.md)** — 5 阶段工作流详细步骤
-- **[references/three-layer-fallback.md](references/three-layer-fallback.md)** — kb → hard → llm 数据驱动原理详解
-- **[references/knowledge-base-pattern.md](references/knowledge-base-pattern.md)** — 从历史归档反向抽取到知识库的流程
-- **[references/examples/01-bid-contract.md](references/examples/01-bid-contract.md)** — 真实案例:投标合同归档
-- **[references/examples/02-internal-pm-doc.md](references/examples/02-internal-pm-doc.md)** — PM 内部文档(待 redesign)
-- **[references/examples/03-source-missing.md](references/examples/03-source-missing.md)** — 文件缺失场景
+- **[../../../business_rules/archive_files/workflow.md](../../../business_rules/archive_files/workflow.md)** — 5 阶段工作流详细步骤
+- **[../../../business_rules/archive_files/three-layer-fallback.md](../../../business_rules/archive_files/three-layer-fallback.md)** — kb → hard → llm 数据驱动原理详解
+- **[../../../business_rules/archive_files/knowledge-base-pattern.md](../../../business_rules/archive_files/knowledge-base-pattern.md)** — 从历史归档反向抽取到知识库的流程
+- **[../../../business_rules/archive_files/examples/01-bid-contract.md](../../../business_rules/archive_files/examples/01-bid-contract.md)** — 真实案例:投标合同归档
+- **[../../../business_rules/archive_files/examples/02-internal-pm-doc.md](../../../business_rules/archive_files/examples/02-internal-pm-doc.md)** — PM 内部文档(待 redesign)
+- **[../../../business_rules/archive_files/examples/03-source-missing.md](../../../business_rules/archive_files/examples/03-source-missing.md)** — 文件缺失场景
 - **[docs/ocr-baseline.md](../../docs/ocr-baseline.md)** — OCR 引擎优先级链 + Vision vs RapidOCR 对比基线 (v0.4.0, 2026-07-23)
 
 ## Known Limitations

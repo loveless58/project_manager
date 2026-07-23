@@ -1,20 +1,20 @@
 """build_archive_decision.py — 评估文件归档动作
 
-提取自 tools/data_cleaning_tools.py（Phase 2 拆分）。
+提取自 tools/data_cleaning_tools.py(Phase 2 拆分)。
 
-公开 API：
+公开 API:
 - build_archive_action(...)         构造 archive_action.v1 dict
 - business_phase_from_path(...)     从路径识别业务阶段
 
-依赖：business_rules.archive_decision.evaluate_archive_decision
+依赖: business_rules.archive_decision.evaluate_archive_decision
 
-三层 fallback（v0.2.0）：
-1. 业务知识库（business_knowledge/*.md）—— 优先
-2. 硬编码规则（evaluate_archive_decision）—— 次选
-3. LLM 通用兜底（仅在知识库缺失时）—— 兜底
+三层 fallback(v0.2.0):
+1. 业务知识库(business_rules/archive_files/*.md)— 优先
+2. 硬编码规则(evaluate_archive_decision)— 次选
+3. LLM 通用兜底(仅在知识库缺失时)— 兜底
 
-边界约束：LLM 通用兜底仅在 reason ∈ {knowledge_base_missing, knowledge_base_no_match}
-时触发；knowledge_base_low_confidence 不触发 LLM 兜底（避免幻觉）。
+边界约束: LLM 通用兜底仅在 reason ∈ {knowledge_base_missing, knowledge_base_no_match}
+时触发; knowledge_base_low_confidence 不触发 LLM 兜底(避免幻觉)。
 """
 import os
 import re
@@ -24,8 +24,8 @@ from typing import Any, Dict, List, Optional
 from business_rules.archive_decision import evaluate_archive_decision
 
 
-# 业务知识库物理路径（项目根目录 / business_knowledge/）
-BUSINESS_KNOWLEDGE_DIR = Path(__file__).resolve().parents[3] / "business_knowledge"
+# 业务知识库物理路径(business_rules/archive_files/)
+BUSINESS_KNOWLEDGE_DIR = Path(__file__).resolve().parents[3] / "business_rules" / "archive_files"
 
 # LLM 配置（从环境变量读，与 GPUStack 对接）
 _LLM_MODEL = os.getenv("ARCHIVE_LLM_MODEL", "openai/minimax-m3")
