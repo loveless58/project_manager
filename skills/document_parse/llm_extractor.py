@@ -2,18 +2,18 @@
 
 设计:
 - KB(L1) / 硬编码(L2) 都低置信度时降级到 LLM
-- 默认接 GPUStack (http://172.18.125.202:9990/v1) + minimax-m3-mxfp8
+- LLM endpoint 必须由统一 provider 配置显式提供
 - 直接调 requests(不带 APIAdapter,因为它不支持 max_tokens,
   模型会花 token 在 thinking 上导致 content 被截断)
 - prompt: 给 LLM 类别列表 + 文本 + 文件名,要求返回 JSON
 - 解析 LLM 输出,失败兜底为 low
 
 调用约定:
-    extractor = make_llm_extractor()  # 默认 GPUStack
+    extractor = make_llm_extractor()
     parse(path, llm_extractor=extractor)
 
 环境变量覆盖:
-    LLM_BASE_URL, LLM_API_KEY, LLM_MODEL, LLM_MAX_TOKENS
+    PROJECT_MANAGER_LLM_BASE_URL, LLM_API_KEY, LLM_MODEL, LLM_MAX_TOKENS
 """
 
 import json
@@ -23,9 +23,10 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from common.provider_config import resolve_llm_base_url
 
-# 默认 GPUStack 配置
-DEFAULT_BASE_URL = os.getenv("LLM_BASE_URL", "http://172.18.125.202:9990/v1")
+
+# 模型参数仍允许按调用方覆盖；endpoint 由统一 provider 配置解析。
 DEFAULT_API_KEY = os.getenv("LLM_API_KEY")
 DEFAULT_MODEL = os.getenv("LLM_MODEL", "minimax-m3-mxfp8")
 DEFAULT_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "2000"))
@@ -106,7 +107,7 @@ def _call_llm(base_url, api_key, model, messages, max_tokens, temperature, timeo
 
 
 def make_llm_extractor(
-    base_url=DEFAULT_BASE_URL,
+    base_url=None,
     api_key=None,
     model=DEFAULT_MODEL,
     max_text_chars=2000,
@@ -115,12 +116,12 @@ def make_llm_extractor(
 ):
     """构造一个 llm_extractor callable。"""
     if api_key is None:
-        api_key = DEFAULT_API_KEY
+        api_key = DEFAULT_API_KEY or os.getenv("LLM_API_KEY")
     if not api_key:
         raise ValueError(
-            "LLM_API_KEY 未设置。GPUStack key 在 ~/.hermes/config.yaml,"
-            "export LLM_API_KEY=... 或显式传 api_key 参数。"
+            "LLM_API_KEY 未设置；请通过运行环境注入或显式传 api_key 参数。"
         )
+    base_url = resolve_llm_base_url(base_url, required=True)
 
     def llm_extractor(raw_data):
         text = (raw_data.get("raw_text") or "")[:max_text_chars]

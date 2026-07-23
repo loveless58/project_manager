@@ -22,11 +22,11 @@ extracted = {
 ```python
 action = build_archive_action(
     run_id="run-2026-07-17-002",
-    source_file="/Users/zhang/Desktop/工作文件/PRD-project-manager-ocr.md",
+    source_file="${BUSINESS_ROOT}/PRD-project-manager-ocr.md",
     project_name="project_manager",
     extracted=extracted,
     ledger_result={"business_judgement": {}},
-    project_files_dir="/Users/zhang/Desktop/工作文件/项目文件/项目投标",
+    project_files_dir="${BUSINESS_ROOT}/项目文件/项目投标",
 )
 ```
 
@@ -45,7 +45,7 @@ action = build_archive_action(
   "schema_version": "archive_action.v1",
   "run_id": "run-2026-07-17-002",
   "status": "needs_review",
-  "source_file": "/Users/zhang/Desktop/工作文件/PRD-project-manager-ocr.md",
+  "source_file": "${BUSINESS_ROOT}/PRD-project-manager-ocr.md",
   "project_name": "project_manager",
   "document_type": "项目治理文档",
   "proposed_name": "",

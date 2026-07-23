@@ -30,7 +30,7 @@ extracted = {
 {"business_judgement": {"human_review_required": False}}
 ```
 
-**project_files_dir**: `/Users/zhang/Desktop/工作文件/项目文件/项目投标`
+**project_files_dir**: `${BUSINESS_ROOT}/项目文件/项目投标`
 
 ## 调用
 
@@ -39,11 +39,11 @@ from skills.archive_files.scripts.build_archive_decision import build_archive_ac
 
 action = build_archive_action(
     run_id="run-2026-07-17-001",
-    source_file="/Users/zhang/Desktop/工作文件/TS软件外包云泰智汇电子26722V.pdf",
+    source_file="${BUSINESS_ROOT}/TS软件外包云泰智汇电子26722V.pdf",
     project_name="云泰智汇电子",
     extracted=extracted,
     ledger_result={"business_judgement": {"human_review_required": False}},
-    project_files_dir="/Users/zhang/Desktop/工作文件/项目文件/项目投标",
+    project_files_dir="${BUSINESS_ROOT}/项目文件/项目投标",
 )
 ```
 
@@ -67,12 +67,12 @@ action = build_archive_action(
   "schema_version": "archive_action.v1",
   "run_id": "run-2026-07-17-001",
   "status": "ready",
-  "source_file": "/Users/zhang/Desktop/工作文件/TS软件外包云泰智汇电子26722V.pdf",
+  "source_file": "${BUSINESS_ROOT}/TS软件外包云泰智汇电子26722V.pdf",
   "project_name": "云泰智汇电子",
   "document_type": "扫描件",
   "proposed_name": "TS软件外包云泰智汇电子26722V.pdf",
-  "target_dir": "/Users/zhang/Desktop/工作文件/项目文件/项目投标/云泰智汇电子/原始文件",
-  "target_path": "/Users/zhang/Desktop/工作文件/项目文件/项目投标/云泰智汇电子/原始文件/TS软件外包云泰智汇电子26722V.pdf",
+  "target_dir": "${BUSINESS_ROOT}/项目文件/项目投标/云泰智汇电子/原始文件",
+  "target_path": "${BUSINESS_ROOT}/项目文件/项目投标/云泰智汇电子/原始文件/TS软件外包云泰智汇电子26722V.pdf",
   "blockers": [],
   "business_judgement": {"human_review_required": false},
   "archive_decision": {

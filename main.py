@@ -23,6 +23,7 @@ from typing import Dict, List, Any, Optional
 sys.path.insert(0, os.path.dirname(__file__))
 
 from common import LoopEngine, ToolRegistry, build_react_prompt, APIAdapter, resolve_workspace_config
+from common.provider_config import resolve_llm_base_url
 from app_bootstrap.composition import build_runtime_adapters
 from loop_packages import build_skill_descriptions, build_skill_registrar_map, build_skill_tool_map
 from platform_core import load_app_settings
@@ -318,7 +319,7 @@ def _skills_prompt_text() -> str:
 def _make_api_llm():
     """构建真实 LLM 适配器。需要环境变量 LLM_API_KEY。"""
     api_key = os.getenv("LLM_API_KEY")
-    base_url = os.getenv("LLM_BASE_URL", "http://172.18.125.202:9990/v1")
+    base_url = resolve_llm_base_url(required=True)
     model = os.getenv("LLM_MODEL", "minimax-m3-mxfp8")
     if not api_key:
         raise RuntimeError(

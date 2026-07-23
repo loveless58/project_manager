@@ -133,6 +133,7 @@ Windows 控制台请使用 UTF-8 模式，避免中文诊断受 GBK 默认编码
 python -X utf8 -B -m pytest -q -p no:cacheprovider
 python -X utf8 -B governance\validate.py tools
 python -X utf8 -B governance\validate.py dirs
+python -X utf8 -B governance\validate.py repository
 ```
 
 PageIndex、OCR、真实业务样本和外部服务集成测试不是普通快速测试的隐式依赖。它们必须通过明确的本地配置、环境变量、测试 marker 或受控样本目录启用；仓库不提交客户业务原件、运行日志、真实 DSN 或节点私密配置。
@@ -142,7 +143,8 @@ PageIndex、OCR、真实业务样本和外部服务集成测试不是普通快�
 | 变量 | 必需性 | 用途 |
 |---|---:|---|
 | `LLM_API_KEY` | 仅 LLM 模式 | LLMPlanner API 密钥。 |
-| `LLM_BASE_URL` | 否 | LLM API 端点。 |
+| `PROJECT_MANAGER_LLM_BASE_URL` | LLM 启用时 | 统一的 LLM API endpoint；无默认值。 |
+| `LLM_BASE_URL` / `OPENAI_API_BASE` | 兼容入口 | 仅作为旧部署 fallback；新配置应使用 `PROJECT_MANAGER_LLM_BASE_URL`。 |
 | `LLM_MODEL` | 否 | LLM 模型名。 |
 | `PROJECT_MANAGER_DEPLOYMENT_MODE` | 否 | `local`（SQLite 配置形状）或 `central`（PostgreSQL 配置预留）。 |
 | `PROJECT_MANAGER_BUSINESS_ROOT` | 否 | 当前节点可访问的业务根目录；可以是同步业务目录。 |
@@ -158,7 +160,7 @@ PageIndex、OCR、真实业务样本和外部服务集成测试不是普通快�
 | `PROJECT_MANAGER_PROJECTION_ROOT` | 否 | JSON / Markdown 等派生投影输出位置。 |
 | `LOOP_PROJECT_BASE_DIR` | 治理兼容入口 | 仅覆盖目录治理的运行工作区，不替代新的配置优先级。 |
 
-没有 `LLM_API_KEY` 时，`planner_mode="auto"` 会回退到 `RuleBasedPlanner`。
+没有 `LLM_API_KEY` 时，`planner_mode="auto"` 会回退到 `RuleBasedPlanner`，普通非 LLM 流程不要求 endpoint。显式启用 LLM 时若 endpoint 缺失，会返回稳定配置错误。
 
 ## License
 

@@ -22,6 +22,8 @@ from skills.document_parse.llm_extractor import (
 )
 from skills.document_parse.kb import query_kb
 
+TEST_BASE_URL = "https://llm.example.invalid/v1"
+
 
 class TestExtractJson(unittest.TestCase):
     """_extract_json 解析逻辑测试。"""
@@ -76,7 +78,7 @@ class TestCategoryWhitelist(unittest.TestCase):
         })
 
         try:
-            extractor = make_llm_extractor(api_key="fake-key-for-test")
+            extractor = make_llm_extractor(base_url=TEST_BASE_URL, api_key="fake-key-for-test")
             result = extractor({"raw_text": "test", "filename": "test.docx"})
             self.assertEqual(result["category"], "其他")
             self.assertEqual(result["confidence"], "high")
@@ -97,7 +99,7 @@ class TestCategoryWhitelist(unittest.TestCase):
         })
 
         try:
-            extractor = make_llm_extractor(api_key="fake-key-for-test")
+            extractor = make_llm_extractor(base_url=TEST_BASE_URL, api_key="fake-key-for-test")
             result = extractor({"raw_text": "test", "filename": "test.docx"})
             self.assertEqual(result["confidence"], "low")
         finally:
@@ -119,7 +121,7 @@ class TestMakeLLMExtractor(unittest.TestCase):
 
     def test_returns_callable(self):
         """应该返回 callable。"""
-        extractor = make_llm_extractor(api_key="fake-key-for-test")
+        extractor = make_llm_extractor(base_url=TEST_BASE_URL, api_key="fake-key-for-test")
         self.assertTrue(callable(extractor))
 
     def test_extractor_handles_exception(self):
@@ -130,7 +132,7 @@ class TestMakeLLMExtractor(unittest.TestCase):
         le._call_llm = MagicMock(side_effect=Exception("network error"))
 
         try:
-            extractor = make_llm_extractor(api_key="fake-key-for-test")
+            extractor = make_llm_extractor(base_url=TEST_BASE_URL, api_key="fake-key-for-test")
             result = extractor({"raw_text": "test", "filename": "test.docx"})
             self.assertEqual(result["category"], "其他")
             self.assertEqual(result["confidence"], "low")

@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from platform_core.settings import AppSettings, load_app_settings  # noqa: E402
+from governance.repository_hygiene import validate_repository_hygiene  # noqa: E402
 
 
 def load_contract(filename: str) -> dict:
@@ -314,11 +315,11 @@ def validate_loop_packages(verbose: bool = True) -> Tuple[int, int, List[dict]]:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print("Usage: python governance/validate.py {dirs|tools|loop-packages|all}")
+        print("Usage: python governance/validate.py {dirs|tools|loop-packages|repository|all}")
         raise SystemExit(1)
 
     command = sys.argv[1]
-    if command not in {"dirs", "tools", "loop-packages", "all"}:
+    if command not in {"dirs", "tools", "loop-packages", "repository", "all"}:
         print(f"Unknown command: {command}")
         raise SystemExit(2)
 
@@ -333,6 +334,7 @@ def main() -> None:
         ("dirs", "目录契约校验", validate_dirs),
         ("tools", "工具 schema 校验", validate_tools),
         ("loop-packages", "loop package 合约校验", validate_loop_packages),
+        ("repository", "仓库卫生校验", validate_repository_hygiene),
     )
     for name, title, check in checks:
         if command not in (name, "all"):

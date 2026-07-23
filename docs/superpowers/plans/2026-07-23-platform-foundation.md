@@ -1445,14 +1445,14 @@ Run:
 python -m pytest tests/integrations/test_pageindex_structure_index.py tests/test_pageindex_client.py -q
 ```
 
-Expected: 全部 PASS；没有测试依赖 `/Users/zhang/Desktop/工作文件/PageIndex`。
+Expected: 全部 PASS；没有测试依赖 `${BUSINESS_ROOT}/PageIndex`。
 
 - [ ] **Step 6: 搜索确认固定 PageIndex 路径已从运行代码移除**
 
 Run:
 
 ```bash
-git grep -n "/Users/zhang/Desktop/工作文件/PageIndex" -- '*.py'
+git grep -n "${BUSINESS_ROOT}/PageIndex" -- '*.py'
 ```
 
 Expected: 无输出，退出码 1。
@@ -1894,7 +1894,7 @@ Expected: 0 failed。环境依赖型测试只能按现有 marker/skip 规则跳�
 Run:
 
 ```bash
-git grep -n -E 'DEFAULT_BUSINESS_ROOT|DEFAULT_PAGEINDEX_DIR|/Users/zhang/Desktop/工作文件/PageIndex' -- '*.py'
+git grep -n -E 'DEFAULT_BUSINESS_ROOT|DEFAULT_PAGEINDEX_DIR|${BUSINESS_ROOT}/PageIndex' -- '*.py'
 git grep -n -E 'postgresql://[^ ]+:[^ ]+@' -- ':!docs/superpowers/plans/*' ':!tests/*'
 git diff --check
 ```

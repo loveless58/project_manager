@@ -1,174 +1,135 @@
 # PageIndex Integration
 
-通用 PageIndex 客户端,封装 [VectifyAI/PageIndex](https://github.com/VectifyAI/PageIndex)(本地 fork 复制,含 prompt injection 安全加固)。
+该目录提供 `PageIndexClient` 与 `PageIndexStructureIndex`，把外部 [VectifyAI/PageIndex](https://github.com/VectifyAI/PageIndex) 能力接入项目。PageIndex 是可选外部依赖，不随本仓库安装，也没有机器级默认路径。
 
-## INSTALL — 克隆 project_manager 后必做
+## 安装与节点配置
 
-> ⚠️ PageIndex 是**外部依赖**,不在 project_manager git 里。
-> 克隆 project_manager 后必须额外操作,否则 `pageindex_client.index_pdf()` / `index_md()` 会失败。
-
-### 步骤 1:clone PageIndex repo 到约定路径
+在每个需要执行 PageIndex 的 Windows 或 macOS 节点上，把 PageIndex 克隆到该节点自己的工具目录并安装其依赖：
 
 ```bash
-cd /Users/zhang/Desktop/工作文件/
-git clone https://github.com/VectifyAI/PageIndex.git
-# 或者用我们已有的本地 fork(有 prompt injection 安全加固):
-# 路径:/Users/zhang/Desktop/工作文件/PageIndex/
-# remote URL: git@github.com:loveless58/PageIndex.git(待配)
+git clone https://github.com/VectifyAI/PageIndex.git /path/to/pageindex
+cd /path/to/pageindex
+python -m venv .venv
 ```
 
-### 步骤 2:PageIndex venv + 依赖
+Windows：
 
-```bash
-cd /Users/zhang/Desktop/工作文件/PageIndex
-python3.12 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+```powershell
+& .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+$env:PROJECT_MANAGER_PAGEINDEX_DIR = (Get-Location).Path
+$env:PROJECT_MANAGER_LLM_BASE_URL = "https://llm.example.invalid/v1"
 ```
 
-依赖: `litellm` / `pymupdf` / `PyPDF2` / `python-dotenv` / `pyyaml`
-
-### 步骤 3:PageIndex LLM 配置(.env + config.yaml)
+macOS：
 
 ```bash
-cat > /Users/zhang/Desktop/工作文件/PageIndex/.env << 'EOF'
-OPENAI_API_BASE=http://172.18.125.202:9990/v1
-OPENAI_API_KEY=<your-gpustack-key>
-EOF
-
-# config.yaml 里 model 字段改成:
-# model: "openai/minimax-m3-mxfp8"
+.venv/bin/python -m pip install -r requirements.txt
+export PROJECT_MANAGER_PAGEINDEX_DIR="$PWD"
+export PROJECT_MANAGER_LLM_BASE_URL="https://llm.example.invalid/v1"
 ```
 
-### 步骤 4:验证 PageIndex 可调通
+PageIndex 自身使用的模型名、API key 和兼容端点应按其上游文档配置。示例域名只是不会被路由的占位符，不能直接用于生产。不要把真实 endpoint、密钥或节点路径写进仓库。
 
-```bash
-cd /Users/zhang/Desktop/工作文件/PageIndex
-.venv/bin/python run_pageindex.py --pdf_path /path/to/test.pdf
-# 输出到 ./results/{pdf_name}_structure.json 即 OK
+## AppSettings 配置
+
+启用结构索引时需要同时选择 provider 并显式提供安装目录：
+
+```powershell
+$env:PROJECT_MANAGER_STRUCTURE_INDEX = "pageindex"
+$env:PROJECT_MANAGER_PAGEINDEX_DIR = "C:\Tools\PageIndex"
 ```
 
-### 步骤 5:验证 project_manager ↔ PageIndex 联通
+也可以在被忽略的 `config/project-manager.local.json` 中设置：
 
-```bash
-cd /Users/zhang/Desktop/工作文件/project_manager
-/opt/homebrew/bin/python3.11 -c "
+```json
+{
+  "providers": {
+    "structure_index": "pageindex",
+    "pageindex_dir": "/path/to/pageindex"
+  }
+}
+```
+
+## Python 调用
+
+直接使用客户端时，构造函数必须接收显式目录：
+
+```python
+import os
+
 from integrations.pageindex.pageindex_client import PageIndexClient
-c = PageIndexClient()
-r = c.index_md('business_rules/document_parse/kb.md')
-print(r['status'], len(r['structure']))
-"
-```
 
-预期: `success` + 至少 1 个顶层节点(实际 7 个子节点: 招标公告/投标文件/合同文件/报名材料/其他/优先级不变量/LLM fallback)。
+configured_dir = os.environ["PROJECT_MANAGER_PAGEINDEX_DIR"]
+client = PageIndexClient(configured_dir)
 
-## 决策记录
-
-- **2026-07-23**: 尝试用 `git submodule add` 把 PageIndex 集成入 project_manager,**失败**(git over HTTPS 超时,网络层可达但 git 协议层不可达)。改用 INSTALL.md 外部依赖方案。
-- **未来增强**:
-  - 如果网络恢复 → 改 `git submodule add https://github.com/VectifyAI/PageIndex.git integrations/pageindex/PageIndex`
-  - 或者 fork VectifyAI/PageIndex 到 loveless58/PageIndex,submodule 自己的 fork(完全可控)
-
-## 用途
-
-把 PDF / Markdown 文档生成层级化 tree 结构(TOC + 各章节 summary + page_index 范围),供下游 skill 消费做精细化决策。
-
-## 安装
-
-### 1. PageIndex 仓库
-
-`/Users/zhang/Desktop/工作文件/PageIndex/`(本地 fork 复制,git history 已丢失,remote URL 未配)。
-
-如果首次安装,需要在 PageIndex 目录下创建 venv:
-
-```bash
-cd /Users/zhang/Desktop/工作文件/PageIndex
-python3.12 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-```
-
-依赖:`litellm` / `pymupdf` / `PyPDF2` / `python-dotenv` / `pyyaml`
-
-### 2. LLM 配置
-
-PageIndex 需要 LLM endpoint。修改 `PageIndex/pageindex/config.yaml`:
-
-```yaml
-model: "openai/minimax-m3-mxfp8"   # 或其他 litellm 支持的模型
-```
-
-并在 `PageIndex/.env` 写入:
-
-```
-OPENAI_API_BASE=http://172.18.125.202:9990/v1
-OPENAI_API_KEY=<your-key>
-```
-
-> 当前使用 GPUStack + minimax-m3-mxfp8。环境不通时 `index_pdf()` 会返回 `failed`。
-
-### 3. project_manager 依赖
-
-`pageindex_client.py` 用 PyPDF2 / PyMuPDF(项目主环境已装)。
-
-```python
-PyPDF2==3.0.1
-PyMuPDF==1.26.4
-```
-
-## 调用示例
-
-```python
-import sys
-sys.path.insert(0('/Users/zhang/Desktop/工作文件/project_manager/integrations/pageindex'))
-from pageindex_client import PageIndexClient
-
-client = PageIndexClient()
-
-# 1. 索引 PDF (subprocess 调 PageIndex, 50 页约 55-65s)
 result = client.index_pdf("/path/to/contract.pdf")
 if result["status"] == "success":
-    print(f"doc_name: {result['doc_name']}")
-    print(f"elapsed: {result['elapsed_seconds']}s")
-    print(f"顶层节点: {len(result['structure'])}")
-    for n in result["structure"]:
-        print(f"  - {n['title']} (pages {n['start_index']}-{n['end_index']})")
-
-# 2. 按页码范围读 PDF 内容 (纯 Python, 几秒)
-pages = client.get_page_content("/path/to/contract.pdf", "5-7")
-for p in pages:
-    print(f"=== Page {p['page']} ===\n{p['content']}\n")
-
-# 3. 按章节标题找节点
-matches = client.find_nodes_by_title(result, "签约")
-for m in matches:
-    print(f"  {m['node_id']}: {m['title']} (pages {m['start_index']}-{m['end_index']})")
+    for node in result["structure"]:
+        print(node["title"], node["start_index"], node["end_index"])
 ```
 
-## 文件清单
+通过应用配置调用：
 
-| 文件 | 用途 |
-|---|---|
-| `pageindex_client.py` | 客户端主实现(3 个核心 API) |
-| `SKILL.md` | 契约 + 工作流(下游消费契约) |
+```python
+from integrations.pageindex.pageindex_client import PageIndexClient
+from platform_core.settings import load_app_settings
 
-## CLI 直接调用(开发调试用)
+settings = load_app_settings()
+configured_dir = settings.providers.pageindex_dir
+if configured_dir is None:
+    raise RuntimeError("PageIndex is not enabled for this node")
+client = PageIndexClient(configured_dir)
+```
 
-跳过客户端,直接用 PageIndex CLI:
+环境检查是显式能力探测：
+
+```python
+client.check_environment()
+```
+
+构造客户端不会启动外部进程；`check_environment()`、`index_pdf()` 和 `index_md()` 在真正使用 PageIndex 时才检查解释器和 CLI。页内容读取及结构树查询不依赖 PageIndex CLI。
+
+## 稳定输出
+
+索引结果使用 `pageindex_result.v1` 形状：
+
+```json
+{
+  "status": "success",
+  "engine": "pageindex",
+  "doc_name": "contract.pdf",
+  "doc_id": "generated-id",
+  "structure": [],
+  "structure_json_path": "/runtime/pageindex/results/contract_structure.json",
+  "elapsed_seconds": 12.3
+}
+```
+
+失败结果保留相同边界并提供稳定的 `error`，不泄露本机绝对工具路径。
+
+## API 与处理边界
+
+- `index_pdf(pdf_path)`：调用外部 PageIndex，生成 PDF 章节树。
+- `index_md(md_path)`：调用外部 PageIndex，生成 Markdown 章节树。
+- `get_page_content(pdf_path, pages)`：纯 Python 读取指定物理页。
+- `find_nodes_by_title(index_result, keyword)`：在既有结构树中查询标题。
+- 扫描件没有文字层时应先走 OCR/document_parse 策略，不由 PageIndex 隐式切换 OCR。
+- `structure.json` 是可重建索引产物，不是 SQL 权威状态或原始文件存储。
+
+## 验证
+
+快速单元测试不会要求本机已安装 PageIndex。真实集成测试必须由操作者显式提供受控样本和下列变量：
+
+```text
+PAGEINDEX_RUN_SLOW_TESTS=1
+PAGEINDEX_TEST_DIR=/path/to/pageindex
+PAGEINDEX_TEST_PDF=/path/to/sample.pdf
+PAGEINDEX_TEST_CACHE=/path/to/sample_structure.json
+PAGEINDEX_TEST_SCAN_PDF=/path/to/scan.pdf
+```
+
+随后运行：
 
 ```bash
-cd /Users/zhang/Desktop/工作文件/PageIndex
-.venv/bin/python run_pageindex.py --pdf_path /path/to/file.pdf
+python -X utf8 -B -m pytest -q tests/test_pageindex_client.py
 ```
-
-输出到 `./results/{pdf_name}_structure.json`。
-
-## 已知问题
-
-| 问题 | 临时方案 | 后续增强 |
-|---|---|---|
-| 扫描件 PDF get_page_content 返回空 | 用 OCR 先识别再调 PageIndex | get_page_content 自动 fallback 到 OCR (swift_ocr_bridge) |
-| PageIndex subprocess 启动开销 ~200ms | 接受(单次 index 几十秒) | 改 daemon 长驻进程 |
-| PageIndex 仓库 git history 丢失 | 接受(本地 fork 复制) | 重新 git clone 上游,然后 cherry-pick prompt injection 改动 |
-
-## 决策历史
-
-- **2026-07-23**: 初版落地,作为横向 infrastructure,被所有 skill 消费

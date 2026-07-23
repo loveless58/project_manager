@@ -22,14 +22,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from business_rules.archive_decision import evaluate_archive_decision
+from common.provider_config import resolve_llm_base_url
 
 
 # 业务知识库物理路径(business_rules/archive_files/)
 BUSINESS_KNOWLEDGE_DIR = Path(__file__).resolve().parents[3] / "business_rules" / "archive_files"
 
-# LLM 配置（从环境变量读，与 GPUStack 对接）
+# 模型和超时可按归档能力覆盖；endpoint 由统一 provider 配置解析。
 _LLM_MODEL = os.getenv("ARCHIVE_LLM_MODEL", "openai/minimax-m3")
-_LLM_API_BASE = os.getenv("OPENAI_API_BASE", "http://172.18.125.202:9990/v1")
 _LLM_TIMEOUT = int(os.getenv("ARCHIVE_LLM_TIMEOUT", "10"))
 
 
@@ -97,6 +97,7 @@ def _search_knowledge_base(source_file: str, hard_phase: Optional[str]) -> Dict[
         }
 
     try:
+        api_base = resolve_llm_base_url(required=True)
         import litellm
 
         prompt = f"""你是归档决策助手。根据文件名/路径和业务知识库判断归档阶段。
@@ -117,7 +118,7 @@ REASONING: <一句话理由>
 
         response = litellm.completion(
             model=_LLM_MODEL,
-            api_base=_LLM_API_BASE,
+            api_base=api_base,
             messages=[{"role": "user", "content": prompt}],
             timeout=_LLM_TIMEOUT,
         )
@@ -181,6 +182,7 @@ def _llm_general_fallback(source_file: str, hard_phase: Optional[str]) -> Dict[s
     这是 cold-start fallback，不是主路径。
     """
     try:
+        api_base = resolve_llm_base_url(required=True)
         import litellm
 
         prompt = f"""你是归档决策助手。根据文件名/路径判断归档阶段（不需要业务知识库）。
@@ -198,7 +200,7 @@ REASONING: <一句话理由>
 
         response = litellm.completion(
             model=_LLM_MODEL,
-            api_base=_LLM_API_BASE,
+            api_base=api_base,
             messages=[{"role": "user", "content": prompt}],
             timeout=_LLM_TIMEOUT,
         )

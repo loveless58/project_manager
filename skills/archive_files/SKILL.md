@@ -195,7 +195,7 @@ SKILL.md 描述契约 + 工作流;具体实现在 `scripts/`:
 - **业务知识库仅种子**(business_knowledge/归档规则_v1.md)
   - 当前知识库是从硬编码规则反向抽取的种子
   - 历史归档反向抽取 → 知识库扩种(规划中,渐进式数据驱动)
-- **LLM 兜底依赖 GPUStack 服务可用**(环境变量:OPENAI_API_BASE 默认 http://172.18.125.202:9990/v1)
+- **LLM 兜底需要显式 provider 配置**（优先使用 `PROJECT_MANAGER_LLM_BASE_URL`，无安全默认 endpoint）
 
 ## Iteration Log
 

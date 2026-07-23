@@ -24,7 +24,7 @@
 ## 数据来源(待真实样本)
 
 **等真实样本扩种**:
-- 当前工作目录: `/Users/zhang/Desktop/工作文件/项目投标/*/原始文件/*.docx`(如有)
+- 当前工作目录: `${BUSINESS_ROOT}/项目投标/*/原始文件/*.docx`(如有)
 - 数据源: `document_parse.v1.business_judgement.extracted_fields`
 - 抽取流程: 跟 `skills/archive_files/references/knowledge-base-pattern.md` 一致
 
