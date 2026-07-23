@@ -24,6 +24,11 @@ def _path(value: Optional[PathLike]) -> Optional[Path]:
     return Path(value).expanduser().resolve()
 
 
+def _is_obvious_network_path(value: PathLike) -> bool:
+    raw = str(value).strip()
+    return bool(re.match(r"^(?:\\\\|//|smb://|nfs://|afp://)", raw, re.IGNORECASE))
+
+
 def _read_config(config_file: Optional[PathLike]) -> Dict[str, Any]:
     if config_file == "":
         return {}
@@ -130,11 +135,7 @@ def load_app_settings(
             default_root if mode == "local" else None,
         )
     )
-    default_runtime = (
-        resolved_business_root / ".project_manager"
-        if resolved_business_root is not None
-        else Path.home() / ".project_manager"
-    )
+    default_runtime = Path.home() / ".project_manager"
     resolved_runtime = _path(
         _pick(
             runtime_workspace,
@@ -156,17 +157,16 @@ def load_app_settings(
             default_database,
         )
     ).lower()
-    sqlite_path = _path(
-        _pick(
-            None,
-            env,
-            "PROJECT_MANAGER_SQLITE_PATH",
-            local_database.get("sqlite_path"),
-            resolved_runtime / "state" / "project_manager.sqlite3"
-            if database_provider == "sqlite"
-            else None,
-        )
+    raw_sqlite_path = _pick(
+        None,
+        env,
+        "PROJECT_MANAGER_SQLITE_PATH",
+        local_database.get("sqlite_path"),
+        resolved_runtime / "state" / "project_manager.sqlite3"
+        if database_provider == "sqlite"
+        else None,
     )
+    sqlite_path = _path(raw_sqlite_path)
     dsn_env_var = str(
         _pick(
             None,
@@ -231,6 +231,18 @@ def load_app_settings(
         raise SettingsError("local deployment requires sqlite")
     if mode == "central" and database_provider != "postgresql":
         raise SettingsError("central deployment requires postgresql")
+    if database_provider == "sqlite":
+        if raw_sqlite_path is not None and _is_obvious_network_path(raw_sqlite_path):
+            raise SettingsError("sqlite_path must be node-local")
+        if (
+            sqlite_path is not None
+            and resolved_business_root is not None
+            and (
+                sqlite_path == resolved_business_root
+                or resolved_business_root in sqlite_path.parents
+            )
+        ):
+            raise SettingsError("sqlite_path must not be inside business_root")
     if structure_index == "pageindex" and pageindex_dir is None:
         raise SettingsError("pageindex_dir is required when structure_index is pageindex")
     if document_store == "local" and resolved_business_root is None:

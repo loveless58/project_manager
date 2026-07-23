@@ -40,12 +40,25 @@ result = run(
 
 配置优先级为：显式参数 → `PROJECT_MANAGER_*` 环境变量 → `config/project-manager.local.json` → 跨平台默认值。
 
-Windows、macOS 和群晖挂载路径都通过本地配置提供。仓库不再默认 `E:\SynologyDrive`。如需继续使用该目录，请在本机设置：
+Windows、macOS 和群晖挂载路径都通过本地配置提供。只有 `PROJECT_MANAGER_BUSINESS_ROOT` 可以指向 Synology Drive、群晖挂载目录或其他同步业务目录。`PROJECT_MANAGER_WORKSPACE_DIR`、`PROJECT_MANAGER_SQLITE_PATH` 和派生运行态必须放在当前执行节点的本机非同步目录。
+
+Windows PowerShell 示例：
 
 ```powershell
 $env:PROJECT_MANAGER_BUSINESS_ROOT = "E:\SynologyDrive"
-$env:PROJECT_MANAGER_WORKSPACE_DIR = "E:\SynologyDrive\_project_manager_workspace"
+$env:PROJECT_MANAGER_WORKSPACE_DIR = Join-Path $env:LOCALAPPDATA "ProjectManager"
+$env:PROJECT_MANAGER_SQLITE_PATH = Join-Path $env:LOCALAPPDATA "ProjectManager\state\project_manager.sqlite3"
 ```
+
+macOS shell 示例：
+
+```bash
+export PROJECT_MANAGER_BUSINESS_ROOT="$HOME/SynologyDrive"
+export PROJECT_MANAGER_WORKSPACE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/project_manager"
+export PROJECT_MANAGER_SQLITE_PATH="$PROJECT_MANAGER_WORKSPACE_DIR/state/project_manager.sqlite3"
+```
+
+Settings 会拒绝位于业务根内部的 SQLite 文件和明显的 UNC/network URL。Windows 映射网络盘无法仅凭路径字符串可靠识别，运维人员必须确认运行工作区与 SQLite 实际落在本机磁盘，而不是同步盘、NAS 或网络挂载点。
 
 可从 [config/project-manager.example.json](config/project-manager.example.json) 复制配置样例并改名为 `config/project-manager.local.json`。样例只保存 `PROJECT_MANAGER_DATABASE_DSN` 这个环境变量名，不保存实际 DSN、口令、令牌或私钥；实际 DSN 由节点的运行环境注入。
 
@@ -132,10 +145,10 @@ PageIndex、OCR、真实业务样本和外部服务集成测试不是普通快�
 | `LLM_BASE_URL` | 否 | LLM API 端点。 |
 | `LLM_MODEL` | 否 | LLM 模型名。 |
 | `PROJECT_MANAGER_DEPLOYMENT_MODE` | 否 | `local`（SQLite 配置形状）或 `central`（PostgreSQL 配置预留）。 |
-| `PROJECT_MANAGER_BUSINESS_ROOT` | 否 | 当前节点可访问的业务根目录。 |
-| `PROJECT_MANAGER_WORKSPACE_DIR` | 否 | 当前节点的运行工作区。 |
+| `PROJECT_MANAGER_BUSINESS_ROOT` | 否 | 当前节点可访问的业务根目录；可以是同步业务目录。 |
+| `PROJECT_MANAGER_WORKSPACE_DIR` | 否 | 当前节点的本机非同步运行工作区。 |
 | `PROJECT_MANAGER_DATABASE_PROVIDER` | 否 | `sqlite` 或 `postgresql`，必须与部署模式匹配。 |
-| `PROJECT_MANAGER_SQLITE_PATH` | 否 | 单机 SQLite 文件位置；当前尚无 SQLite Repository 实现。 |
+| `PROJECT_MANAGER_SQLITE_PATH` | 否 | 单机 SQLite 文件位置；必须位于节点本机、业务根以外。当前尚无 SQLite Repository 实现。 |
 | `PROJECT_MANAGER_DATABASE_DSN_ENV` | 否 | 保存实际 DSN 的环境变量名称，默认 `PROJECT_MANAGER_DATABASE_DSN`。 |
 | `PROJECT_MANAGER_DATABASE_DSN` | Phase 2+ central | 未来 PostgreSQL 连接实现读取的 DSN；不写入配置文件。 |
 | `PROJECT_MANAGER_DOCUMENT_STORE` | 否 | `local` 或 `disabled`。 |

@@ -23,7 +23,7 @@ class TestWorkspaceConfig(unittest.TestCase):
                     config = resolve_workspace_config(config_file="")
 
         self.assertEqual(config.business_root, Path(td) / "ProjectManagerData")
-        self.assertEqual(config.runtime_workspace, Path(td) / "ProjectManagerData" / ".project_manager")
+        self.assertEqual(config.runtime_workspace, Path(td) / ".project_manager")
         self.assertEqual(config.project_files_dir, config.business_root / "项目文件")
         self.assertEqual(config.data_cleaning_workspace, config.runtime_workspace / "数据清洗工作台")
         self.assertEqual(config.opportunity_dir, config.runtime_workspace / "新机会与线索")
@@ -104,7 +104,7 @@ class TestWorkspaceConfig(unittest.TestCase):
 
                 config = resolve_workspace_config(
                     business_root="~/BusinessRoot",
-                    runtime_workspace="~/BusinessRoot/workspace",
+                    runtime_workspace="~/RuntimeWorkspace",
                     config_file="",
                 )
 
