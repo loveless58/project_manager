@@ -39,6 +39,32 @@ def test_local_store_rejects_path_escape(tmp_path: Path) -> None:
         store.stat(ref)
 
 
+def test_local_store_rejects_absolute_path(tmp_path: Path) -> None:
+    from integrations.document_store.local_store import DocumentStorePathError, LocalDocumentStore
+
+    outside = tmp_path.parent / "secret.txt"
+    ref = DocumentRef("local", str(outside), f"local://{outside.as_posix()}")
+
+    with pytest.raises(DocumentStorePathError, match="outside configured root"):
+        LocalDocumentStore(tmp_path).stat(ref)
+
+
+def test_local_store_rejects_existing_symlink_to_outside_root(tmp_path: Path) -> None:
+    from integrations.document_store.local_store import DocumentStorePathError, LocalDocumentStore
+
+    outside = tmp_path.parent / "secret.txt"
+    outside.write_bytes(b"secret")
+    symlink = tmp_path / "escaped.txt"
+    try:
+        symlink.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    ref = DocumentRef("local", "escaped.txt", "local://escaped.txt")
+
+    with pytest.raises(DocumentStorePathError, match="outside configured root"):
+        LocalDocumentStore(tmp_path).open_read(ref)
+
+
 def test_local_store_rejects_provider_mismatch(tmp_path: Path) -> None:
     from integrations.document_store.local_store import DocumentStorePathError, LocalDocumentStore
 
@@ -62,3 +88,16 @@ def test_local_store_stat_etag_uses_file_size_and_modification_time(tmp_path: Pa
 
     actual_modified_ns = source.stat().st_mtime_ns
     assert stat.etag == hashlib.sha256(f"3:{actual_modified_ns}".encode("ascii")).hexdigest()
+
+
+def test_disabled_store_implements_protocol_and_rejects_operations() -> None:
+    from integrations.document_store.disabled_store import DisabledDocumentStore, DocumentStoreUnavailable
+
+    store = DisabledDocumentStore()
+    ref = DocumentRef("disabled", "a.txt", "disabled://a.txt")
+
+    assert isinstance(store, DocumentStore)
+    with pytest.raises(DocumentStoreUnavailable, match="document store is disabled"):
+        store.stat(ref)
+    with pytest.raises(DocumentStoreUnavailable, match="document store is disabled"):
+        store.open_read(ref)

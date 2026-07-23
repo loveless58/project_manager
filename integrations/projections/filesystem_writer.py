@@ -14,7 +14,11 @@ class ProjectionPathError(ValueError):
 
 
 class FilesystemProjectionWriter:
-    """Atomically write UTF-8 projections beneath a configured root directory."""
+    """Atomically write projections beneath a trusted, exclusively managed root.
+
+    The configured root and its directory components must not be concurrently
+    replaced by untrusted actors while this adapter performs I/O.
+    """
 
     name = "filesystem"
 
@@ -48,9 +52,10 @@ class FilesystemProjectionWriter:
         finally:
             if temp_name and os.path.exists(temp_name):
                 os.unlink(temp_name)
+        normalized_path = target.relative_to(self.root).as_posix()
         return ProjectionRef(
             provider=self.name,
-            logical_uri=f"projection://{request.relative_path.replace(os.sep, '/')}",
+            logical_uri=f"projection://{normalized_path}",
             sha256=hashlib.sha256(payload).hexdigest(),
             size_bytes=len(payload),
         )

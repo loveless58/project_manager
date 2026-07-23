@@ -34,6 +34,47 @@ def test_projection_writer_rejects_path_escape(tmp_path: Path) -> None:
         writer.write(request)
 
 
+def test_projection_writer_rejects_absolute_path(tmp_path: Path) -> None:
+    from integrations.projections.filesystem_writer import FilesystemProjectionWriter, ProjectionPathError
+
+    outside = tmp_path.parent / "outside.json"
+    request = ProjectionRequest("json", str(outside), "{}", "application/json")
+
+    with pytest.raises(ProjectionPathError, match="outside configured root"):
+        FilesystemProjectionWriter(tmp_path).write(request)
+
+
+def test_projection_writer_rejects_existing_symlink_to_outside_root(tmp_path: Path) -> None:
+    from integrations.projections.filesystem_writer import FilesystemProjectionWriter, ProjectionPathError
+
+    outside_directory = tmp_path.parent / "outside"
+    outside_directory.mkdir()
+    symlink = tmp_path / "escaped"
+    try:
+        symlink.symlink_to(outside_directory, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    request = ProjectionRequest("json", "escaped/outside.json", "{}", "application/json")
+
+    with pytest.raises(ProjectionPathError, match="outside configured root"):
+        FilesystemProjectionWriter(tmp_path).write(request)
+
+
+def test_projection_writer_uses_normalized_target_path_for_logical_uri(tmp_path: Path) -> None:
+    from integrations.projections.filesystem_writer import FilesystemProjectionWriter
+
+    writer = FilesystemProjectionWriter(tmp_path)
+    nested_request = ProjectionRequest("json", "exports/../queue.json", "{}", "application/json")
+    direct_request = ProjectionRequest("json", "queue.json", "{}", "application/json")
+
+    nested_result = writer.write(nested_request)
+    direct_result = writer.write(direct_request)
+
+    assert nested_result.logical_uri == "projection://queue.json"
+    assert direct_result.logical_uri == nested_result.logical_uri
+    assert (tmp_path / "queue.json").read_bytes() == b"{}"
+
+
 def test_projection_writer_is_idempotent_for_identical_utf8_json(tmp_path: Path) -> None:
     from integrations.projections.filesystem_writer import FilesystemProjectionWriter
 

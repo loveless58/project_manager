@@ -12,7 +12,11 @@ class DocumentStorePathError(ValueError):
 
 
 class LocalDocumentStore:
-    """Read document objects rooted at a configured local directory."""
+    """Read document objects rooted at a trusted, exclusively managed directory.
+
+    The configured root and its directory components must not be concurrently
+    replaced by untrusted actors while this adapter performs I/O.
+    """
 
     name = "local"
 
