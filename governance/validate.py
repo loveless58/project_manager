@@ -5,7 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -139,68 +139,153 @@ def validate_dirs(verbose: bool = True) -> Tuple[int, int, List[dict]]:
     return error_count, warning_count, findings
 
 
-def validate_tools(verbose: bool = True) -> Tuple[int, int, List[dict]]:
-    """Compare the registered debug tools with the checked-in schema contract."""
-    contract = load_contract("project_schema.json")
-    expected_tools = set(contract.get("tools", {}))
+_COMPARABLE_PARAMETER_FIELDS = ("type", "items", "properties", "enum", "format")
+
+
+def _parameter_shape(value: Any) -> Any:
+    """Return only schema fields represented by ToolRegistry parameter metadata."""
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: value[key]
+        for key in _COMPARABLE_PARAMETER_FIELDS
+        if key in value
+    }
+
+
+def validate_tool_contract(
+    contract: Dict[str, Any],
+    registry: Any,
+    verbose: bool = True,
+) -> Tuple[int, int, List[dict]]:
+    """Compare registered tools with names, parameter shapes and required parameters."""
+    expected_tools = contract.get("tools", {})
+    actual_names = set(registry.list_tools())
+    expected_names = set(expected_tools)
     findings: List[dict] = []
-    try:
-        import main as main_module  # noqa: E402
-
-        actual_tools = set(main_module._build_registry().list_tools())
-    except Exception as exc:
-        msg = f"[ERROR] 无法导入 main._build_registry(): {exc}"
-        findings.append({"id": "TOOL-IMPORT", "level": "error", "msg": msg})
-        if verbose:
-            print(f"❌ {msg}")
-        return 1, 0, findings
-
     error_count = 0
     warning_count = 0
-    if len(actual_tools) != len(expected_tools):
+
+    if len(actual_names) != len(expected_names):
         errors, warnings = _record(
             findings,
             {
                 "id": "TOOL-001",
                 "level": "error",
-                "msg": f"[ERROR] 工具数量不匹配: 实际 {len(actual_tools)} != 期望 {len(expected_tools)}",
+                "msg": f"[ERROR] 工具数量不匹配: 实际 {len(actual_names)} != 期望 {len(expected_names)}",
             },
             verbose,
         )
         error_count += errors
         warning_count += warnings
 
-    for tool in sorted(expected_tools - actual_tools):
+    for name in sorted(expected_names - actual_names):
         errors, warnings = _record(
             findings,
             {
-                "id": f"TOOL-MISSING-{tool}",
+                "id": f"TOOL-MISSING-{name}",
                 "level": "error",
-                "msg": f"[ERROR] 工具 {tool} 在 schema 里但未注册",
-                "fix": f"在 main._build_registry() 注册 {tool}",
+                "msg": f"[ERROR] 工具 {name} 在 schema 里但未注册",
+                "fix": f"在 main._build_registry() 注册 {name}",
             },
             verbose,
         )
         error_count += errors
         warning_count += warnings
 
-    for tool in sorted(actual_tools - expected_tools):
+    for name in sorted(actual_names - expected_names):
         errors, warnings = _record(
             findings,
             {
-                "id": f"TOOL-EXTRA-{tool}",
-                "level": "warning",
-                "msg": f"[WARNING] 工具 {tool} 已注册但不在 schema 里",
-                "fix": f"在 governance/project_schema.json 添加 {tool}",
+                "id": f"TOOL-EXTRA-{name}",
+                "level": "error",
+                "msg": f"[ERROR] 工具 {name} 已注册但不在 schema 里",
+                "fix": f"在 governance/project_schema.json 添加 {name}",
             },
             verbose,
         )
         error_count += errors
         warning_count += warnings
 
-    if verbose and not error_count and not warning_count:
-        print(f"✅ 工具 schema 一致: {len(actual_tools)} 个工具")
+    for name in sorted(actual_names & expected_names):
+        spec = expected_tools[name]
+        tool = registry.get(name)
+        expected_params = spec.get("params", {})
+        actual_params = tool.parameters
+        expected_param_names = set(expected_params)
+        actual_param_names = set(actual_params)
+        if expected_param_names != actual_param_names:
+            errors, warnings = _record(
+                findings,
+                {
+                    "id": f"TOOL-PARAMS-{name}",
+                    "level": "error",
+                    "msg": (
+                        f"[ERROR] 工具 {name} 参数名不匹配: "
+                        f"实际 {sorted(actual_param_names)} != 期望 {sorted(expected_param_names)}"
+                    ),
+                },
+                verbose,
+            )
+            error_count += errors
+            warning_count += warnings
+        else:
+            for parameter_name in sorted(actual_param_names):
+                actual_shape = _parameter_shape(actual_params[parameter_name])
+                expected_shape = _parameter_shape(expected_params[parameter_name])
+                if actual_shape == expected_shape:
+                    continue
+                errors, warnings = _record(
+                    findings,
+                    {
+                        "id": f"TOOL-PARAM-SHAPE-{name}-{parameter_name}",
+                        "level": "error",
+                        "msg": (
+                            f"[ERROR] 工具 {name} 参数 {parameter_name} shape 不匹配: "
+                            f"实际 {actual_shape!r} != 期望 {expected_shape!r}"
+                        ),
+                    },
+                    verbose,
+                )
+                error_count += errors
+                warning_count += warnings
+
+        expected_required = set(spec.get("required", []))
+        actual_required = set(tool.required_params)
+        if expected_required == actual_required:
+            continue
+        errors, warnings = _record(
+            findings,
+            {
+                "id": f"TOOL-REQUIRED-{name}",
+                "level": "error",
+                "msg": (
+                    f"[ERROR] 工具 {name} 必填参数不匹配: "
+                    f"实际 {sorted(actual_required)} != 期望 {sorted(expected_required)}"
+                ),
+            },
+            verbose,
+        )
+        error_count += errors
+        warning_count += warnings
+
     return error_count, warning_count, findings
+
+
+def validate_tools(verbose: bool = True) -> Tuple[int, int, List[dict]]:
+    """Compare the registered debug tools with the checked-in schema contract."""
+    contract = load_contract("project_schema.json")
+    try:
+        import main as main_module  # noqa: E402
+
+        registry = main_module._build_registry()
+    except Exception as exc:
+        msg = f"[ERROR] 无法导入 main._build_registry(): {exc}"
+        findings = [{"id": "TOOL-IMPORT", "level": "error", "msg": msg}]
+        if verbose:
+            print(f"❌ {msg}")
+        return 1, 0, findings
+    return validate_tool_contract(contract, registry, verbose=verbose)
 
 
 def validate_loop_packages(verbose: bool = True) -> Tuple[int, int, List[dict]]:

@@ -16,14 +16,14 @@
       "optional_subdirs": ["新机会与线索", "公司通用财务"],
       "optional_files": ["index.json"],
       "validation_level": "info",
-      "description": "Business project data root resolved from AppSettings.business_root. Runtime workspace must not own real archived project files."
+      "description": "Business project data root resolved from AppSettings.business_root. Runtime workspace must not own real archived project files. 缺失仅记录为 info，不阻塞命令执行。"
     },
     "data_cleaning_workbench": {
       "path": "数据清洗工作台",
       "required_subdirs": ["runs"],
       "optional_subdirs": ["structured_documents", "structured_workbooks"],
       "validation_level": "info",
-      "description": "Data-cleaning workbench for run packages and structured outputs under the configured runtime workspace."
+      "description": "Data-cleaning workbench for run packages and structured outputs under the configured runtime workspace. 缺失仅记录为 info，不阻塞命令执行。"
     },
     "new_opportunities": {
       "path": "新机会与线索",
@@ -31,17 +31,17 @@
       "optional_subdirs": ["bid_contexts"],
       "optional_files": ["商机列表.md", "重复检测记录.md"],
       "validation_level": "info",
-      "description": "Opportunity workbench derived from the configured runtime workspace."
+      "description": "Opportunity workbench derived from the configured runtime workspace. 缺失仅记录为 info，不阻塞命令执行。"
     },
     "agent_state": {
       "path": "state",
       "validation_level": "info",
-      "description": "Agent runtime state under the configured runtime workspace."
+      "description": "Agent runtime state under the configured runtime workspace. 缺失仅记录为 info，不阻塞命令执行。"
     },
     "agent_logs": {
       "path": "logs",
       "validation_level": "info",
-      "description": "Agent traces under the configured runtime workspace."
+      "description": "Agent traces under the configured runtime workspace. 缺失仅记录为 info，不阻塞命令执行。"
     }
   },
   "validation_rules": [

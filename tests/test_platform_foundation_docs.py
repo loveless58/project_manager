@@ -1,3 +1,4 @@
+from copy import deepcopy
 import importlib
 import json
 from pathlib import Path
@@ -25,6 +26,10 @@ def test_directory_contract_points_to_new_settings_source():
     assert payload["config_source"] == "platform_core.settings.load_app_settings"
     assert "E:\\SynologyDrive" not in json.dumps(payload)
     assert "common.workspace_config" not in json.dumps(payload)
+    assert all(
+        "缺失仅记录为 info，不阻塞命令执行" in spec["description"]
+        for spec in payload["required_dirs"].values()
+    )
 
 
 def test_local_secret_config_is_ignored():
@@ -33,12 +38,14 @@ def test_local_secret_config_is_ignored():
     assert "config/workspace.local.json" in ignore_text
 
 
-def test_readme_documents_portable_deployment_and_rebuildable_views():
+def test_readme_separates_current_foundation_from_planned_central_architecture():
     readme = (PROJECT_DIR / "README.md").read_text(encoding="utf-8")
+    assert "## 当前阶段已实现" in readme
+    assert "## 规划中：中心化生产部署（Phase 2+）" in readme
+    assert "PostgreSQL Repository、连接/连接池、迁移、Unit of Work" in readme
+    assert "权威 SQL 状态持久化、控制平面 API、异地执行节点的注册、领取和提交协议均尚未实现" in readme
+    assert "当前版本不能据此部署生产 central 环境" in readme
     assert "Windows、macOS 和群晖挂载路径都通过本地配置提供" in readme
-    assert "SQLite" in readme
-    assert "PostgreSQL 17" in readme
-    assert "异地执行节点" in readme
     assert "JSON / Markdown" in readme
     assert "投影视图" in readme
     assert "PROJECT_MANAGER_DATABASE_DSN" in readme
@@ -79,3 +86,38 @@ def test_tool_governance_matches_the_explicit_runtime_registry():
 
     assert errors == 0, findings
     assert warnings == 0, findings
+
+
+def test_tool_governance_rejects_parameter_and_required_drift():
+    import governance.validate as governance_validate
+    import main
+
+    governance_validate = importlib.reload(governance_validate)
+    contract = governance_validate.load_contract("project_schema.json")
+    drifted_contract = deepcopy(contract)
+    drifted_contract["tools"]["scan_projects"]["params"] = {
+        "unexpected": {"type": "string"}
+    }
+    drifted_contract["tools"]["read_project_record"]["required"] = []
+
+    errors, warnings, findings = governance_validate.validate_tool_contract(
+        drifted_contract,
+        main._build_registry(),
+        verbose=False,
+    )
+
+    assert warnings == 0
+    assert errors >= 2
+    finding_ids = {finding["id"] for finding in findings}
+    assert "TOOL-PARAMS-scan_projects" in finding_ids
+    assert "TOOL-REQUIRED-read_project_record" in finding_ids
+
+
+def test_tool_contract_does_not_claim_to_compare_descriptions():
+    payload = json.loads(
+        (PROJECT_DIR / "governance" / "project_schema.json").read_text(encoding="utf-8")
+    )
+    description_rule = next(
+        rule for rule in payload["validation_rules"] if rule["id"] == "TOOL-003"
+    )
+    assert "不自动比较 description" in description_rule["check"]

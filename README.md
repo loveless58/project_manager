@@ -1,6 +1,6 @@
 # Project Manager Agent
 
-`project_manager` 是一个本地优先、可演进为中心化部署的项目管理与办公自动化 Agent 平台。当前运行时仍以一个 `LoopEngine` 和按业务 Skill 暴露工具的方式工作；平台基础层已经将路径、数据库和可替换能力收口到显式 Settings 与适配器组合根。
+`project_manager` 是一个本地优先的项目管理与办公自动化 Agent 平台。当前仍以一个 `LoopEngine` 和按业务 Skill 暴露工具的方式工作；平台基础层已将路径、配置和可替换能力收口到显式 Settings 与适配器组合根。
 
 当前业务能力覆盖：
 
@@ -36,7 +36,7 @@ result = run(
 )
 ```
 
-## 跨平台配置与部署
+## 跨平台配置
 
 配置优先级为：显式参数 → `PROJECT_MANAGER_*` 环境变量 → `config/project-manager.local.json` → 跨平台默认值。
 
@@ -49,28 +49,15 @@ $env:PROJECT_MANAGER_WORKSPACE_DIR = "E:\SynologyDrive\_project_manager_workspac
 
 可从 [config/project-manager.example.json](config/project-manager.example.json) 复制配置样例并改名为 `config/project-manager.local.json`。样例只保存 `PROJECT_MANAGER_DATABASE_DSN` 这个环境变量名，不保存实际 DSN、口令、令牌或私钥；实际 DSN 由节点的运行环境注入。
 
-| 场景 | 权威数据库 | 运行方式 |
-|---|---|---|
-| Windows/macOS 单机 | 本地 SQLite | 一个设备同时运行应用、控制平面和执行能力；SQLite 文件放在本地运行目录，而非同步盘。 |
-| 群晖中心化部署 | PostgreSQL 17 | 群晖侧 PostgreSQL 17 保存权威状态；异地执行节点通过控制平面 API 领取任务和提交结果，不直接连接数据库。 |
+## 当前阶段已实现
 
-群晖目标包标识为 `PostgreSQL 17.19-4` 时，部署验收必须用 `SHOW server_version` 和 `SHOW server_version_num` 确认实际服务器主版本为 17；包标识本身不是容器镜像标签。数据库端口不应暴露公网，跨地点节点应通过 VPN、私有网络或安全网关访问控制平面。
+- 跨平台 `platform_core.settings.load_app_settings()`：统一显式参数、环境变量、本地配置与默认值的优先级；业务根、运行工作区和物理归档位置不写死。
+- 本地 SQLite 的配置形状与路径规则：`deployment_mode=local` 必须选择 `sqlite`；当前阶段尚未实现 SQLite Repository、迁移或 Unit of Work。
+- PostgreSQL provider 与 `PROJECT_MANAGER_DATABASE_DSN` 环境变量名的配置预留：`deployment_mode=central` 仅验证选择 `postgresql`，是新的 Settings 入口，不是 legacy workspace 兼容入口。
+- 显式适配器组合：`local` / `disabled` DocumentStore、`filesystem` ProjectionWriter、`pageindex` / `disabled` StructureIndex；没有动态任意模块加载。
+- 目录和工具治理：目录路径随当前节点 Settings 解析，工具契约逐项验证名称、参数形状和必填参数。
 
-## 数据、能力与可替换边界
-
-业务根目录、运行工作区、原始文件物理位置和归档位置都不是仓库常量。业务数据通过稳定的文档 ID、逻辑 URI、内容哈希和节点侧存储映射识别；DocumentStore 只在实际执行的节点把逻辑位置解析为本地路径。文件可以移动、缺失或等待归档，不能仅凭某个盘符或文件名推断身份。
-
-`platform_core.settings.load_app_settings()` 负责解析部署配置，`platform_core.composition.build_runtime_adapters()` 从显式注册表组合当前节点的能力。首期已注册的适配器包括：
-
-- `local` / `disabled` DocumentStore；
-- `filesystem` ProjectionWriter；
-- `pageindex` / `disabled` StructureIndex。
-
-OCR、`document_parse`、PageIndex 和投影器都是可替换的服务/适配器，而不是固定的业务规则或独立业务 Agent。处理策略由内容和能力决定：文本型 PDF、DOCX、XLSX、CSV、JSON/XML 与网页 DOM 不默认 OCR；只有具备文本、章节结构和局部查询需求的长文档才适合 PageIndex。
-
-SQL 数据库保存权威业务状态、文档身份/版本/位置、审批、任务和审计元数据。原始文件和大型产物属于 DocumentStore；PageIndex 负责文档章节树、页码定位和局部检索；JSON / Markdown / HTML 是可重建的投影视图和审计快照，不是主存储或第二权威源。
-
-## 当前架构
+当前 `main.run` 的实际路径为：
 
 ```text
 main.run(goal)
@@ -83,7 +70,23 @@ main.run(goal)
   -> write trace and derived artifacts
 ```
 
-业务 Agent 的职责边界与执行节点的技术能力边界分离：办公/项目管理主助手可以协同文件与文档分析、项目账本、归档执行和后续浏览器自动化职责；一个节点只声明自己实际可用的解析、OCR、PageIndex、浏览器和存储能力。归档执行必须基于已批准的结构化动作，不根据不确定的物理路径猜测目标。
+## 规划中：中心化生产部署（Phase 2+）
+
+群晖 PostgreSQL 17 与异地执行节点是已确定的目标方案，不是当前已可部署的生产能力。目标中心化拓扑将由控制平面管理权威状态，并让 Windows、macOS 或其他受信任节点通过 API 领取任务、定位本地存储并提交结果；PostgreSQL 不直接暴露公网。
+
+目标群晖包标识可为 `PostgreSQL 17.19-4`，部署时必须用 `SHOW server_version` 和 `SHOW server_version_num` 验证实际服务器主版本为 17；该包标识不是容器镜像标签。
+
+PostgreSQL Repository、连接/连接池、迁移、Unit of Work、权威 SQL 状态持久化、控制平面 API、异地执行节点的注册、领取和提交协议均尚未实现。因此当前版本不能据此部署生产 central 环境。
+
+目标架构中，Windows/macOS 单机将使用本地 SQLite；群晖 PostgreSQL 17 将成为中心化配置的权威数据库。两种部署均以同一领域契约演进，但当前仓库尚未提供这些数据库基础设施实现。
+
+## 数据、能力与可替换边界
+
+业务根目录、运行工作区、原始文件物理位置和归档位置都不是仓库常量。业务数据通过稳定的文档 ID、逻辑 URI、内容哈希和节点侧存储映射识别；当前 DocumentStore 适配器只在实际执行的节点把逻辑位置解析为本地路径。文件可以移动、缺失或等待归档，不能仅凭某个盘符或文件名推断身份。
+
+OCR、`document_parse`、PageIndex 和投影器都是可替换的服务/适配器，而不是固定的业务规则或独立业务 Agent。处理策略由内容和能力决定：文本型 PDF、DOCX、XLSX、CSV、JSON/XML 与网页 DOM 不默认 OCR；只有具备文本、章节结构和局部查询需求的长文档才适合 PageIndex。
+
+在 Phase 2+ 目标架构中，SQL 数据库将保存权威业务状态、文档身份/版本/位置、审批、任务和审计元数据。原始文件和大型产物属于 DocumentStore；PageIndex 负责文档章节树、页码定位和局部检索；JSON / Markdown / HTML 是可重建的投影视图和审计快照，不是主存储或第二权威源。
 
 ## 安全与运行规则
 
@@ -128,13 +131,13 @@ PageIndex、OCR、真实业务样本和外部服务集成测试不是普通快�
 | `LLM_API_KEY` | 仅 LLM 模式 | LLMPlanner API 密钥。 |
 | `LLM_BASE_URL` | 否 | LLM API 端点。 |
 | `LLM_MODEL` | 否 | LLM 模型名。 |
-| `PROJECT_MANAGER_DEPLOYMENT_MODE` | 否 | `local`（SQLite）或 `central`（PostgreSQL）。 |
+| `PROJECT_MANAGER_DEPLOYMENT_MODE` | 否 | `local`（SQLite 配置形状）或 `central`（PostgreSQL 配置预留）。 |
 | `PROJECT_MANAGER_BUSINESS_ROOT` | 否 | 当前节点可访问的业务根目录。 |
 | `PROJECT_MANAGER_WORKSPACE_DIR` | 否 | 当前节点的运行工作区。 |
 | `PROJECT_MANAGER_DATABASE_PROVIDER` | 否 | `sqlite` 或 `postgresql`，必须与部署模式匹配。 |
-| `PROJECT_MANAGER_SQLITE_PATH` | 否 | 单机 SQLite 文件位置。 |
+| `PROJECT_MANAGER_SQLITE_PATH` | 否 | 单机 SQLite 文件位置；当前尚无 SQLite Repository 实现。 |
 | `PROJECT_MANAGER_DATABASE_DSN_ENV` | 否 | 保存实际 DSN 的环境变量名称，默认 `PROJECT_MANAGER_DATABASE_DSN`。 |
-| `PROJECT_MANAGER_DATABASE_DSN` | 仅中心化运行时 | 由节点环境注入的实际 PostgreSQL DSN，不写入配置文件。 |
+| `PROJECT_MANAGER_DATABASE_DSN` | Phase 2+ central | 未来 PostgreSQL 连接实现读取的 DSN；不写入配置文件。 |
 | `PROJECT_MANAGER_DOCUMENT_STORE` | 否 | `local` 或 `disabled`。 |
 | `PROJECT_MANAGER_STRUCTURE_INDEX` | 否 | `pageindex` 或 `disabled`。 |
 | `PROJECT_MANAGER_PAGEINDEX_DIR` | PageIndex 启用时 | 当前节点的 PageIndex 安装目录。 |

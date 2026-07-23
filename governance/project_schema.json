@@ -382,8 +382,8 @@
     {
       "id": "TOOL-003",
       "level": "warning",
-      "check": "description 应该跟 references/project_tools.md 一致",
-      "fix": "同步更新文档或代码"
+      "check": "当前不自动比较 description；ToolRegistry 没有独立的版本化描述契约，名称、params 与 required 由本校验覆盖",
+      "fix": "如需验证 description，请先定义独立的版本化描述契约并在 validator 中实现比较"
     }
   ]
 }
