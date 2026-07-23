@@ -9,11 +9,9 @@
 """
 
 import os
-import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, '/Users/zhang/Desktop/工作文件/project_manager')
 
 from skills.document_parse import parse
 from skills.document_parse.llm_extractor import (
@@ -158,10 +156,31 @@ class TestParseLLMFallback(unittest.TestCase):
             "rule_source": "llm",
         })
 
-        with tempfile_docx(content=["招标公告测试"]) as path:
-            r = parse(path, llm_extractor=mock_extractor)
-            self.assertEqual(r["business_judgement"]["rule_source"], "knowledge_base")
-            mock_extractor.assert_not_called()
+        pageindex_result = {
+            "status": "success",
+            "engine": "pageindex",
+            "doc_name": "kb.md",
+            "doc_id": "kb-doc-1",
+            "structure": [{
+                "title": "文档分类",
+                "node_id": "0000",
+                "start_index": 1,
+                "end_index": 1,
+                "summary": "分类目录",
+                "nodes": [
+                    {"title": "招标公告", "node_id": "0001", "start_index": 1, "end_index": 1, "summary": ""},
+                    {"title": "采购公告", "node_id": "0002", "start_index": 1, "end_index": 1, "summary": ""},
+                ],
+            }],
+            "structure_json_path": "/runtime/results/kb_structure.json",
+            "elapsed_seconds": 0.01,
+        }
+        with patch("skills.document_parse.kb.get_kb_structure", return_value=pageindex_result):
+            with tempfile_docx(content=["招标公告测试"]) as path:
+                r = parse(path, llm_extractor=mock_extractor)
+
+        self.assertEqual(r["business_judgement"]["rule_source"], "knowledge_base")
+        mock_extractor.assert_not_called()
 
     def test_kb_low_calls_llm(self):
         """KB low 时 parse() 降级到 LLM。"""

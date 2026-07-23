@@ -158,7 +158,10 @@ def get_kb_structure(force_reindex: bool = False) -> Dict[str, Any]:
         # cache 损坏 → 删 key,fall through 到下面的 PageIndexClient reindex 逻辑
         del cache[key]
 
-    client = PageIndexClient()
+    pageindex_dir = os.environ.get("PROJECT_MANAGER_PAGEINDEX_DIR")
+    if not pageindex_dir:
+        raise RuntimeError("PROJECT_MANAGER_PAGEINDEX_DIR is required to index the knowledge base")
+    client = PageIndexClient(pageindex_dir)
     result = client.index_md(KB_DOC_PATH)
 
     if result.get("status") != "success":
@@ -234,7 +237,6 @@ def query_kb(
     text = raw_data.get("raw_text", "") or ""
     filename = _get_filename(source_path) if source_path else ""
 
-    client = PageIndexClient()
 
     # 对每个类别评分
     scored: List[Tuple[int, str, List[Dict[str, Any]]]] = []
@@ -242,7 +244,7 @@ def query_kb(
         matched = []
         seen = set()
         for nk in triggers["node_keywords"]:
-            for n in client.find_nodes_by_title(kb_structure, nk):
+            for n in PageIndexClient.find_nodes_by_title(kb_structure, nk):
                 nid = n.get("node_id")
                 if nid not in seen:
                     seen.add(nid)

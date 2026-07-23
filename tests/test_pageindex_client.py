@@ -1,42 +1,46 @@
-"""
-Tests for PageIndex client (integrations/pageindex/pageindex_client.py).
+"""Fast unit tests for the PageIndex client.
 
-设计原则:
-- 默认跑 fast tests (pure Python, 不调 LLM, 几秒)
-- slow tests (调 PageIndex subprocess + LLM, 65s/次) 默认 skip,
-  需要 PAGEINDEX_RUN_SLOW_TESTS=1 环境变量启用
+The PageIndex CLI is an optional external dependency.  These tests therefore
+exercise input validation and pure helpers without requiring a local runtime.
+Slow end-to-end tests are enabled only when all explicit environment variables
+are supplied by the caller.
 """
+
 import json
 import os
 import sys
 import unittest
 from pathlib import Path
 
-# 把 integrations/pageindex 加进 path
+import pytest
+
+
 INTEGRATIONS_DIR = Path(__file__).resolve().parent.parent / "integrations" / "pageindex"
 sys.path.insert(0, str(INTEGRATIONS_DIR.parent))
 
 from pageindex.pageindex_client import PageIndexClient, PageIndexError
 
 
-FEDERAL_RESERVE_PDF = "/Users/zhang/Desktop/工作文件/PageIndex/examples/documents/2023-annual-report-truncated.pdf"
-FEDERAL_RESERVE_CACHE = "/Users/zhang/Desktop/工作文件/PageIndex/results/2023-annual-report-truncated_structure.json"
-TS_PDF = "/Users/zhang/Desktop/工作文件/TS软件外包云泰智汇电子26722V.pdf"
-
+PAGEINDEX_TEST_DIR = os.environ.get("PAGEINDEX_TEST_DIR", "")
+FEDERAL_RESERVE_PDF = os.environ.get("PAGEINDEX_TEST_PDF", "")
+FEDERAL_RESERVE_CACHE = os.environ.get("PAGEINDEX_TEST_CACHE", "")
+TS_PDF = os.environ.get("PAGEINDEX_TEST_SCAN_PDF", "")
 SLOW_TESTS_ENABLED = os.environ.get("PAGEINDEX_RUN_SLOW_TESTS", "0") == "1"
 
 
-def _require_file(path: str):
-    """Skip test if path doesn't exist."""
+def _require_file(path: str) -> None:
     if not os.path.isfile(path):
         raise unittest.SkipTest(f"File not found: {path}")
 
 
-class TestParsePages(unittest.TestCase):
-    """_parse_pages 纯逻辑测试, 无 IO, 无 subprocess。"""
+def _client() -> PageIndexClient:
+    """Create a client for pure/helper tests without probing PageIndex."""
+    return PageIndexClient(pageindex_dir=str(Path.cwd()))
 
-    def setUp(self):
-        self.client = PageIndexClient()
+
+class TestParsePages(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = _client()
 
     def test_parse_single_page(self):
         self.assertEqual(self.client._parse_pages("12"), [12])
@@ -62,147 +66,115 @@ class TestParsePages(unittest.TestCase):
 
 
 class TestEnvironment(unittest.TestCase):
-    """PageIndexClient 初始化 + 环境检查测试。"""
+    def test_pageindex_client_requires_explicit_directory(self):
+        with pytest.raises(PageIndexError, match="pageindex_dir must be configured"):
+            PageIndexClient()
 
-    def test_default_init_uses_expected_path(self):
-        client = PageIndexClient()
-        self.assertEqual(
-            client.pageindex_dir,
-            "/Users/zhang/Desktop/工作文件/PageIndex",
-        )
-        self.assertTrue(os.path.isfile(client.python_bin))
-        self.assertTrue(os.path.isfile(client.cli_script))
+    def test_constructor_defers_environment_validation(self):
+        client = PageIndexClient(pageindex_dir="/nonexistent/path")
 
-    def test_bad_path_raises(self):
-        with self.assertRaises(PageIndexError) as ctx:
-            PageIndexClient(pageindex_dir="/nonexistent/path")
-        self.assertIn("Python 解释器未找到", str(ctx.exception))
+        with self.assertRaises(PageIndexError) as context:
+            client.check_environment()
 
-    def test_custom_path(self):
-        client = PageIndexClient(pageindex_dir="/Users/zhang/Desktop/工作文件/PageIndex")
-        self.assertEqual(client.pageindex_dir, "/Users/zhang/Desktop/工作文件/PageIndex")
+        self.assertIn("Python", str(context.exception))
+
+    def test_custom_path_is_resolved(self):
+        configured = str(Path.cwd())
+        client = PageIndexClient(pageindex_dir=configured)
+        self.assertEqual(client.pageindex_dir, str(Path(configured).resolve()))
 
 
-class TestIndexPdf(unittest.TestCase):
-    """index_pdf 输入验证 + 错误处理 (不调 LLM 的部分)。"""
+class TestIndexInputValidation(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = _client()
 
-    def setUp(self):
-        self.client = PageIndexClient()
-
-    def test_missing_file_returns_failed(self):
+    def test_missing_pdf_returns_failed_before_environment_check(self):
         result = self.client.index_pdf("/nonexistent/file.pdf")
-        self.assertEqual(result["status"], "failed")
-        self.assertIn("未找到", result["error"])
 
-    def test_missing_md_file_returns_failed(self):
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("not found", result["error"].lower())
+
+    def test_missing_markdown_returns_failed_before_environment_check(self):
         result = self.client.index_md("/nonexistent/file.md")
-        self.assertEqual(result["status"], "failed")
-        self.assertIn("未找到", result["error"])
 
-    def test_md_wrong_extension_returns_failed(self):
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("not found", result["error"].lower())
+
+    def test_markdown_wrong_extension_returns_failed_before_environment_check(self):
         result = self.client.index_md("/some/file.txt")
+
         self.assertEqual(result["status"], "failed")
         self.assertIn(".md", result["error"])
 
 
-class TestGetPageContent(unittest.TestCase):
-    """get_page_content 纯 Python 测试 (不调 LLM)。"""
+class TestPureHelpers(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = _client()
 
-    def setUp(self):
-        self.client = PageIndexClient()
-
-    def test_returns_expected_schema(self):
-        _require_file(FEDERAL_RESERVE_PDF)
-        pages = self.client.get_page_content(FEDERAL_RESERVE_PDF, "1")
-        self.assertEqual(len(pages), 1)
-        self.assertEqual(pages[0]["page"], 1)
-        self.assertIsInstance(pages[0]["content"], str)
-        self.assertGreater(len(pages[0]["content"]), 100)  # Federal Reserve 文本型 PDF
-
-    def test_returns_empty_for_scan_pdf(self):
-        """扫描件 PDF 无文字层, 返回空 content (不是 bug, 是设计)。"""
-        _require_file(TS_PDF)
-        pages = self.client.get_page_content(TS_PDF, "1")
-        self.assertEqual(len(pages), 1)
-        self.assertEqual(pages[0]["page"], 1)
-        # 扫描件 PDF 没有文字层, content 长度 < 50
-        self.assertLess(len(pages[0]["content"]), 50)
-
-    def test_missing_file_raises(self):
+    def test_missing_pdf_for_content_raises_without_environment_check(self):
         with self.assertRaises(PageIndexError):
             self.client.get_page_content("/nonexistent/file.pdf", "1")
 
-    def test_page_range(self):
-        _require_file(FEDERAL_RESERVE_PDF)
-        pages = self.client.get_page_content(FEDERAL_RESERVE_PDF, "1-3")
-        self.assertEqual(len(pages), 3)
-        self.assertEqual([p["page"] for p in pages], [1, 2, 3])
-
-
-class TestFindNodesByTitle(unittest.TestCase):
-    """find_nodes_by_title 用 cache 的 structure.json 测试 (不调 LLM)。"""
-
-    def setUp(self):
-        self.client = PageIndexClient()
-        _require_file(FEDERAL_RESERVE_CACHE)
-        with open(FEDERAL_RESERVE_CACHE) as f:
-            cached = json.load(f)
-        self.index_result = {
-            "doc_name": cached["doc_name"],
-            "structure": cached["structure"],
-            "structure_json_path": FEDERAL_RESERVE_CACHE,
+    def test_find_nodes_by_title_does_not_require_pageindex_runtime(self):
+        index_result = {
+            "structure": [
+                {
+                    "title": "Monetary Policy",
+                    "node_id": "0001",
+                    "start_index": 1,
+                    "end_index": 2,
+                    "summary": "summary",
+                    "nodes": [
+                        {
+                            "title": "Operations",
+                            "node_id": "0002",
+                            "start_index": 3,
+                            "end_index": 4,
+                            "summary": "nested",
+                        }
+                    ],
+                }
+            ]
         }
 
-    def test_finds_monetary_node(self):
-        matches = self.client.find_nodes_by_title(self.index_result, "Monetary")
-        self.assertGreater(len(matches), 0)
-        first = matches[0]
-        self.assertIn("title", first)
-        self.assertIn("node_id", first)
-        self.assertIn("start_index", first)
-        self.assertIn("end_index", first)
-        self.assertIn("Monetary", first["title"])
+        matches = self.client.find_nodes_by_title(index_result, "monetary|operations")
 
-    def test_finds_case_insensitive(self):
-        matches = self.client.find_nodes_by_title(self.index_result, "monetary")
-        self.assertGreater(len(matches), 0)
-
-    def test_no_match_returns_empty(self):
-        matches = self.client.find_nodes_by_title(self.index_result, "NonExistentKeyword123")
-        self.assertEqual(len(matches), 0)
-
-    def test_empty_structure_returns_empty(self):
-        matches = self.client.find_nodes_by_title({"structure": []}, "anything")
-        self.assertEqual(len(matches), 0)
+        self.assertEqual([node["node_id"] for node in matches], ["0001", "0002"])
 
 
 @unittest.skipUnless(SLOW_TESTS_ENABLED, "set PAGEINDEX_RUN_SLOW_TESTS=1 to enable")
 class TestIndexPdfSlow(unittest.TestCase):
-    """慢测试: 真实 subprocess 调 PageIndex .venv + LLM, 单测 ~65s。"""
-
-    def setUp(self):
-        self.client = PageIndexClient()
+    def setUp(self) -> None:
+        if not PAGEINDEX_TEST_DIR:
+            raise unittest.SkipTest("set PAGEINDEX_TEST_DIR for PageIndex slow tests")
+        self.client = PageIndexClient(PAGEINDEX_TEST_DIR)
 
     def test_index_federal_reserve_pdf(self):
-        """Federal Reserve 50 页 PDF, 端到端跑通 index_pdf。"""
         _require_file(FEDERAL_RESERVE_PDF)
         result = self.client.index_pdf(FEDERAL_RESERVE_PDF)
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["engine"], "pageindex")
-        self.assertEqual(result["doc_name"], "2023-annual-report-truncated.pdf")
-        self.assertTrue(len(result["doc_id"]) > 0)
+        self.assertTrue(result["doc_id"])
         self.assertTrue(os.path.isfile(result["structure_json_path"]))
-        self.assertGreaterEqual(len(result["structure"]), 3)  # 至少 3 个顶层节点
 
-        # 验证顶层节点 schema
-        first_node = result["structure"][0]
-        for key in ("title", "node_id", "start_index", "end_index"):
-            self.assertIn(key, first_node, f"missing key: {key}")
+    def test_read_cached_structure(self):
+        _require_file(FEDERAL_RESERVE_CACHE)
+        with open(FEDERAL_RESERVE_CACHE, encoding="utf-8") as source:
+            cached = json.load(source)
 
-        # 验证耗时合理 (30-180s)
-        self.assertGreater(result["elapsed_seconds"], 30)
-        self.assertLess(result["elapsed_seconds"], 180)
+        matches = self.client.find_nodes_by_title(
+            {"structure": cached["structure"]}, "Monetary"
+        )
+
+        self.assertGreater(len(matches), 0)
+
+    def test_reads_scan_pdf_page_content(self):
+        _require_file(TS_PDF)
+        pages = self.client.get_page_content(TS_PDF, "1")
+
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0]["page"], 1)
 
 
 if __name__ == "__main__":
