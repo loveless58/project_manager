@@ -69,6 +69,10 @@ docs/superpowers/reports/
 # Outer local runtime directory.
 .runtime/
 
+# Local agent-development scratch state.
+.worktrees/
+.superpowers/
+
 # KB runtime cache (auto-generated from PageIndex index_md).
 # Source of truth: business_rules/document_parse/kb.md (git-tracked).
 # Cache is auto-rebuilt when md mtime changes.
