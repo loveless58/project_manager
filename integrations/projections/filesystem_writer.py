@@ -31,6 +31,8 @@ class FilesystemProjectionWriter:
             target.relative_to(self.root)
         except ValueError as exc:
             raise ProjectionPathError("projection path resolves outside configured root") from exc
+        if target == self.root:
+            raise ProjectionPathError("projection path must name a file below configured root")
         return target
 
     def write(self, request: ProjectionRequest) -> ProjectionRef:

@@ -34,6 +34,22 @@ def test_projection_writer_rejects_path_escape(tmp_path: Path) -> None:
         writer.write(request)
 
 
+@pytest.mark.parametrize("relative_path", ["", ".", "nested/.."])
+def test_projection_writer_rejects_paths_resolving_to_root_without_parent_tempfile(
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    from integrations.projections.filesystem_writer import FilesystemProjectionWriter, ProjectionPathError
+
+    root_parent_entries = set(tmp_path.parent.iterdir())
+    request = ProjectionRequest("json", relative_path, "{}", "application/json")
+
+    with pytest.raises(ProjectionPathError, match="must name a file below configured root"):
+        FilesystemProjectionWriter(tmp_path).write(request)
+
+    assert set(tmp_path.parent.iterdir()) == root_parent_entries
+
+
 def test_projection_writer_rejects_absolute_path(tmp_path: Path) -> None:
     from integrations.projections.filesystem_writer import FilesystemProjectionWriter, ProjectionPathError
 
