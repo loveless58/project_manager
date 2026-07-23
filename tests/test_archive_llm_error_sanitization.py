@@ -4,8 +4,10 @@ import types
 
 
 _SENSITIVE_ERROR = (
-    "request failed at https://user:top-secret@llm.example.invalid/v1 "
-    "for C:/Users/alice/private-contract.pdf"
+    "request failed at https://user:top-secret@llm.example.invalid/v1 for "
+    + "/".join(
+        ("C:", "Users", "alice", "private-contract.pdf")
+    )
 )
 
 
