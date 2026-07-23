@@ -88,8 +88,35 @@ NEGATIVE_FILENAME_SIGNALS: List[str] = [
 
 
 def _cache_key(md_path: str) -> str:
-    """cache key = abs path + mtime。"""
-    return f"{os.path.abspath(md_path)}:{os.path.getmtime(md_path):.0f}"
+    """cache key = abs path + mtime(nanosecond 浮点)+ size。
+
+    用 mtime 浮点(保留小数,实际是微秒精度)+ 文件大小作为双重检测。
+    防止: 1 秒内多次修改 .md 时 mtime 整数化撞 key(原 :.0f 漏洞)。
+    """
+    st = os.stat(md_path)
+    return f"{os.path.abspath(md_path)}:m={st.st_mtime:.6f}:s={st.st_size}"
+
+
+def _is_valid_structure(structure: Any) -> bool:
+    """cache 完整性校验。
+
+    检测: PageIndex 输出 schema 变了,或者 structure 损坏,
+    返回 False 触发强制 reindex。
+    """
+    if not isinstance(structure, dict):
+        return False
+    if structure.get("status") != "success":
+        return False
+    nodes = structure.get("structure", [])
+    if not nodes:
+        return False
+    # 至少要有一个顶层节点 + 它有子节点
+    top = nodes[0]
+    if not isinstance(top, dict):
+        return False
+    if not top.get("nodes"):
+        return False
+    return True
 
 
 def _load_cache() -> Dict[str, Any]:
@@ -112,6 +139,11 @@ def get_kb_structure(force_reindex: bool = False) -> Dict[str, Any]:
 
     第一次跑会调 PageIndex index_md(GPUStack LLM, ~3s),
     后续 cache 命中瞬时返回。
+
+    Cache 失效条件(三选一):
+    1. mtime + size 变化(.md 被改)
+    2. force_reindex=True
+    3. cache structure 校验失败(损坏 / schema 不匹配)
     """
     if not os.path.exists(KB_DOC_PATH):
         raise FileNotFoundError(f"KB 文档不存在: {KB_DOC_PATH}")
@@ -120,7 +152,11 @@ def get_kb_structure(force_reindex: bool = False) -> Dict[str, Any]:
     key = _cache_key(KB_DOC_PATH)
 
     if not force_reindex and key in cache:
-        return cache[key]
+        cached = cache[key]
+        if _is_valid_structure(cached):
+            return cached
+        # cache 损坏 → 删 key,fall through 到下面的 PageIndexClient reindex 逻辑
+        del cache[key]
 
     client = PageIndexClient()
     result = client.index_md(KB_DOC_PATH)
