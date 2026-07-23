@@ -1,25 +1,83 @@
 """Repository hygiene checks bounded strictly by Git's tracked-file index."""
 from __future__ import annotations
 
+import codecs
+from dataclasses import dataclass
+import ipaddress
 import os
 from pathlib import Path
 import re
 import subprocess
-from typing import Iterable, List, Mapping, Optional, Tuple
+from typing import Iterable, Iterator, List, Mapping, Optional
+from urllib.parse import urlsplit
 
 
-_RFC1918_URL = re.compile(
-    r"https?://(?:10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|"
-    r"172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2})(?::\d+)?(?:[/\w.?=&%+#~-]*)?",
-    re.IGNORECASE,
+_HTTP_URL = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
+_RFC1918_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
 )
 _POSIX_PERSONAL_PATH = re.compile(
-    r"/(?:Users|home)/[^/\s\"']+(?:/[^\s\"']*)?"
+    r"(?<![A-Za-z0-9:/])/(?:Users|home)/[^/\s\"']+(?:/[^\s\"']*)?"
 )
 _WINDOWS_PERSONAL_PATH = re.compile(
     r"\b[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s\"']+(?:[\\/][^\s\"']*)?",
     re.IGNORECASE,
 )
+_MANAGED_TEXT_SUFFIXES = {
+    ".bat",
+    ".cfg",
+    ".cmd",
+    ".conf",
+    ".css",
+    ".csv",
+    ".env",
+    ".htm",
+    ".html",
+    ".ini",
+    ".js",
+    ".json",
+    ".md",
+    ".ps1",
+    ".py",
+    ".sh",
+    ".sql",
+    ".toml",
+    ".tsv",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+_MANAGED_TEXT_NAMES = {
+    ".gitattributes",
+    ".gitignore",
+    "Dockerfile",
+    "LICENSE",
+    "Makefile",
+    "NOTICE",
+    "README",
+}
+_MANAGED_TEXT_ROLES = {"config", "governance", "scripts", "skills"}
+
+
+@dataclass(frozen=True)
+class RepositoryHygieneResult:
+    errors: int
+    warnings: int
+    findings: List[dict]
+    tracked_count: int
+    scanned_text_count: int
+    skipped_binary_count: int
+    skipped_non_target_count: int
+    decode_error_count: int
+
+    def __iter__(self) -> Iterator[object]:
+        """Preserve the existing three-value governance unpacking contract."""
+        yield self.errors
+        yield self.warnings
+        yield self.findings
 
 
 def _git_environment(project_root: Path) -> Mapping[str, str]:
@@ -63,20 +121,60 @@ def _finding(finding_id: str, path: str, message: str) -> dict:
     }
 
 
+def _is_managed_text(relative_path: str) -> bool:
+    path = Path(relative_path)
+    if path.suffix.lower() in _MANAGED_TEXT_SUFFIXES:
+        return True
+    if path.name in _MANAGED_TEXT_NAMES:
+        return True
+    return not path.suffix and bool(_MANAGED_TEXT_ROLES.intersection(path.parts))
+
+
+def _decode_managed_text(payload: bytes) -> str:
+    if payload.startswith(codecs.BOM_UTF8):
+        return payload.decode("utf-8-sig")
+    if payload.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return payload.decode("utf-16")
+    return payload.decode("utf-8")
+
+
+def _non_target_is_binary(payload: bytes) -> bool:
+    if b"\0" in payload:
+        return True
+    try:
+        payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return False
+
+
+def _contains_rfc1918_url(text: str) -> bool:
+    for match in _HTTP_URL.finditer(text):
+        try:
+            hostname = urlsplit(match.group(0)).hostname
+            address = ipaddress.ip_address(hostname) if hostname else None
+        except ValueError:
+            continue
+        if isinstance(address, ipaddress.IPv4Address) and any(
+            address in network for network in _RFC1918_NETWORKS
+        ):
+            return True
+    return False
+
+
 def validate_repository_hygiene(
     project_root: Optional[Path] = None,
     tracked_files: Optional[Iterable[str]] = None,
     verbose: bool = True,
-) -> Tuple[int, int, List[dict]]:
-    """Reject private endpoints, personal paths and tracked runtime traces.
-
-    Only files returned by ``git ls-files`` are considered. Binary tracked files
-    are skipped after a NUL-byte or UTF-8 decode check, so generated and ignored
-    workspace content cannot leak into the scan boundary.
-    """
+) -> RepositoryHygieneResult:
+    """Validate managed tracked text and report the exact scan boundary."""
     root = Path(project_root or Path(__file__).resolve().parents[1]).resolve()
     paths = list(tracked_files) if tracked_files is not None else tracked_repository_files(root)
     findings: List[dict] = []
+    scanned_text_count = 0
+    skipped_binary_count = 0
+    skipped_non_target_count = 0
+    decode_error_count = 0
 
     for relative_path in paths:
         normalized = relative_path.replace("\\", "/")
@@ -98,14 +196,29 @@ def validate_repository_hygiene(
                 _finding("REPO-READ-ERROR", normalized, f"tracked file could not be read: {exc}")
             )
             continue
-        if b"\0" in payload:
-            continue
-        try:
-            text = payload.decode("utf-8-sig")
-        except UnicodeDecodeError:
+
+        if not _is_managed_text(normalized):
+            if _non_target_is_binary(payload):
+                skipped_binary_count += 1
+            else:
+                skipped_non_target_count += 1
             continue
 
-        if _RFC1918_URL.search(text):
+        try:
+            text = _decode_managed_text(payload)
+        except UnicodeDecodeError:
+            decode_error_count += 1
+            findings.append(
+                _finding(
+                    "REPO-TEXT-DECODE",
+                    normalized,
+                    "managed tracked text must be UTF-8 or BOM-marked UTF-16",
+                )
+            )
+            continue
+        scanned_text_count += 1
+
+        if _contains_rfc1918_url(text):
             findings.append(
                 _finding("REPO-RFC1918-URL", normalized, "RFC1918 URL is forbidden")
             )
@@ -118,9 +231,27 @@ def validate_repository_hygiene(
                 )
             )
 
+    report = RepositoryHygieneResult(
+        errors=len(findings),
+        warnings=0,
+        findings=findings,
+        tracked_count=len(paths),
+        scanned_text_count=scanned_text_count,
+        skipped_binary_count=skipped_binary_count,
+        skipped_non_target_count=skipped_non_target_count,
+        decode_error_count=decode_error_count,
+    )
     if verbose:
         for finding in findings:
             print(f"❌ {finding['msg']}")
+        print(
+            "repository hygiene summary: "
+            f"tracked={report.tracked_count}, "
+            f"scanned_text={report.scanned_text_count}, "
+            f"skipped_binary={report.skipped_binary_count}, "
+            f"skipped_non_target={report.skipped_non_target_count}, "
+            f"decode_errors={report.decode_error_count}"
+        )
         if not findings:
-            print(f"✅ repository hygiene clean: {len(paths)} tracked files scanned")
-    return len(findings), 0, findings
+            print("✅ repository hygiene clean")
+    return report

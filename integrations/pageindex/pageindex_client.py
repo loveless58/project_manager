@@ -1,8 +1,7 @@
 """Client for the optional external PageIndex CLI.
 
-The client deliberately separates configuration from capability validation:
-constructing it supports pure local helpers, while CLI-backed indexing checks
-the external runtime immediately before it is needed.
+The client separates configuration from capability validation and exposes only
+stable, sanitized failures at its public boundary.
 """
 
 from __future__ import annotations
@@ -17,8 +16,51 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+_ERROR_MESSAGES = {
+    "PAGEINDEX.CONFIG.MISSING": (
+        "pageindex_dir must be configured explicitly through AppSettings"
+    ),
+    "PAGEINDEX.INPUT.PDF_NOT_FOUND": "PDF file not found.",
+    "PAGEINDEX.INPUT.MARKDOWN_EXTENSION": (
+        "Markdown file must use a .md or .markdown extension."
+    ),
+    "PAGEINDEX.INPUT.MARKDOWN_NOT_FOUND": "Markdown file not found.",
+    "PAGEINDEX.RUNTIME.PYTHON_UNAVAILABLE": (
+        "PageIndex Python interpreter is unavailable."
+    ),
+    "PAGEINDEX.RUNTIME.CLI_UNAVAILABLE": "PageIndex CLI script is unavailable.",
+    "PAGEINDEX.RUNTIME.PROBE_TIMEOUT": "PageIndex runtime probe timed out.",
+    "PAGEINDEX.RUNTIME.PROBE_START_FAILED": (
+        "PageIndex runtime probe could not be started."
+    ),
+    "PAGEINDEX.RUNTIME.PROBE_FAILED": "PageIndex runtime probe failed.",
+    "PAGEINDEX.RUNTIME.UNAVAILABLE": "PageIndex runtime is unavailable.",
+    "PAGEINDEX.EXECUTION.TIMEOUT": "PageIndex execution timed out.",
+    "PAGEINDEX.EXECUTION.START_FAILED": (
+        "PageIndex execution could not be started."
+    ),
+    "PAGEINDEX.EXECUTION.FAILED": "PageIndex execution failed.",
+    "PAGEINDEX.RESULT.MISSING": "PageIndex structure result was not generated.",
+    "PAGEINDEX.RESULT.DECODE_FAILED": (
+        "PageIndex structure result could not be decoded."
+    ),
+    "PAGEINDEX.RESULT.READ_FAILED": "PageIndex structure result could not be read.",
+    "PAGEINDEX.RESULT.INVALID_JSON": "PageIndex structure result is invalid.",
+    "PAGEINDEX.CONTENT.PDF_NOT_FOUND": "PDF file not found.",
+    "PAGEINDEX.CONTENT.READ_FAILED": "PDF content could not be read.",
+}
+
+
 class PageIndexError(Exception):
-    """Raised when PageIndex configuration or a local helper cannot proceed."""
+    """Stable error raised when a local PageIndex helper cannot proceed."""
+
+    def __init__(
+        self,
+        message: str,
+        error_code: str = "PAGEINDEX.RUNTIME.UNAVAILABLE",
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
 
 
 class PageIndexClient:
@@ -32,9 +74,8 @@ class PageIndexClient:
         timeout_seconds: int = 600,
     ) -> None:
         if not pageindex_dir:
-            raise PageIndexError(
-                "pageindex_dir must be configured explicitly through AppSettings"
-            )
+            code = "PAGEINDEX.CONFIG.MISSING"
+            raise PageIndexError(_ERROR_MESSAGES[code], code)
         self.pageindex_dir = str(Path(pageindex_dir).expanduser().resolve())
         venv_bin = "Scripts" if os.name == "nt" else "bin"
         python_name = "python.exe" if os.name == "nt" else "python"
@@ -47,9 +88,11 @@ class PageIndexClient:
     def check_environment(self) -> None:
         """Validate that the external PageIndex runtime can start safely."""
         if not os.path.isfile(self.python_bin):
-            raise PageIndexError("PageIndex Python interpreter is unavailable.")
+            code = "PAGEINDEX.RUNTIME.PYTHON_UNAVAILABLE"
+            raise PageIndexError(_ERROR_MESSAGES[code], code)
         if not os.path.isfile(self.cli_script):
-            raise PageIndexError("PageIndex CLI script is unavailable.")
+            code = "PAGEINDEX.RUNTIME.CLI_UNAVAILABLE"
+            raise PageIndexError(_ERROR_MESSAGES[code], code)
         try:
             process = subprocess.run(
                 [self.python_bin, "--version"],
@@ -58,12 +101,15 @@ class PageIndexClient:
                 text=True,
                 timeout=min(self.timeout_seconds, self.runtime_probe_timeout_seconds),
             )
-        except subprocess.TimeoutExpired as exc:
-            raise PageIndexError("PageIndex runtime probe timed out.") from exc
-        except (OSError, UnicodeError) as exc:
-            raise PageIndexError("PageIndex runtime probe could not be started.") from exc
+        except subprocess.TimeoutExpired:
+            code = "PAGEINDEX.RUNTIME.PROBE_TIMEOUT"
+            raise PageIndexError(_ERROR_MESSAGES[code], code) from None
+        except (OSError, UnicodeError):
+            code = "PAGEINDEX.RUNTIME.PROBE_START_FAILED"
+            raise PageIndexError(_ERROR_MESSAGES[code], code) from None
         if process.returncode != 0:
-            raise PageIndexError("PageIndex runtime probe failed.")
+            code = "PAGEINDEX.RUNTIME.PROBE_FAILED"
+            raise PageIndexError(_ERROR_MESSAGES[code], code)
 
     def index_pdf(
         self,
@@ -82,9 +128,11 @@ class PageIndexClient:
     ) -> Dict[str, Any]:
         """Index a PDF through the external PageIndex CLI."""
         if not os.path.isfile(pdf_path):
-            return self._failed(f"PDF file not found: {pdf_path}")
+            return self._failed("PAGEINDEX.INPUT.PDF_NOT_FOUND")
+        environment_failure = self._environment_failure()
+        if environment_failure is not None:
+            return environment_failure
 
-        self.check_environment()
         command = [self.python_bin, self.cli_script, "--pdf_path", pdf_path]
         options = {
             "model": model,
@@ -105,13 +153,13 @@ class PageIndexClient:
     def index_md(self, md_path: str, **kwargs: Any) -> Dict[str, Any]:
         """Index a Markdown document through the external PageIndex CLI."""
         if not md_path.lower().endswith((".md", ".markdown")):
-            return self._failed(
-                f"Markdown file must use a .md or .markdown extension: {md_path}"
-            )
+            return self._failed("PAGEINDEX.INPUT.MARKDOWN_EXTENSION")
         if not os.path.isfile(md_path):
-            return self._failed(f"Markdown file not found: {md_path}")
+            return self._failed("PAGEINDEX.INPUT.MARKDOWN_NOT_FOUND")
+        environment_failure = self._environment_failure()
+        if environment_failure is not None:
+            return environment_failure
 
-        self.check_environment()
         command = [self.python_bin, self.cli_script, "--md_path", md_path]
         supported = {
             "if_add_node_id",
@@ -128,6 +176,18 @@ class PageIndexClient:
         )
         return self._run_index(command, md_path)
 
+    def _environment_failure(self) -> Optional[Dict[str, Any]]:
+        try:
+            self.check_environment()
+        except PageIndexError as exc:
+            code = (
+                exc.error_code
+                if exc.error_code in _ERROR_MESSAGES
+                else "PAGEINDEX.RUNTIME.UNAVAILABLE"
+            )
+            return self._failed(code)
+        return None
+
     @staticmethod
     def _append_options(command: List[str], options: Dict[str, Any]) -> None:
         for key, value in options.items():
@@ -135,11 +195,15 @@ class PageIndexClient:
                 command.extend([f"--{key.replace('_', '-')}", str(value)])
 
     @staticmethod
-    def _failed(error: str, elapsed_seconds: float = 0.0) -> Dict[str, Any]:
+    def _failed(error_code: str, elapsed_seconds: float = 0.0) -> Dict[str, Any]:
         return {
             "status": "failed",
             "engine": "pageindex",
-            "error": error,
+            "error_code": error_code,
+            "error": _ERROR_MESSAGES.get(
+                error_code,
+                "PageIndex provider failed.",
+            ),
             "elapsed_seconds": elapsed_seconds,
         }
 
@@ -155,40 +219,34 @@ class PageIndexClient:
             )
         except subprocess.TimeoutExpired:
             return self._failed(
-                "PageIndex execution timed out.", round(time.time() - start, 2)
+                "PAGEINDEX.EXECUTION.TIMEOUT",
+                round(time.time() - start, 2),
             )
         except (OSError, UnicodeError):
             return self._failed(
-                "PageIndex execution could not be started.",
+                "PAGEINDEX.EXECUTION.START_FAILED",
                 round(time.time() - start, 2),
             )
 
         elapsed = round(time.time() - start, 2)
         if process.returncode != 0:
-            return self._failed(
-                f"PageIndex exited with code {process.returncode}: {process.stderr[:500]}",
-                elapsed,
-            )
+            return self._failed("PAGEINDEX.EXECUTION.FAILED", elapsed)
 
         source_name = os.path.splitext(os.path.basename(source_path))[0]
         structure_json_path = os.path.join(
             self.pageindex_dir, "results", f"{source_name}_structure.json"
         )
         if not os.path.isfile(structure_json_path):
-            return self._failed(
-                f"structure.json was not generated: {structure_json_path}", elapsed
-            )
+            return self._failed("PAGEINDEX.RESULT.MISSING", elapsed)
         try:
             with open(structure_json_path, "r", encoding="utf-8") as source:
                 data = json.load(source)
         except UnicodeError:
-            return self._failed(
-                "PageIndex structure result could not be decoded.", elapsed
-            )
+            return self._failed("PAGEINDEX.RESULT.DECODE_FAILED", elapsed)
         except OSError:
-            return self._failed("PageIndex structure result could not be read.", elapsed)
-        except json.JSONDecodeError as exc:
-            return self._failed(f"structure.json could not be parsed: {exc}", elapsed)
+            return self._failed("PAGEINDEX.RESULT.READ_FAILED", elapsed)
+        except json.JSONDecodeError:
+            return self._failed("PAGEINDEX.RESULT.INVALID_JSON", elapsed)
 
         return {
             "status": "success",
@@ -203,12 +261,17 @@ class PageIndexClient:
     def get_page_content(self, pdf_path: str, pages: str) -> List[Dict[str, Any]]:
         """Read PDF text without requiring a PageIndex CLI environment."""
         if not os.path.isfile(pdf_path):
-            raise PageIndexError(f"PDF file not found: {pdf_path}")
+            code = "PAGEINDEX.CONTENT.PDF_NOT_FOUND"
+            raise PageIndexError(_ERROR_MESSAGES[code], code)
         page_numbers = self._parse_pages(pages)
         try:
             return self._get_pdf_page_content_pypdf2(pdf_path, page_numbers)
         except Exception:
-            return self._get_pdf_page_content_pymupdf(pdf_path, page_numbers)
+            try:
+                return self._get_pdf_page_content_pymupdf(pdf_path, page_numbers)
+            except Exception:
+                code = "PAGEINDEX.CONTENT.READ_FAILED"
+                raise PageIndexError(_ERROR_MESSAGES[code], code) from None
 
     def get_page_content_from_index(
         self, index_result: Dict[str, Any], pages: str
@@ -257,7 +320,7 @@ class PageIndexClient:
                 start_text, end_text = part.split("-", 1)
                 start, end = int(start_text.strip()), int(end_text.strip())
                 if start > end:
-                    raise ValueError(f"Invalid range '{part}': start must be <= end")
+                    raise ValueError("Invalid page range: start must be <= end")
                 result.extend(range(start, end + 1))
             else:
                 result.append(int(part))

@@ -88,7 +88,7 @@ def test_pageindex_adapter_probe_blocks_when_runtime_file_cannot_start(tmp_path,
 
     assert report.status == "blocked"
     assert report.provider == "pageindex"
-    assert report.reason == "PageIndex runtime probe could not be started."
+    assert report.reason == "PageIndex provider is unavailable."
 
 
 def test_pageindex_adapter_rejects_unsupported_media_type_before_provider_probe(tmp_path):

@@ -11,10 +11,12 @@ from .pageindex_client import PageIndexClient, PageIndexError
 
 
 ClientFactory = Callable[[str], PageIndexClient]
+_PROVIDER_UNAVAILABLE = "PageIndex provider is unavailable."
+_PROVIDER_FAILED = "PageIndex provider failed."
 
 
 class PageIndexStructureIndex:
-    """Map the PageIndex client result contract onto the StructureIndex port."""
+    """Map sanitized PageIndex results onto the StructureIndex port."""
 
     name = "pageindex"
 
@@ -32,8 +34,8 @@ class PageIndexStructureIndex:
     def probe(self) -> CapabilityReport:
         try:
             self._client().check_environment()
-        except PageIndexError as exc:
-            return CapabilityReport("blocked", self.name, "", str(exc))
+        except PageIndexError:
+            return CapabilityReport("blocked", self.name, "", _PROVIDER_UNAVAILABLE)
         return CapabilityReport("ready", self.name, "configured", "ready")
 
     def index(self, request: StructureIndexRequest) -> StructureIndexResult:
@@ -44,7 +46,7 @@ class PageIndexStructureIndex:
                 "",
                 (),
                 "INDEX.UNSUPPORTED_MEDIA_TYPE",
-                f"unsupported media type: {request.media_type}",
+                "Unsupported media type.",
             )
 
         try:
@@ -54,24 +56,24 @@ class PageIndexStructureIndex:
                 if request.media_type == "application/pdf"
                 else client.index_md(request.source_path)
             )
-        except PageIndexError as exc:
+        except PageIndexError:
             return StructureIndexResult(
                 "blocked",
                 self.name,
                 "",
                 (),
                 "INDEX.PROVIDER_UNAVAILABLE",
-                str(exc),
+                _PROVIDER_UNAVAILABLE,
             )
 
         if raw.get("status") != "success":
             return StructureIndexResult(
-                raw.get("status", "failed"),
+                "failed",
                 self.name,
                 "",
                 (),
                 "INDEX.PROVIDER_FAILED",
-                raw.get("error", "PageIndex failed without an error message"),
+                _PROVIDER_FAILED,
             )
         return StructureIndexResult(
             "success",
