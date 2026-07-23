@@ -1,17 +1,14 @@
-"""Unified workspace configuration for project_manager runtime paths."""
+"""Compatibility facade for project_manager runtime workspace paths."""
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_BUSINESS_ROOT = Path(r"E:\SynologyDrive")
-DEFAULT_WORKSPACE_NAME = "_project_manager_workspace"
-DEFAULT_CONFIG_FILE = PROJECT_ROOT / "config" / "workspace.local.json"
+if TYPE_CHECKING:
+    from platform_core.settings import AppSettings
 
 
 PathLike = Union[str, os.PathLike[str]]
@@ -28,62 +25,30 @@ class WorkspaceConfig:
     state_dir: Path
 
 
-def _clean_path(value: Optional[Union[str, os.PathLike[str]]]) -> Optional[Path]:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        return Path(text).expanduser().absolute()
-    except RuntimeError:
-        if text == "~":
-            return PROJECT_ROOT
-        if text.startswith("~/") or text.startswith("~\\"):
-            return (PROJECT_ROOT / text[2:]).absolute()
-        return Path(text).absolute()
-
-
-def _load_local_config(config_file: Optional[Union[str, os.PathLike[str]]]) -> Dict[str, Any]:
-    if config_file == "":
-        return {}
-    path = Path(config_file).expanduser() if config_file else DEFAULT_CONFIG_FILE
-    if not path.exists():
-        return {}
-    with open(path, "r", encoding="utf-8-sig") as f:
-        data = json.load(f)
-    return data if isinstance(data, dict) else {}
-
-
 def resolve_workspace_config(
     business_root: Optional[PathLike] = None,
     runtime_workspace: Optional[PathLike] = None,
     config_file: Optional[PathLike] = None,
+    app_settings: Optional["AppSettings"] = None,
 ) -> WorkspaceConfig:
-    """Resolve all runtime paths from explicit args, env, local config, then defaults."""
-    local = _load_local_config(config_file)
+    """Adapt application settings for legacy workspace callers."""
+    from platform_core.settings import load_app_settings
 
-    resolved_business_root = (
-        _clean_path(business_root)
-        or _clean_path(os.environ.get("PROJECT_MANAGER_BUSINESS_ROOT"))
-        or _clean_path(local.get("business_root"))
-        or DEFAULT_BUSINESS_ROOT
+    settings = app_settings or load_app_settings(
+        config_file=config_file,
+        business_root=business_root,
+        runtime_workspace=runtime_workspace,
     )
-    resolved_workspace = (
-        _clean_path(runtime_workspace)
-        or _clean_path(os.environ.get("PROJECT_MANAGER_WORKSPACE_DIR"))
-        or _clean_path(local.get("runtime_workspace"))
-        or (resolved_business_root / DEFAULT_WORKSPACE_NAME)
-    )
-
+    if settings.business_root is None:
+        raise ValueError("legacy workspace tools require a configured business_root")
     return WorkspaceConfig(
-        business_root=resolved_business_root,
-        runtime_workspace=resolved_workspace,
-        project_files_dir=resolved_business_root / "项目文件",
-        data_cleaning_workspace=resolved_workspace / "数据清洗工作台",
-        opportunity_dir=resolved_workspace / "新机会与线索",
-        logs_dir=resolved_workspace / "logs",
-        state_dir=resolved_workspace / "state",
+        business_root=settings.business_root,
+        runtime_workspace=settings.runtime_workspace,
+        project_files_dir=settings.business_root / "项目文件",
+        data_cleaning_workspace=settings.runtime_workspace / "数据清洗工作台",
+        opportunity_dir=settings.runtime_workspace / "新机会与线索",
+        logs_dir=settings.runtime_workspace / "logs",
+        state_dir=settings.runtime_workspace / "state",
     )
 
 

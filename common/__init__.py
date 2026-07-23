@@ -1,6 +1,8 @@
 """
 Common package for Loop Engineering Framework
 """
+from platform_core import AppSettings, SettingsError, load_app_settings
+
 from .loop_engine import LoopEngine, LoopTrace, LoopRound, TokenBudget, BudgetExceededException
 from .tool_registry import ToolRegistry, Tool, tool
 from .state_manager import StateManager, MemoryStore
@@ -26,4 +28,7 @@ __all__ = [
     "build_react_prompt",
     "WorkspaceConfig",
     "resolve_workspace_config",
+    "AppSettings",
+    "SettingsError",
+    "load_app_settings",
 ]
