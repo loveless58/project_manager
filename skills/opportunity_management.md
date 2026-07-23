@@ -1,6 +1,7 @@
 ---
 name: opportunity_management
 version: 0.2.0
+status: draft   # 无实现,仅 SKILL.md,2026-07-23 标记
 description: |
   商机管理 skill。负责招标公告解析、本地重复检测、bid_context 和 CRM 建议草稿。
 ---

@@ -1,6 +1,7 @@
 ---
 name: project_management
 version: 0.2.0
+status: draft   # 无实现,仅 SKILL.md,2026-07-23 标记
 description: |
   项目管理 skill。负责项目状态、风险、里程碑、交付物、报告和本地项目视图。
 ---

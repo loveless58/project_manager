@@ -1,6 +1,7 @@
 ---
 name: cloudcc_crm
 version: 0.2.0
+status: draft   # 无实现,仅 SKILL.md,2026-07-23 标记
 description: |
   CloudCC/CRM skill。负责只读探针、查重证据、CRM 草稿、提交前确认和提交后回读。
 ---

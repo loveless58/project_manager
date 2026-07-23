@@ -1,6 +1,7 @@
 ---
 name: project_manager
 version: 3.3.0
+status: active   # skill index,汇总活跃 skill,2026-07-23 标记
 description: |
   Project Manager Agent skill index. This file summarizes active skills and
   points to the runtime sources of truth.

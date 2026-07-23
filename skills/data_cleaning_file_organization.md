@@ -1,6 +1,7 @@
 ---
 name: data_cleaning_file_organization
 version: 0.2.0
+status: draft   # 无实现,仅 SKILL.md,2026-07-23 标记
 description: |
   数据清洗及文件整理 skill。负责把本地资料转换为候选事实、证据引用、复核队列和归档计划。
 ---
