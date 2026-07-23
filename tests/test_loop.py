@@ -10,7 +10,7 @@ Project Manager Loop 测试套件
 5. 状态管理（sliding_window）
 
 用法：
-    cd /Users/zhang/Desktop/工作文件/project_manager/project_manager
+    cd /path/to/project_manager
     python tests/test_loop.py
 """
 

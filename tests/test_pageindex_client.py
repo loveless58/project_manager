@@ -1,6 +1,6 @@
 """Fast unit tests for the PageIndex client.
 
-The PageIndex CLI is an optional external dependency.  These tests therefore
+The PageIndex CLI is an optional external dependency. These tests therefore
 exercise input validation and pure helpers without requiring a local runtime.
 Slow end-to-end tests are enabled only when all explicit environment variables
 are supplied by the caller.
@@ -21,21 +21,44 @@ sys.path.insert(0, str(INTEGRATIONS_DIR.parent))
 from pageindex.pageindex_client import PageIndexClient, PageIndexError
 
 
-PAGEINDEX_TEST_DIR = os.environ.get("PAGEINDEX_TEST_DIR", "")
-FEDERAL_RESERVE_PDF = os.environ.get("PAGEINDEX_TEST_PDF", "")
-FEDERAL_RESERVE_CACHE = os.environ.get("PAGEINDEX_TEST_CACHE", "")
-TS_PDF = os.environ.get("PAGEINDEX_TEST_SCAN_PDF", "")
 SLOW_TESTS_ENABLED = os.environ.get("PAGEINDEX_RUN_SLOW_TESTS", "0") == "1"
+SLOW_TEST_PATH_TYPES = {
+    "PAGEINDEX_TEST_DIR": "directory",
+    "PAGEINDEX_TEST_PDF": "file",
+    "PAGEINDEX_TEST_CACHE": "file",
+    "PAGEINDEX_TEST_SCAN_PDF": "file",
+}
 
 
-def _require_file(path: str) -> None:
-    if not os.path.isfile(path):
-        raise unittest.SkipTest(f"File not found: {path}")
+class PageIndexSlowTestConfigurationError(RuntimeError):
+    """Raised when explicitly enabled PageIndex integration tests lack inputs."""
 
 
 def _client() -> PageIndexClient:
     """Create a client for pure/helper tests without probing PageIndex."""
     return PageIndexClient(pageindex_dir=str(Path.cwd()))
+
+
+def validate_slow_test_configuration(environ=None):
+    environment = os.environ if environ is None else environ
+    configured = {}
+    errors = []
+    for variable, expected_type in SLOW_TEST_PATH_TYPES.items():
+        raw_value = environment.get(variable, "").strip()
+        if not raw_value:
+            errors.append(f"{variable} must be set")
+            continue
+        path = Path(raw_value).expanduser().resolve()
+        is_expected_type = path.is_dir() if expected_type == "directory" else path.is_file()
+        if not is_expected_type:
+            errors.append(f"{variable} must be an existing {expected_type}: {path}")
+            continue
+        configured[variable] = path
+    if errors:
+        raise PageIndexSlowTestConfigurationError(
+            "Invalid PageIndex slow-test configuration:\n- " + "\n- ".join(errors)
+        )
+    return configured
 
 
 class TestParsePages(unittest.TestCase):
@@ -144,14 +167,16 @@ class TestPureHelpers(unittest.TestCase):
 
 @unittest.skipUnless(SLOW_TESTS_ENABLED, "set PAGEINDEX_RUN_SLOW_TESTS=1 to enable")
 class TestIndexPdfSlow(unittest.TestCase):
-    def setUp(self) -> None:
-        if not PAGEINDEX_TEST_DIR:
-            raise unittest.SkipTest("set PAGEINDEX_TEST_DIR for PageIndex slow tests")
-        self.client = PageIndexClient(PAGEINDEX_TEST_DIR)
+    @classmethod
+    def setUpClass(cls) -> None:
+        configuration = validate_slow_test_configuration()
+        cls.client = PageIndexClient(str(configuration["PAGEINDEX_TEST_DIR"]))
+        cls.pdf_path = str(configuration["PAGEINDEX_TEST_PDF"])
+        cls.cache_path = configuration["PAGEINDEX_TEST_CACHE"]
+        cls.scan_pdf_path = str(configuration["PAGEINDEX_TEST_SCAN_PDF"])
 
     def test_index_federal_reserve_pdf(self):
-        _require_file(FEDERAL_RESERVE_PDF)
-        result = self.client.index_pdf(FEDERAL_RESERVE_PDF)
+        result = self.client.index_pdf(self.pdf_path)
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["engine"], "pageindex")
@@ -159,8 +184,7 @@ class TestIndexPdfSlow(unittest.TestCase):
         self.assertTrue(os.path.isfile(result["structure_json_path"]))
 
     def test_read_cached_structure(self):
-        _require_file(FEDERAL_RESERVE_CACHE)
-        with open(FEDERAL_RESERVE_CACHE, encoding="utf-8") as source:
+        with self.cache_path.open(encoding="utf-8") as source:
             cached = json.load(source)
 
         matches = self.client.find_nodes_by_title(
@@ -170,8 +194,7 @@ class TestIndexPdfSlow(unittest.TestCase):
         self.assertGreater(len(matches), 0)
 
     def test_reads_scan_pdf_page_content(self):
-        _require_file(TS_PDF)
-        pages = self.client.get_page_content(TS_PDF, "1")
+        pages = self.client.get_page_content(self.scan_pdf_path, "1")
 
         self.assertEqual(len(pages), 1)
         self.assertEqual(pages[0]["page"], 1)
