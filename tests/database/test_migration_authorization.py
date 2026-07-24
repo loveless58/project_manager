@@ -1,6 +1,7 @@
 import hashlib
 import os
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -98,6 +99,92 @@ def test_backup_authorization_for_database_a_cannot_migrate_database_b(
         )
 
     assert not _has_table(database_b, "authorized_item")
+    assert _applied_versions(database_b) == []
+
+
+def test_replaced_authorization_fields_cannot_migrate_another_database(
+    tmp_path: Path,
+) -> None:
+    database_a = tmp_path / "a.sqlite3"
+    database_b = tmp_path / "b.sqlite3"
+    catalog = _catalog(
+        tmp_path,
+        "CREATE TABLE replaced_authorization_item(id INTEGER PRIMARY KEY);\n",
+    )
+    initialize_database(database_a)
+    initialize_database(database_b)
+    authorization = create_migration_authorization(
+        database_a,
+        catalog,
+        tmp_path / "a-backup.sqlite3",
+    )
+
+    try:
+        forged_authorization = replace(
+            authorization,
+            source_path=database_b.resolve(strict=True),
+            source_identity=(database_b.stat().st_dev, database_b.stat().st_ino),
+        )
+    except TypeError:
+        pass
+    else:
+        with pytest.raises(BackupError, match="authorization"):
+            apply_pending_migrations(
+                database_b,
+                catalog,
+                backup_authorization=forged_authorization,
+            )
+
+    assert not _has_table(database_b, "replaced_authorization_item")
+    assert _applied_versions(database_b) == []
+
+
+def test_replaced_nested_provenance_cannot_authorize_another_database(
+    tmp_path: Path,
+) -> None:
+    database_a = tmp_path / "a.sqlite3"
+    database_b = tmp_path / "b.sqlite3"
+    catalog = _catalog(
+        tmp_path,
+        "CREATE TABLE replaced_provenance_item(id INTEGER PRIMARY KEY);\n",
+    )
+    initialize_database(database_a)
+    initialize_database(database_b)
+    backup_result = backup_module.create_sqlite_backup(
+        database_a,
+        tmp_path / "a-backup.sqlite3",
+        catalog,
+    )
+    provenance = backup_result._provenance
+    assert provenance is not None
+
+    try:
+        forged_provenance = replace(
+            provenance,
+            source_path=database_b.resolve(strict=True),
+            source_identity=(database_b.stat().st_dev, database_b.stat().st_ino),
+        )
+        forged_result = replace(
+            backup_result,
+            _provenance=forged_provenance,
+        )
+        verified = backup_module.verify_migration_backup(forged_result)
+        forged_authorization = backup_module.authorize_migration_backup(
+            database_b,
+            verified,
+            catalog,
+        )
+    except (BackupError, TypeError):
+        pass
+    else:
+        with pytest.raises(BackupError, match="authorization"):
+            apply_pending_migrations(
+                database_b,
+                catalog,
+                backup_authorization=forged_authorization,
+            )
+
+    assert not _has_table(database_b, "replaced_provenance_item")
     assert _applied_versions(database_b) == []
 
 

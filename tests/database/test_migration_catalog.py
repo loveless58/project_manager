@@ -154,6 +154,9 @@ def test_catalog_allows_transaction_control_words_in_literals_and_comments(tmp_p
         "INSERT INTO auxiliary.item(id) VALUES (1);",
         "UPDATE auxiliary.item SET id = 2;",
         "DELETE FROM auxiliary.item;",
+        "PRAGMA auxiliary.user_version = 123;",
+        "PRAGMA temp.user_version;",
+        'PRAGMA "auxiliary"."user_version" = 123;',
         "WITH payload(id) AS (VALUES (1)) "
         "INSERT INTO auxiliary.item(id) SELECT id FROM payload;",
         "CREATE TRIGGER main.escape AFTER INSERT ON main.item BEGIN "
@@ -186,10 +189,35 @@ def test_catalog_allows_schema_boundary_words_in_literals_and_comments(tmp_path)
 @pytest.mark.parametrize(
     "statement",
     [
+        "SELECT 'create' 'temp';",
+        'SELECT "create" "temp";',
+        "CREATE TABLE main.note('create' temp);",
+        'CREATE TABLE main.note("create" temp);',
+        "CREATE TABLE main.note(value TEXT); "
+        "CREATE TRIGGER main.note_audit AFTER INSERT ON main.note BEGIN "
+        "SELECT 'create' 'temp'; "
+        "END;",
+    ],
+)
+def test_catalog_does_not_treat_expression_tokens_as_operations(tmp_path, statement):
+    (tmp_path / "0001_legal_expression.sql").write_text(
+        statement,
+        encoding="utf-8",
+    )
+
+    assert [item.version for item in load_migration_catalog(tmp_path)] == [1]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
         "CREATE TABLE main.item(id INTEGER);",
         "INSERT INTO main.item(id) VALUES (1);",
         "UPDATE main.item SET id = 2;",
         "DELETE FROM main.item;",
+        "PRAGMA main.user_version = 123;",
+        "PRAGMA main.user_version;",
+        "PRAGMA foreign_keys = ON;",
     ],
 )
 def test_catalog_allows_explicit_main_schema_operations(tmp_path, statement):

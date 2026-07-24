@@ -101,6 +101,11 @@ class _MigrationTransactionAuthorizer:
             return sqlite3.SQLITE_DENY
         if action_code in _DENIED_SQLITE_ACTIONS:
             return sqlite3.SQLITE_DENY
+        if (
+            action_code == sqlite3.SQLITE_PRAGMA
+            and database_name not in (None, "main")
+        ):
+            return sqlite3.SQLITE_DENY
         if action_code in _MAIN_SCHEMA_SQLITE_ACTIONS and database_name != "main":
             return sqlite3.SQLITE_DENY
         return sqlite3.SQLITE_OK

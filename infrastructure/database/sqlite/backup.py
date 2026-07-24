@@ -18,6 +18,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from threading import RLock
+from weakref import WeakKeyDictionary
 
 from ..contracts import (
     BackupError,
@@ -33,7 +35,6 @@ from .schema import inspect_schema
 _HASH_CHUNK_SIZE = 1024 * 1024
 _LOWERCASE_SHA256 = re.compile(r"[0-9a-f]{64}")
 _MANIFEST_KEYS = frozenset(BackupManifest.__dataclass_fields__)
-_AUTHORIZATION_SEAL = object()
 
 _FileIdentity = tuple[int, int]
 _CatalogFingerprint = tuple[tuple[int, str, str], ...]
@@ -58,9 +59,20 @@ _OWNED_FINAL_ABSENT = frozenset(
 )
 
 
-@dataclass(frozen=True, slots=True)
 class _BackupCreationProvenance:
-    seal: object = field(repr=False, compare=False)
+    __slots__ = ("__weakref__",)
+
+
+class _VerifiedMigrationBackup:
+    __slots__ = ("__weakref__",)
+
+
+class _MigrationBackupAuthorization:
+    __slots__ = ("__weakref__",)
+
+
+@dataclass(frozen=True, slots=True)
+class _BackupCreationRecord:
     source_path: Path
     source_identity: _FileIdentity
     backup_path: Path
@@ -71,9 +83,8 @@ class _BackupCreationProvenance:
 
 
 @dataclass(frozen=True, slots=True)
-class _VerifiedMigrationBackup:
-    seal: object = field(repr=False, compare=False)
-    provenance: _BackupCreationProvenance = field(repr=False, compare=False)
+class _VerifiedMigrationBackupRecord:
+    provenance: _BackupCreationRecord
     manifest: BackupManifest
     backup_sha256: str
     backup_size_bytes: int
@@ -82,8 +93,7 @@ class _VerifiedMigrationBackup:
 
 
 @dataclass(frozen=True, slots=True)
-class _MigrationBackupAuthorization:
-    seal: object = field(repr=False, compare=False)
+class _MigrationBackupAuthorizationRecord:
     source_path: Path
     source_identity: _FileIdentity
     backup_path: Path
@@ -97,6 +107,71 @@ class _MigrationBackupAuthorization:
     catalog_fingerprint: _CatalogFingerprint
     starting_schema_version: int
     catalog_target_version: int
+
+
+_TOKEN_RECORD_LOCK = RLock()
+_CREATION_RECORDS = WeakKeyDictionary()
+_VERIFIED_RECORDS = WeakKeyDictionary()
+_AUTHORIZATION_RECORDS = WeakKeyDictionary()
+
+
+def _issue_creation_provenance(
+    record: _BackupCreationRecord,
+) -> _BackupCreationProvenance:
+    token = _BackupCreationProvenance()
+    with _TOKEN_RECORD_LOCK:
+        _CREATION_RECORDS[token] = record
+    return token
+
+
+def _creation_record_for(token: object) -> _BackupCreationRecord:
+    if type(token) is not _BackupCreationProvenance:
+        raise ValueError
+    with _TOKEN_RECORD_LOCK:
+        try:
+            return _CREATION_RECORDS[token]
+        except KeyError:
+            raise ValueError from None
+
+
+def _issue_verified_backup(
+    record: _VerifiedMigrationBackupRecord,
+) -> _VerifiedMigrationBackup:
+    token = _VerifiedMigrationBackup()
+    with _TOKEN_RECORD_LOCK:
+        _VERIFIED_RECORDS[token] = record
+    return token
+
+
+def _verified_record_for(token: object) -> _VerifiedMigrationBackupRecord:
+    if type(token) is not _VerifiedMigrationBackup:
+        raise ValueError
+    with _TOKEN_RECORD_LOCK:
+        try:
+            return _VERIFIED_RECORDS[token]
+        except KeyError:
+            raise ValueError from None
+
+
+def _issue_migration_authorization(
+    record: _MigrationBackupAuthorizationRecord,
+) -> _MigrationBackupAuthorization:
+    token = _MigrationBackupAuthorization()
+    with _TOKEN_RECORD_LOCK:
+        _AUTHORIZATION_RECORDS[token] = record
+    return token
+
+
+def _authorization_record_for(
+    token: object,
+) -> _MigrationBackupAuthorizationRecord:
+    if type(token) is not _MigrationBackupAuthorization:
+        raise ValueError
+    with _TOKEN_RECORD_LOCK:
+        try:
+            return _AUTHORIZATION_RECORDS[token]
+        except KeyError:
+            raise ValueError from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,12 +256,7 @@ def verify_migration_backup(
     try:
         if type(backup_result) is not BackupResult:
             raise ValueError
-        provenance = backup_result._provenance
-        if (
-            type(provenance) is not _BackupCreationProvenance
-            or provenance.seal is not _AUTHORIZATION_SEAL
-        ):
-            raise ValueError
+        provenance = _creation_record_for(backup_result._provenance)
 
         backup_path, backup_identity = _resolved_path_identity(
             backup_result.backup_path
@@ -212,14 +282,15 @@ def verify_migration_backup(
         if backup_size != manifest.size_bytes or backup_sha256 != manifest.sha256:
             raise ValueError
 
-        return _VerifiedMigrationBackup(
-            seal=_AUTHORIZATION_SEAL,
-            provenance=provenance,
-            manifest=manifest,
-            backup_sha256=backup_sha256,
-            backup_size_bytes=backup_size,
-            manifest_sha256=manifest_sha256,
-            manifest_size_bytes=manifest_size,
+        return _issue_verified_backup(
+            _VerifiedMigrationBackupRecord(
+                provenance=provenance,
+                manifest=manifest,
+                backup_sha256=backup_sha256,
+                backup_size_bytes=backup_size,
+                manifest_sha256=manifest_sha256,
+                manifest_size_bytes=manifest_size,
+            )
         )
     except (BackupError, OSError, ValueError):
         raise BackupError("migration backup verification failed") from None
@@ -235,14 +306,8 @@ def authorize_migration_backup(
     """Bind a verified backup to one live database instance and catalog."""
 
     try:
-        if (
-            type(verified_backup) is not _VerifiedMigrationBackup
-            or verified_backup.seal is not _AUTHORIZATION_SEAL
-            or verified_backup.provenance.seal is not _AUTHORIZATION_SEAL
-        ):
-            raise ValueError
-
-        provenance = verified_backup.provenance
+        verified_record = _verified_record_for(verified_backup)
+        provenance = verified_record.provenance
         source_path, source_identity = _resolved_path_identity(database_path)
         if (
             source_path != provenance.source_path
@@ -254,9 +319,9 @@ def authorize_migration_backup(
         status = inspect_schema(database_path, catalog, options=options)
         if (
             status.state not in (SchemaState.CURRENT, SchemaState.PENDING)
-            or status.current_version != verified_backup.manifest.schema_version
+            or status.current_version != verified_record.manifest.schema_version
             or status.target_version
-            != verified_backup.manifest.catalog_target_version
+            != verified_record.manifest.catalog_target_version
         ):
             raise ValueError
 
@@ -269,21 +334,22 @@ def authorize_migration_backup(
         ):
             raise ValueError
 
-        return _MigrationBackupAuthorization(
-            seal=_AUTHORIZATION_SEAL,
-            source_path=source_path,
-            source_identity=source_identity,
-            backup_path=provenance.backup_path,
-            backup_identity=provenance.backup_identity,
-            backup_sha256=verified_backup.backup_sha256,
-            backup_size_bytes=verified_backup.backup_size_bytes,
-            manifest_path=provenance.manifest_path,
-            manifest_identity=provenance.manifest_identity,
-            manifest_sha256=verified_backup.manifest_sha256,
-            manifest_size_bytes=verified_backup.manifest_size_bytes,
-            catalog_fingerprint=provenance.catalog_fingerprint,
-            starting_schema_version=verified_backup.manifest.schema_version,
-            catalog_target_version=verified_backup.manifest.catalog_target_version,
+        return _issue_migration_authorization(
+            _MigrationBackupAuthorizationRecord(
+                source_path=source_path,
+                source_identity=source_identity,
+                backup_path=provenance.backup_path,
+                backup_identity=provenance.backup_identity,
+                backup_sha256=verified_record.backup_sha256,
+                backup_size_bytes=verified_record.backup_size_bytes,
+                manifest_path=provenance.manifest_path,
+                manifest_identity=provenance.manifest_identity,
+                manifest_sha256=verified_record.manifest_sha256,
+                manifest_size_bytes=verified_record.manifest_size_bytes,
+                catalog_fingerprint=provenance.catalog_fingerprint,
+                starting_schema_version=verified_record.manifest.schema_version,
+                catalog_target_version=verified_record.manifest.catalog_target_version,
+            )
         )
     except (BackupError, DatabaseError, OSError, ValueError):
         raise BackupError("backup authorization is invalid") from None
@@ -298,41 +364,41 @@ def _revalidate_migration_authorization(
     catalog_target_version: int,
 ) -> None:
     try:
+        authorization_record = _authorization_record_for(authorization)
         if (
-            type(authorization) is not _MigrationBackupAuthorization
-            or authorization.seal is not _AUTHORIZATION_SEAL
-            or authorization.starting_schema_version != starting_schema_version
-            or authorization.catalog_target_version != catalog_target_version
-            or authorization.catalog_fingerprint != _catalog_fingerprint(catalog)
+            authorization_record.starting_schema_version != starting_schema_version
+            or authorization_record.catalog_target_version != catalog_target_version
+            or authorization_record.catalog_fingerprint
+            != _catalog_fingerprint(catalog)
         ):
             raise ValueError
 
         source_path, source_identity = _resolved_path_identity(database_path)
         backup_path, backup_identity = _resolved_path_identity(
-            authorization.backup_path
+            authorization_record.backup_path
         )
         manifest_path, manifest_identity = _resolved_path_identity(
-            authorization.manifest_path
+            authorization_record.manifest_path
         )
         if (
-            source_path != authorization.source_path
-            or source_identity != authorization.source_identity
-            or backup_path != authorization.backup_path
-            or backup_identity != authorization.backup_identity
-            or manifest_path != authorization.manifest_path
-            or manifest_identity != authorization.manifest_identity
-            or backup_path.stat().st_size != authorization.backup_size_bytes
-            or manifest_path.stat().st_size != authorization.manifest_size_bytes
-            or _sha256_file(backup_path) != authorization.backup_sha256
-            or _sha256_file(manifest_path) != authorization.manifest_sha256
+            source_path != authorization_record.source_path
+            or source_identity != authorization_record.source_identity
+            or backup_path != authorization_record.backup_path
+            or backup_identity != authorization_record.backup_identity
+            or manifest_path != authorization_record.manifest_path
+            or manifest_identity != authorization_record.manifest_identity
+            or backup_path.stat().st_size != authorization_record.backup_size_bytes
+            or manifest_path.stat().st_size != authorization_record.manifest_size_bytes
+            or _sha256_file(backup_path) != authorization_record.backup_sha256
+            or _sha256_file(manifest_path) != authorization_record.manifest_sha256
         ):
             raise ValueError
 
         manifest = verify_backup_artifacts(backup_path, manifest_path)
         if (
-            manifest.schema_version != authorization.starting_schema_version
+            manifest.schema_version != authorization_record.starting_schema_version
             or manifest.catalog_target_version
-            != authorization.catalog_target_version
+            != authorization_record.catalog_target_version
         ):
             raise ValueError
     except (BackupError, OSError, ValueError):
@@ -474,15 +540,16 @@ def _create_sqlite_backup(
             output_path,
             manifest_path,
             manifest,
-            _provenance=_BackupCreationProvenance(
-                seal=_AUTHORIZATION_SEAL,
-                source_path=source_path,
-                source_identity=source_identity,
-                backup_path=output_path.resolve(strict=True),
-                backup_identity=backup_identity,
-                manifest_path=manifest_path.resolve(strict=True),
-                manifest_identity=manifest_identity,
-                catalog_fingerprint=_catalog_fingerprint(catalog),
+            _provenance=_issue_creation_provenance(
+                _BackupCreationRecord(
+                    source_path=source_path,
+                    source_identity=source_identity,
+                    backup_path=output_path.resolve(strict=True),
+                    backup_identity=backup_identity,
+                    manifest_path=manifest_path.resolve(strict=True),
+                    manifest_identity=manifest_identity,
+                    catalog_fingerprint=_catalog_fingerprint(catalog),
+                )
             ),
         )
     finally:

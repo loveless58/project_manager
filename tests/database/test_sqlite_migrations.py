@@ -282,6 +282,7 @@ def test_runtime_authorizer_rejects_temp_schema_before_recording(
         "INSERT INTO auxiliary.seeded_item(id, value) VALUES (2, 'changed');",
         "UPDATE auxiliary.seeded_item SET value = 'changed' WHERE id = 1;",
         "DELETE FROM auxiliary.seeded_item WHERE id = 1;",
+        "PRAGMA auxiliary.user_version = 123;",
     ],
 )
 def test_runtime_authorizer_rejects_pre_attached_schema_actions(
@@ -333,8 +334,37 @@ def test_runtime_authorizer_rejects_pre_attached_schema_actions(
         rows = side_connection.execute(
             "SELECT id, value FROM seeded_item ORDER BY id"
         ).fetchall()
+        side_user_version = side_connection.execute(
+            "PRAGMA user_version"
+        ).fetchone()[0]
     assert rows == [(1, "original")]
+    assert side_user_version == 0
     assert _applied_versions(database) == []
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "PRAGMA main.user_version = 7;",
+        "PRAGMA main.user_version;",
+        "PRAGMA foreign_keys = ON;",
+    ],
+)
+def test_runtime_authorizer_allows_main_connection_local_and_read_only_pragmas(
+    tmp_path, statement
+):
+    catalog = _unchecked_catalog(tmp_path, statement)
+    database = tmp_path / "state.sqlite3"
+    initialize_database(database)
+
+    result = apply_pending_migrations(
+        database,
+        catalog,
+        backup_authorization=_authorization(database, catalog, tmp_path),
+    )
+
+    assert result.applied_versions == (1,)
+    assert _applied_versions(database) == [1]
 
 
 def test_sql_failure_rolls_back_current_schema_and_record(tmp_path):
