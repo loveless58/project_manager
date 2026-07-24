@@ -14,7 +14,7 @@ class TestArchiveDecision(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             decision = evaluate_archive_decision(
-                source_file=r"E:\SynologyDrive\PRD-project-manager-ocr.md",
+                source_file=r"Q:\SyntheticBusiness\PRD-project-manager-ocr.md",  # repo-hygiene: allow=synthetic-path
                 extracted={
                     "filename": "PRD-project-manager-ocr.md",
                     "file_type": ".md",
@@ -41,7 +41,7 @@ class TestArchiveDecision(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             decision = evaluate_archive_decision(
-                source_file=r"E:\SynologyDrive\random.md",
+                source_file=r"Q:\SyntheticBusiness\random.md",  # repo-hygiene: allow=synthetic-path
                 extracted={
                     "filename": "random.md",
                     "file_type": ".md",
@@ -62,14 +62,14 @@ class TestArchiveDecision(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             decision = evaluate_archive_decision(
-                source_file=r"E:\Sync\SynologyDrive\项目文件\项目丢标\台式电脑采购\项目记录.md",
+                source_file=r"Q:\SyntheticBusiness\项目文件\项目丢标\合成终端采购项目\项目记录.md",  # repo-hygiene: allow=synthetic-path
                 extracted={
                     "filename": "项目记录.md",
                     "file_type": ".md",
                     "document_type": "项目记录",
-                    "extracted_text": "# 项目记录：台式电脑采购\n报名状态：已弃标",
+                    "extracted_text": "# 项目记录：合成终端采购项目\n报名状态：已弃标",
                     "fields": {
-                        "project_name": "台式电脑采购",
+                        "project_name": "合成终端采购项目",
                         "bid_status": "弃标",
                         "lifecycle_stage": "closed_lost",
                     },
@@ -82,25 +82,25 @@ class TestArchiveDecision(unittest.TestCase):
             )
 
             self.assertEqual(decision["subject_type"], "bid_project")
-            self.assertEqual(decision["subject_name"], "台式电脑采购")
+            self.assertEqual(decision["subject_name"], "合成终端采购项目")
             self.assertEqual(decision["archive_phase"], "项目丢标")
             self.assertEqual(decision["blockers"], [])
             self.assertFalse(decision["human_review_required"])
-            self.assertIn(os.path.join("项目丢标", "台式电脑采购", "原始文件"), decision["target_dir"])
+            self.assertIn(os.path.join("项目丢标", "合成终端采购项目", "原始文件"), decision["target_dir"])
 
     def test_imported_digital_asset_uses_digital_asset_target(self):
         from business_rules.archive_decision import evaluate_archive_decision
 
         with tempfile.TemporaryDirectory() as td:
             decision = evaluate_archive_decision(
-                source_file=r"E:\Sync\SynologyDrive\项目文件\项目执行\RF软件外包首都航天机械项目\数据资产\docling_invoice_extract.json",
+                source_file=r"Q:\SyntheticBusiness\项目文件\项目执行\合成数字资产项目\数据资产\docling_invoice_extract.json",  # repo-hygiene: allow=synthetic-path
                 extracted={
                     "filename": "docling_invoice_extract.json",
                     "file_type": ".json",
                     "document_type": "数据资产",
                     "extracted_text": "",
                     "fields": {
-                        "project_name": "RF软件外包首都航天机械项目",
+                        "project_name": "合成数字资产项目",
                         "lifecycle_stage": "execution",
                     },
                 },
@@ -112,15 +112,15 @@ class TestArchiveDecision(unittest.TestCase):
             )
 
             self.assertEqual(decision["archive_phase"], "项目执行")
-            self.assertIn(os.path.join("项目执行", "RF软件外包首都航天机械项目", "数字资产", "导入资产"), decision["target_dir"])
+            self.assertIn(os.path.join("项目执行", "合成数字资产项目", "数字资产", "导入资产"), decision["target_dir"])
 
     def test_project_directory_preserves_business_parentheses(self):
         from business_rules.archive_decision import evaluate_archive_decision
 
-        project_name = "郑州银行2026年-2028年基于技术栈人力框架（开发类）供应商入围"
+        project_name = "合成供应商框架项目（开发类）"
         with tempfile.TemporaryDirectory() as td:
             decision = evaluate_archive_decision(
-                source_file=fr"E:\Sync\SynologyDrive\项目文件\项目执行\{project_name}\项目记录.md",
+                source_file=fr"Q:\SyntheticBusiness\项目文件\项目执行\{project_name}\项目记录.md",  # repo-hygiene: allow=synthetic-path
                 extracted={
                     "filename": "项目记录.md",
                     "file_type": ".md",
@@ -139,21 +139,21 @@ class TestArchiveDecision(unittest.TestCase):
             )
 
             self.assertIn(os.path.join("项目执行", project_name, "原始文件"), decision["target_dir"])
-            self.assertNotIn("技术栈人力框架_开发类_供应商入围", decision["target_dir"])
+            self.assertNotIn("合成供应商框架项目_开发类_", decision["target_dir"])
 
     def test_archive_decision_preserves_project_name_and_does_not_auto_merge_aliases(self):
         from business_rules.archive_decision import evaluate_archive_decision
 
         with tempfile.TemporaryDirectory() as td:
             decision = evaluate_archive_decision(
-                source_file=r"E:\Sync\SynologyDrive\项目文件\项目执行\居家药学服务系统项目\项目记录.md",
+                source_file=r"Q:\SyntheticBusiness\项目文件\项目执行\合成服务系统项目\项目记录.md",  # repo-hygiene: allow=synthetic-path
                 extracted={
                     "filename": "项目记录.md",
                     "file_type": ".md",
                     "document_type": "项目记录",
-                    "extracted_text": "# 项目记录：居家药学服务系统项目",
+                    "extracted_text": "# 项目记录：合成服务系统项目",
                     "fields": {
-                        "project_name": "居家药学服务系统项目",
+                        "project_name": "合成服务系统项目",
                         "lifecycle_stage": "execution",
                     },
                 },
@@ -164,8 +164,8 @@ class TestArchiveDecision(unittest.TestCase):
                 project_files_dir=os.path.join(td, "项目文件"),
             )
 
-            self.assertEqual(decision["subject_name"], "居家药学服务系统项目")
-            self.assertIn(os.path.join("项目执行", "居家药学服务系统项目", "原始文件"), decision["target_dir"])
+            self.assertEqual(decision["subject_name"], "合成服务系统项目")
+            self.assertIn(os.path.join("项目执行", "合成服务系统项目", "原始文件"), decision["target_dir"])
 
 
 if __name__ == "__main__":

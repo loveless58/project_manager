@@ -1,44 +1,164 @@
 #!/usr/bin/env python3
-"""55 真实样本 KB 回归测试(2026-07-23 baseline)
+"""Optional local business-sample regression runner.
 
-覆盖:
-- 顶层散落: 8 docx
-- 项目投标/招标文件/: 11 docx
-- 项目投标/投标文件/: 3 docx
-- 项目投标/合同文件/: 6 docx
-- 项目投标/报名材料/: 10 docx
-- 资金预测/: 7 xlsx
-- 付款报备/: 6 xlsx
-- 项目明细表.xlsx: 1 xlsx
-- 其他: 3 xlsx
-
-已知 KB 边缘案例(2 个,接受):
-- [48] 附件4:合同模板.docx: 文件名含"合同"+"模板"(模板信号强),KB 高置信判合同
-- [49] 附件1-3.docx: 文件名无信号 + raw_text 为空(纯扫描件),KB 没法判断
-
-这两类场景 LLM fallback 设计目标就是为了接住,但 raw_text 空 LLM 也只能猜。
+The repository stores only a fully synthetic manifest.  Operators may keep a
+separate ignored local manifest for manual regression against controlled files.
 """
+from dataclasses import dataclass
+import json
 import os
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import sys
-from pathlib import Path
+import unittest
+from typing import Mapping, Sequence
 
 
 from skills.document_parse import parse
 
 
 SAMPLE_ROOT_ENV = "PROJECT_MANAGER_REAL_SAMPLE_ROOT"
+SAMPLE_MANIFEST_ENV = "PROJECT_MANAGER_REAL_SAMPLE_MANIFEST"
+LOCAL_MANIFEST_PATH = Path(__file__).with_name("fixtures") / "kb_real_samples.local.json"
+MANIFEST_SCHEMA_VERSION = "kb.sample_manifest.v1"
+ALLOWED_CATEGORIES = frozenset(
+    {"招标公告", "投标文件", "合同文件", "报名材料", "其他"}
+)
 
 
 class RealSampleConfigurationError(RuntimeError):
-    """Raised when the manual real-sample regression tool is not configured."""
+    """The optional local regression runner is configured incorrectly."""
 
 
-def get_sample_root(environ=None) -> Path:
+class SampleManifestError(ValueError):
+    """A sample manifest does not satisfy the portable manifest contract."""
+
+
+@dataclass(frozen=True)
+class SampleCase:
+    relative_path: str
+    expected_category: str
+
+
+@dataclass(frozen=True)
+class SampleManifest:
+    fixture_kind: str
+    contains_real_business_data: bool
+    samples: tuple[SampleCase, ...]
+
+
+def _manifest_path(
+    manifest_path: os.PathLike[str] | str | None,
+    environ: Mapping[str, str],
+) -> Path:
+    if manifest_path is not None:
+        return Path(manifest_path).expanduser().resolve()
+    configured = environ.get(SAMPLE_MANIFEST_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return LOCAL_MANIFEST_PATH.resolve()
+
+
+def _portable_relative_path(value: object, *, index: int) -> str:
+    relative_path = str(value or "").strip()
+    if not relative_path:
+        raise SampleManifestError(f"samples[{index}].relative_path must not be empty")
+    posix_path = PurePosixPath(relative_path)
+    windows_path = PureWindowsPath(relative_path)
+    if posix_path.is_absolute() or windows_path.is_absolute() or windows_path.drive:
+        raise SampleManifestError(
+            f"samples[{index}].relative_path must be relative"
+        )
+    normalized_path = relative_path.replace("\\", "/")
+    if ".." in PurePosixPath(normalized_path).parts:
+        raise SampleManifestError(
+            f"samples[{index}].relative_path must not traverse parents"
+        )
+    return normalized_path
+
+
+def load_sample_manifest(
+    manifest_path: os.PathLike[str] | str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> SampleManifest:
+    """Load a tracked synthetic or ignored local manifest.
+
+    Missing manifests are an explicit skip so normal CI never depends on local
+    business files.  A configured manifest must still pass the same schema and
+    relative-path checks as the tracked synthetic fixture.
+    """
+    environment = os.environ if environ is None else environ
+    path = _manifest_path(manifest_path, environment)
+    if not path.is_file():
+        raise unittest.SkipTest(
+            "local sample manifest is absent; configure "
+            f"{SAMPLE_MANIFEST_ENV} for the optional regression"
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SampleManifestError(f"sample manifest is not valid UTF-8 JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise SampleManifestError("sample manifest root must be an object")
+    if payload.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+        raise SampleManifestError(
+            f"sample manifest schema_version must be {MANIFEST_SCHEMA_VERSION}"
+        )
+
+    fixture_kind = str(payload.get("fixture_kind", "")).strip()
+    contains_business_data = payload.get("contains_real_business_data")
+    if fixture_kind not in {"synthetic", "local_business"}:
+        raise SampleManifestError(
+            "fixture_kind must be synthetic or local_business"
+        )
+    if not isinstance(contains_business_data, bool):
+        raise SampleManifestError("contains_real_business_data must be boolean")
+    if fixture_kind == "synthetic" and contains_business_data:
+        raise SampleManifestError("synthetic manifest cannot contain business data")
+    if fixture_kind == "local_business" and not contains_business_data:
+        raise SampleManifestError("local_business manifest must declare business data")
+
+    raw_samples = payload.get("samples")
+    if not isinstance(raw_samples, list) or not raw_samples:
+        raise SampleManifestError("samples must be a non-empty array")
+    samples = []
+    seen_paths = set()
+    for index, item in enumerate(raw_samples):
+        if not isinstance(item, dict):
+            raise SampleManifestError(f"samples[{index}] must be an object")
+        relative_path = _portable_relative_path(
+            item.get("relative_path"), index=index
+        )
+        if fixture_kind == "synthetic" and not relative_path.replace(
+            "\\", "/"
+        ).startswith("synthetic/"):
+            raise SampleManifestError(
+                f"samples[{index}].relative_path must use synthetic/ prefix"
+            )
+        if relative_path in seen_paths:
+            raise SampleManifestError(
+                f"samples[{index}].relative_path must be unique"
+            )
+        seen_paths.add(relative_path)
+        expected_category = str(item.get("expected_category", "")).strip()
+        if expected_category not in ALLOWED_CATEGORIES:
+            raise SampleManifestError(
+                f"samples[{index}].expected_category is unsupported"
+            )
+        samples.append(SampleCase(relative_path, expected_category))
+
+    return SampleManifest(
+        fixture_kind=fixture_kind,
+        contains_real_business_data=contains_business_data,
+        samples=tuple(samples),
+    )
+
+
+def get_sample_root(environ: Mapping[str, str] | None = None) -> Path:
     environment = os.environ if environ is None else environ
     configured = environment.get(SAMPLE_ROOT_ENV, "").strip()
     if not configured:
         raise RealSampleConfigurationError(
-            f"set {SAMPLE_ROOT_ENV} to the directory containing the real samples"
+            f"set {SAMPLE_ROOT_ENV} to the directory containing local samples"
         )
     root = Path(configured).expanduser().resolve()
     if not root.is_dir():
@@ -47,130 +167,72 @@ def get_sample_root(environ=None) -> Path:
         )
     return root
 
-SAMPLES = [
-    # ===== 顶层散落(已存在 4 个)=====
-    ("竞价文件全国中小企业数字化转型服务平台开发项目1.docx", "招标公告"),
-    ("20250527-核心网络设备维保维护服务合同2025.docx", "合同文件"),
-    ("中国烟草总公司山西省公司网络和安全设备、机房、软硬件平台运维服务项目合同（水印版）.docx", "合同文件"),
-    ("服务器区防火墙系统升级采购合同.docx", "合同文件"),
-    ("维保合同_文字版.docx", "合同文件"),
-    ("（新）已法审-内蒙古农村商业银行股份有限公司呼和浩特中心支行2026-2027年度九楼机房X86等设备维保合同-622.docx", "合同文件"),
-    ("核心网络设备维保维护服务合同2026-发华胜-接受所有修订(1)(1).docx", "合同文件"),
-    ("【20260715TYL已审1】RPO协议-美偲互动&华胜天成 260709(1).docx", "合同文件"),
 
-    # ===== 项目投标/招标文件/ 目录(新样本)=====
-    ("项目文件/项目投标/手持管理终端采购项目/招标文件/招标文件.docx", "招标公告"),
-    ("项目文件/项目投标/光学设备状态集约化监控管理系统/招标文件/光学设备状态集约化监控管理系统-公开招标文件.docx", "招标公告"),
-    ("项目文件/项目投标/航材院数据管理体系建设（一期）/招标文件/咨询服务项目招标文件--发售版.docx", "招标公告"),
-    ("项目文件/项目投标/航材院数据管理体系建设（一期）/招标文件/621招标补充文件.docx", "招标公告"),
-    ("项目文件/项目投标/中邮信科2026年新一轮外包人力服务集中采购项目/招标文件/招标文件.docx", "招标公告"),
-    ("项目文件/项目投标/某数据中心（二期）装备建设项目包10 Web中间件/招标文件/招标文件某数据中心（二期）装备建设项目（二次招标）10包Web中间件-发售版.docx", "招标公告"),
-    ("项目文件/项目投标/运营服务能力验证子系统/招标文件/运营服务能力验证子系统-招标文件20260429.docx", "招标公告"),
-    ("项目文件/项目投标/2026年许继电气北京许继企业数字化技术服务集采项目/招标文件/附件2：电气-采购文件.docx", "招标公告"),
-
-    # ===== 项目投标/投标文件/ 目录(新样本)=====
-    ("项目文件/项目投标/测试验证数智管理平台云基础设施-GPU服务器（包1）/投标文件/外发文件-GPU服务器（包1）.docx", "投标文件"),
-    ("项目文件/项目投标/测试验证数智管理平台云基础设施-GPU服务器（包1）/投标文件/外发文件-GPU服务器（包1）(1).docx", "投标文件"),
-    ("项目文件/项目投标/国产化大模型生态高级培训课程/招标文件/投标文件格式.docx", "投标文件"),
-
-    # ===== 项目投标/合同文件/ 目录(新样本)=====
-    ("项目文件/项目投标/中国铁塔2026年至2027年IT开发能力服务采购项目-标段一：业务系统代码开发/合同文件/合作协议_华胜&睿嘉_改2_版本2.docx", "合同文件"),
-    ("项目文件/项目投标/中国铁塔2026年至2027年IT开发能力服务采购项目-标段一：业务系统代码开发/合同文件/合作协议_华胜&睿嘉_改2_版本1.docx", "合同文件"),
-    ("项目文件/项目投标/服务器区防火墙系统升级采购/合同文件/服务器区防火墙系统升级采购合同.docx", "合同文件"),
-    ("项目文件/项目投标/测试验证数智管理平台云基础设施-GPU服务器（包1）/合同文件/测试验证数智管理平台云基础设施合同.docx", "合同文件"),
-    ("项目文件/项目投标/运营服务能力验证子系统/合同文件/运营服务能力验证子系统技术开发合同0430-IP修订.docx", "合同文件"),
-
-    # ===== 项目投标/报名材料/ 目录(新样本)=====
-    ("项目文件/项目投标/光学设备状态集约化监控管理系统/报名材料/报名材料.docx", "报名材料"),
-    ("项目文件/项目投标/国产化算力租赁采购项目/报名材料/保密承诺书-国产化算力租赁.docx", "报名材料"),
-    ("项目文件/项目投标/国产化算力租赁采购项目/报名材料/授权委托书-国产化算力租赁.docx", "报名材料"),
-    ("项目文件/项目投标/紫金矿业入围项目/报名材料/供应商业务授权委托书模板.docx", "报名材料"),
-    ("项目文件/项目投标/紫金矿业入围项目/报名材料/特定关系人登记表.docx", "报名材料"),
-    ("项目文件/项目投标/紫金矿业入围项目/报名材料/廉洁合作承诺函.docx", "报名材料"),
-    ("项目文件/项目投标/任务与服务调度管理系统/报名材料/任务与服务调度管理系统-附件1 授权委托书等.docx", "报名材料"),
-    ("项目文件/项目投标/七所报名项目/报名材料/投标人信息登记备案表.docx", "报名材料"),
-    ("项目文件/项目投标/中国烟草总公司山西省公司2026-2029年网络和安全设备运维服务/报名材料/授权委托书-山西烟草.docx", "报名材料"),
-    ("项目文件/项目投标/中国烟草总公司山西省公司2026-2029年网络和安全设备运维服务/报名材料/购买招标文件所需资料.docx", "报名材料"),
-
-    # ===== 资金预测/ (其他类)=====
-    ("资金预测/全订单全周期.xlsx", "其他"),
-    ("资金预测/CY 26 资金滚动预测-6-8月-软件外包/CY 26 资金滚动预测-6-8月-软件外包.xlsx", "其他"),
-    ("资金预测/CY 26 资金滚动预测-6-8月-软件外包/陈金水-CY 26 资金滚动预测-6-8月-软件外包-cs.xlsx", "其他"),
-    ("资金预测/CY 26 资金滚动预测-Q3-软件外包/孙建军-CY 26 资金滚动预测-Q3-软件外包.xlsx", "其他"),
-    ("资金预测/CY 26 资金滚动预测-Q3-软件外包/闫昊-CY 26 资金滚动预测-Q3-软件外包(1).xlsx", "其他"),
-
-    # ===== 付款报备/ (其他类 - 报备/报名)=====
-    ("付款报备/报备明细/2026年6月17日采购款-软件外包.xlsx", "其他"),
-    ("付款报备/报备明细/2026年5月13日采购款报名-软件外包.xlsx", "其他"),
-    ("付款报备/报备明细/2026年6月30日采购款-软件外包.xlsx", "其他"),
-    ("付款报备/报备明细/2026年7月15日采购款-软件外包.xlsx", "其他"),
-    ("付款报备/模板.xlsx", "其他"),
-    ("付款报备/2026年7月22日采购款-软件外包.xlsx", "其他"),
-
-    # ===== 项目明细表.xlsx (其他) =====
-    ("项目明细表.xlsx", "其他"),
-    ("项目文件/项目投标/测试验证数智管理平台云基础设施-GPU服务器（包1）/报名材料/承诺书递交说明及购标说明(含两个承诺书).docx", "报名材料"),
-
-    # ===== 项目投标/招标文件/ 更多样本 =====
-    ("项目文件/项目投标/2026年许继电气北京许继企业数字化技术服务集采项目/招标文件/附件4：合同模板.docx", "招标公告"),
-    ("项目文件/项目投标/某数据中心（二期）装备建设项目包10 Web中间件/招标文件/附件1-3.docx", "招标公告"),
-    ("项目文件/项目投标/运营服务能力验证子系统/招标文件/运营服务能力验证子系统研制要求-招标.docx", "招标公告"),
-    ("项目文件/项目投标/运营服务能力验证子系统/招标文件/2640STC21687_澄清1号.docx", "招标公告"),
-    ("项目文件/项目投标/国网信通产业集团2026年产业单位第六次服务类公开谈判采购（二）/招标文件/CY8526JFF06-常规5.21采购文件.docx", "招标公告"),
-
-    # ===== 项目投标/合同文件/ 补样本 =====
-    ("项目文件/项目投标/中国铁塔2026年至2027年IT开发能力服务采购项目-标段一：业务系统代码开发/合同文件/合作协议_华胜&睿嘉20260601(1).docx", "合同文件"),
-
-    # ===== 资金预测 补样本 =====
-    ("资金预测/CY 26 资金滚动预测-Q3-软件外包/陈金水-CY 26 资金滚动预测-Q3-软件外包.xlsx", "其他"),
-    ("资金预测/CY 26 资金滚动预测-Q3-软件外包/雷能-CY 26 资金滚动预测-Q3-软件外包.xlsx", "其他"),
-]
+def missing_sample_files(
+    sample_root: Path,
+    samples: Sequence[SampleCase],
+) -> list[SampleCase]:
+    return [sample for sample in samples if not (sample_root / sample.relative_path).is_file()]
 
 
-def missing_sample_files(sample_root: Path):
-    return [
-        (relative_path, expected)
-        for relative_path, expected in SAMPLES
-        if not (sample_root / relative_path).is_file()
-    ]
+def _run_samples(sample_root: Path, samples: Sequence[SampleCase]) -> list[str]:
+    failures = []
+    for sample in samples:
+        source_path = sample_root / sample.relative_path
+        try:
+            result = parse(str(source_path))
+            actual = result["business_judgement"]["category"]
+        except Exception as exc:  # pragma: no cover - manual provider boundary
+            failures.append(f"{sample.relative_path}: EXCEPTION {exc}")
+            continue
+        if actual != sample.expected_category:
+            failures.append(
+                f"{sample.relative_path}: expected={sample.expected_category}, actual={actual}"
+            )
+    return failures
+
+
+def test_local_business_sample_regression():
+    """Run only when an ignored local manifest and root are configured."""
+    manifest = load_sample_manifest()
+    sample_root = get_sample_root()
+    missing = missing_sample_files(sample_root, manifest.samples)
+    assert not missing, f"Missing sample files: {len(missing)}/{len(manifest.samples)}"
+    failures = _run_samples(sample_root, manifest.samples)
+    assert not failures, "\n".join(failures)
 
 
 def main() -> int:
+    try:
+        manifest = load_sample_manifest()
+    except unittest.SkipTest as exc:
+        print(f"SKIP: {exc}")
+        return 0
+    except SampleManifestError as exc:
+        print(f"Manifest error: {exc}", file=sys.stderr)
+        return 2
+
     try:
         sample_root = get_sample_root()
     except RealSampleConfigurationError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
 
-    missing = missing_sample_files(sample_root)
+    missing = missing_sample_files(sample_root, manifest.samples)
     if missing:
-        print(f"Missing sample files: {len(missing)}/{len(SAMPLES)}", file=sys.stderr)
-        for relative_path, _ in missing:
-            print(f"  - {relative_path}", file=sys.stderr)
+        print(
+            f"Missing sample files: {len(missing)}/{len(manifest.samples)}",
+            file=sys.stderr,
+        )
         return 1
 
-    hits = 0
-    failures = []
-    print(f"Running {len(SAMPLES)} real samples from {sample_root}")
-    for index, (relative_path, expected) in enumerate(SAMPLES, 1):
-        source_path = sample_root / relative_path
-        try:
-            result = parse(str(source_path))
-            actual = result["business_judgement"]["category"]
-            if actual == expected:
-                hits += 1
-                print(f"{index:>3} PASS {relative_path}")
-            else:
-                failures.append((relative_path, expected, actual))
-                print(f"{index:>3} FAIL {relative_path}: expected={expected}, actual={actual}")
-        except Exception as exc:
-            failures.append((relative_path, expected, f"EXCEPTION: {exc}"))
-            print(f"{index:>3} ERROR {relative_path}: {exc}")
-
-    print(f"Real-sample result: {hits}/{len(SAMPLES)} passed")
+    failures = _run_samples(sample_root, manifest.samples)
     if failures:
         print(f"Failures: {len(failures)}", file=sys.stderr)
+        for failure in failures:
+            print(f"  - {failure}", file=sys.stderr)
         return 1
+    print(f"Local sample result: {len(manifest.samples)}/{len(manifest.samples)} passed")
     return 0
 
 

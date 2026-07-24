@@ -1,0 +1,28 @@
+{
+  "schema_version": "kb.sample_manifest.v1",
+  "fixture_kind": "synthetic",
+  "contains_real_business_data": false,
+  "description": "Invented filenames used only to verify the portable sample-manifest contract.",
+  "samples": [
+    {
+      "relative_path": "synthetic/ProjectAlpha/tender/tender-notice.docx",
+      "expected_category": "招标公告"
+    },
+    {
+      "relative_path": "synthetic/ProjectBeta/bid/bid-response.docx",
+      "expected_category": "投标文件"
+    },
+    {
+      "relative_path": "synthetic/ProjectGamma/contracts/service-contract.docx",
+      "expected_category": "合同文件"
+    },
+    {
+      "relative_path": "synthetic/ProjectDelta/registration/authorization.docx",
+      "expected_category": "报名材料"
+    },
+    {
+      "relative_path": "synthetic/ProjectEpsilon/finance/forecast.xlsx",
+      "expected_category": "其他"
+    }
+  ]
+}

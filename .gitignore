@@ -34,9 +34,20 @@ secrets.yaml
 *.key
 config/project-manager.local.json
 config/workspace.local.json
+tests/fixtures/kb_real_samples.local.json
 
 # Runtime traces and local workspaces
 logs/*.json
+/.project_manager/
+/state/project_manager.sqlite3
+/state/project_manager.sqlite3-wal
+/state/project_manager.sqlite3-shm
+/state/backups/
+
+# Environment-neutral database CLI examples, if run from the repository root.
+/runtime/state/*.sqlite3*
+/runtime/backups/
+/runtime/restore-candidates/
 runs/
 project_ledgers/
 数据清洗工作台/

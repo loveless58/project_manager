@@ -53,6 +53,24 @@ def test_runtime_trace_json_is_ignored_and_not_tracked():
     assert "logs/*.json" in ignore_text.splitlines()
 
 
+def test_node_local_database_artifacts_have_narrow_ignore_rules():
+    ignore_lines = (PROJECT_DIR / ".gitignore").read_text(encoding="utf-8").splitlines()
+
+    for rule in (
+        "/.project_manager/",
+        "/state/project_manager.sqlite3",
+        "/state/project_manager.sqlite3-wal",
+        "/state/project_manager.sqlite3-shm",
+        "/state/backups/",
+        "/runtime/state/*.sqlite3*",
+        "/runtime/backups/",
+        "/runtime/restore-candidates/",
+    ):
+        assert rule in ignore_lines
+    assert "*.db" not in ignore_lines
+    assert "*.sqlite3" not in ignore_lines
+
+
 def test_readme_repository_hygiene_matches_runtime_trace_policy():
     readme = (PROJECT_DIR / "README.md").read_text(encoding="utf-8")
 

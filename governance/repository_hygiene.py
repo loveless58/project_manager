@@ -4,6 +4,7 @@ from __future__ import annotations
 import codecs
 from dataclasses import dataclass
 import ipaddress
+import json
 import os
 from pathlib import Path
 import re
@@ -26,6 +27,45 @@ _WINDOWS_PERSONAL_PATH = re.compile(
     r"\b[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s\"']+(?:[\\/][^\s\"']*)?",
     re.IGNORECASE,
 )
+_WINDOWS_BUSINESS_ABSOLUTE_PATH = re.compile(
+# Require a root, nested subject, and file so generic examples such as
+# C:\\Tools\\PageIndex are not misclassified as business-data locations.
+    r"(?<![A-Za-z0-9:/])"
+    r"[A-Za-z]:[\\/](?:[^\\/\s\"'`]+[\\/]){2,}[^\\/\s\"'`]+"
+)
+_POSIX_BUSINESS_ABSOLUTE_PATH = re.compile(
+    r"(?<![A-Za-z0-9:/])"
+    r"/(?:Volumes|mnt|media|srv|volume[0-9]+)/(?:[^/\s\"'`]+/){1,}[^/\s\"'`]+",
+    re.IGNORECASE,
+)
+_CREDENTIAL_DSN = re.compile(
+    r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqps?)://"
+    r"[^:/\s]+:(?P<secret>[^@/\s]+)@",
+    re.IGNORECASE,
+)
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?:[\"'])?\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|passwd)\b"
+    r"(?:[\"'])?\s*[:=]\s*(?:[rubf]{0,2})?[\"'](?P<secret>[^\"'\r\n]{8,})[\"']",
+    re.IGNORECASE,
+)
+_BEARER_CREDENTIAL = re.compile(
+    r"\bAuthorization\s*:\s*Bearer\s+(?P<secret>[A-Za-z0-9._~-]{16,})",
+    re.IGNORECASE,
+)
+_DIRECT_API_CREDENTIAL = re.compile(
+    r"\b(?P<secret>(?:sk|pk)-(?:live|prod)-[A-Za-z0-9_-]{16,})\b",
+    re.IGNORECASE,
+)
+_REAL_SAMPLE_HINT = re.compile(
+    r"(?:真实样本|real[_ -]?samples?|customer[_ -]?samples?|production[_ -]?samples?)",
+    re.IGNORECASE,
+)
+_EMBEDDED_SAMPLE_MANIFEST = re.compile(
+    r"^\s*(?:REAL_?SAMPLES|SAMPLES|SAMPLE_MANIFEST)\s*=\s*[\[\{(]",
+    re.MULTILINE,
+)
+_JSON_SAMPLE_LIST = re.compile(r'[\"\']samples[\"\']\s*:\s*\[', re.IGNORECASE)
+_SYNTHETIC_PATH_EXEMPTION = "repo-hygiene: allow=synthetic-path"
 _MANAGED_TEXT_SUFFIXES = {
     ".bat",
     ".cfg",
@@ -200,6 +240,111 @@ def _contains_personal_path(text: str) -> bool:
     return False
 
 
+def _is_declared_synthetic_fixture(relative_path: str, text: str) -> bool:
+    path = Path(relative_path)
+    normalized = relative_path.replace("\\", "/")
+    if not normalized.startswith("tests/fixtures/"):
+        return False
+    if path.suffix.lower() != ".json" or not path.name.startswith("synthetic_"):
+        return False
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("fixture_kind") == "synthetic"
+        and payload.get("contains_real_business_data") is False
+    )
+
+
+def _is_placeholder_business_path(value: str) -> bool:
+    normalized = value.replace("\\", "/").lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "${",
+            "<",
+            ">",
+            "...",
+            "/project-a/",
+            "/synthetic/",
+            "/example/",
+            "/tmp/",
+            "/path/",
+            "测试",
+            "(",
+            ")",
+            "[",
+            "]",
+            "*",
+        )
+    )
+
+
+def _contains_business_absolute_path(text: str, synthetic_fixture: bool) -> bool:
+    if synthetic_fixture:
+        return False
+    for line in text.splitlines():
+        if _SYNTHETIC_PATH_EXEMPTION in line:
+            continue
+        for pattern in (
+            _WINDOWS_BUSINESS_ABSOLUTE_PATH,
+            _POSIX_BUSINESS_ABSOLUTE_PATH,
+        ):
+            for match in pattern.finditer(line):
+                value = match.group(0)
+                if _is_placeholder_business_path(value):
+                    continue
+                if _POSIX_PERSONAL_PATH.search(value) or _WINDOWS_PERSONAL_PATH.search(
+                    value
+                ):
+                    continue
+                return True
+    return False
+
+
+_PLACEHOLDER_SECRETS = {
+    "secret",
+    "secret-pass",
+    "password",
+    "fake-key-for-test",
+    "test-key",
+    "dummy-token",
+    "redacted",
+}
+
+
+def _is_placeholder_secret(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in _PLACEHOLDER_SECRETS:
+        return True
+    return normalized.startswith(("${", "$ {{", "{{", "<", "%(", "env:"))
+
+
+def _contains_hardcoded_credential(text: str) -> bool:
+    for pattern in (
+        _CREDENTIAL_DSN,
+        _CREDENTIAL_ASSIGNMENT,
+        _BEARER_CREDENTIAL,
+        _DIRECT_API_CREDENTIAL,
+    ):
+        for match in pattern.finditer(text):
+            secret = match.groupdict().get("secret", match.group(0))
+            if not _is_placeholder_secret(secret):
+                return True
+    return False
+
+
+def _contains_real_sample_manifest(relative_path: str, text: str) -> bool:
+    evidence = f"{relative_path}\n{text}"
+    if not _REAL_SAMPLE_HINT.search(evidence):
+        return False
+    return bool(
+        _EMBEDDED_SAMPLE_MANIFEST.search(text) or _JSON_SAMPLE_LIST.search(text)
+    )
+
+
 def validate_repository_hygiene(
     project_root: Optional[Path] = None,
     tracked_files: Optional[Iterable[str]] = None,
@@ -255,6 +400,7 @@ def validate_repository_hygiene(
             )
             continue
         scanned_text_count += 1
+        synthetic_fixture = _is_declared_synthetic_fixture(normalized, text)
 
         if _contains_rfc1918_url(text):
             findings.append(
@@ -266,6 +412,33 @@ def validate_repository_hygiene(
                     "REPO-PERSONAL-PATH",
                     normalized,
                     "personal absolute path is forbidden",
+                )
+            )
+        if _contains_business_absolute_path(text, synthetic_fixture):
+            findings.append(
+                _finding(
+                    "REPO-BUSINESS-ABSOLUTE-PATH",
+                    normalized,
+                    "non-user business absolute path is forbidden",
+                )
+            )
+        if _contains_hardcoded_credential(text):
+            findings.append(
+                _finding(
+                    "REPO-HARDCODED-CREDENTIAL",
+                    normalized,
+                    "hardcoded credential or credential-bearing DSN is forbidden",
+                )
+            )
+        if (
+            not synthetic_fixture
+            and _contains_real_sample_manifest(normalized, text)
+        ):
+            findings.append(
+                _finding(
+                    "REPO-REAL-SAMPLE-MANIFEST",
+                    normalized,
+                    "embedded real-sample manifest is forbidden",
                 )
             )
 

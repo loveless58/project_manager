@@ -1,170 +1,94 @@
-# 已弃标/待报名状态冲突复盘与修复
+# 合成案例：投标状态一致性冲突复盘
 
-## 背景
+> 数据声明：本文只使用虚构项目、逻辑 URI 和合成状态，不对应任何客户、人员、项目或本机目录。它保留历史缺陷的工程语义，作为规则设计与回归测试说明。
 
-在清理 `E:\SynologyDrive\项目文件\项目丢标\居家药学服务系统_V1_0` 时发现：
+## 问题摘要
 
-- 项目位于 `项目丢标` 业务目录。
-- 账本当前事实中同时出现 `bid_status=已弃标` 和 `registration_status=待报名`。
-- `business_judgement` 仍被判为 `closed / 已弃标 / low risk`。
+合成项目 `SyntheticProjectAlpha` 位于逻辑位置
+`business://projects/lost/SyntheticProjectAlpha`。输入事实同时包含：
 
-这暴露出一个业务规则漏洞：系统能根据目录上下文把项目判为 closed，但没有检查报名状态与中标/弃标状态之间的组合一致性。
+- `bid_status=已弃标`；
+- `registration_status=待报名`；
+- `business_judgement=closed / low risk`。
 
-## 业务原则
+这组事实不可能作为同一项目的当前状态同时成立。系统虽然能根据业务阶段判定项目已经关闭，却遗漏了跨字段一致性检查。
 
-项目业务流转顺序是：
+## 业务不变量
+
+投标状态按下列顺序推进：
 
 ```text
-报名/决定是否参与
--> 投标/开标
+报名或参与决策
+-> 投标与开标
 -> 中标、丢标、弃标或执行
 ```
 
 因此：
 
-- `待报名` 表示项目仍处于报名前或报名决策前。
-- `已弃标` 表示已经决定不参与或放弃参与。
-- `已丢标/未中标` 表示已经参与后失败。
+- `待报名` 表示尚未完成报名或参与决策；
+- `已弃标` 表示已经决定不再参与；
+- `已丢标/未中标` 表示参与后未成功。
 
-`已弃标` 与 `待报名` 不能作为同一项目的当前事实同时成立。出现这种组合时，必须标记为状态冲突，而不是默认为低风险 closed。
+当关闭状态与 `待报名` 同时出现时，系统必须输出高风险冲突并要求人工复核，不能默认为低风险关闭。
 
 ## 根因
 
-### 1. 业务判断层缺少状态组合一致性检查
+### 1. 规则只判断单字段，没有验证组合状态
 
-`business_rules/bid_project_rules.py` 之前只用 `bid_status` 和 `lifecycle_stage` 判断业务阶段：
+旧规则根据 `bid_status` 或 `lifecycle_stage` 推导 `closed`，却没有验证
+`closed + registration_status=待报名` 的矛盾组合。
 
-```text
-bid_status 包含 弃标/丢标/未中标 -> closed
-```
+### 2. 业务位置上下文只覆盖了部分字段
 
-但没有检查：
+逻辑位置 `business://projects/lost/...` 能确定关闭原因时，旧实现只更新
+`bid_status`、`lifecycle_stage` 和 `closed_reason_type`，没有同步收敛
+`registration_status`，导致历史输入再次污染当前事实。
 
-```text
-closed + registration_status=待报名
-```
+### 3. 权威事实与派生投影可能不同步
 
-这种组合是否矛盾。
+事实更新后若没有重新生成 Markdown/HTML 投影，用户仍可能看到旧值。投影必须可由权威状态重建，不能独立成为事实源。
 
-### 2. 路径上下文覆盖不完整
+## 修复边界
 
-`tools/data_cleaning_tools.py::_apply_source_path_context()` 能根据 `项目丢标` 目录把：
-
-```text
-bid_status -> 已弃标
-lifecycle_stage -> closed
-closed_reason_type -> abandoned_by_us
-```
-
-但之前没有同步把 `registration_status` 从旧记录里的 `待报名` 收敛为 `已弃标`。
-
-### 3. 派生 Markdown 与 JSON 账本可能不同步
-
-如果账本当前事实被更新后没有同步重写 `项目总览.md`，Markdown 仍可能展示旧字段或旧候选事实。
-
-## 修复策略
-
-### 代码防线
-
-1. 在 `BidProjectRuleEngine` 中增加状态一致性规则：
+规则层增加以下确定性检查：
 
 ```text
-closed 或 bid_status=已弃标/已丢标/未中标
+closed 或 bid_status 属于 已弃标/已丢标/未中标
 + registration_status=待报名
 => risk_level=high
 => human_review_required=true
-=> data_quality_flags 包含 报名状态与中标状态冲突
+=> data_quality_flags 增加状态冲突
 ```
 
-2. 在 `DataCleaningTools._apply_source_path_context()` 中补齐目录上下文：
+位置上下文只在证据充分时收敛互相依赖的状态字段。无法确定客户、销售负责人或项目身份时保持未知，不从目录名猜测。
 
-```text
-项目丢标 + abandoned_by_us
-=> registration_status=已弃标
-```
+数据修复遵循以下原则：
 
-这样旧 `项目记录.md` 中的 `待报名/待开标` 不会再次污染当前事实。
+1. 先备份并只读检查权威事实、冲突和业务判断；
+2. 先写失败测试，再修改业务规则；
+3. 只自动修复可由确定性证据证明的字段；
+4. 重算业务判断并重建派生投影；
+5. 复核全局统计与单项目状态一致；
+6. 原始业务文件和运行产物留在仓库外的受控位置。
 
-### 数据修复原则
-
-只自动修复确定性问题：
-
-- 删除 `待确认`、表格残片、合同句子等明显污染字段。
-- 对 `项目丢标` 目录下已确定为弃标的项目，将源记录状态收敛为弃标语义。
-- 重算 `business_judgement`。
-- 同步重写 `项目总览.md` 和全局 `投标进度总览.html`。
-
-不自动推断缺失客户或销售：
-
-- 如果没有可信来源，不补写 `customer_name`。
-- 如果没有可信来源，不补写 `sales_owner`。
-
-## 回归测试
-
-新增/更新测试覆盖：
+## 回归测试语义
 
 - `test_business_rules_flag_closed_project_with_pending_registration_as_conflict`
-  - 验证 `已弃标 + 待报名` 会被判为高风险状态冲突。
-
+  验证关闭项目与待报名状态会产生高风险复核项。
 - `test_project_lost_directory_context_overrides_record_status_and_keeps_outputs_unique`
-  - 验证 `项目丢标` 路径上下文会同时覆盖：
-    - `bid_status=已弃标`
-    - `registration_status=已弃标`
-    - `lifecycle_stage=closed`
-    - `closed_reason_type=abandoned_by_us`
+  验证丢标位置上下文会一致更新弃标状态、生命周期和关闭原因。
+- 投影测试验证相同权威状态只生成一组一致、可重建的输出。
 
-## 操作检查清单
+## 名称相似与状态冲突
 
-处理类似问题时按以下顺序执行：
-
-1. 只读检查 `project_ledger.json` 的 `current_facts`、`conflicts`、`business_judgement`。
-2. 对照源 `项目记录.md`，确认是源记录旧状态、抽取错误，还是目录上下文覆盖缺失。
-3. 如果是规则漏洞，先补回归测试，再改业务规则。
-4. 如果是历史账本污染，先备份同目录 `project_ledger.json`，再做最小清理。
-5. 清理后重算 `business_judgement`。
-6. 重写 `项目总览.md`。
-7. 重生成 `E:\SynologyDrive\投标进度总览.html`。
-8. 复核全局统计和单项目状态是否一致。
-
-## 本次涉及的真实项目
+另一个合成案例包含：
 
 ```text
-E:\SynologyDrive\项目文件\项目丢标\居家药学服务系统_V1_0
+business://projects/lost/SyntheticProjectAlpha
+business://projects/executing/SyntheticProjectAlpha-Variant
 ```
 
-已确认的问题：
-
-- `project_ledger.json` 当前事实已清掉 `待确认` 客户/销售污染。
-- `project_ledger.json` 已把 `registration_status=待报名` 修正为 `已弃标`。
-- `项目总览.md` 已重新生成，避免继续展示旧事实。
-- `项目记录.md` 源状态已从 `待报名/待开标` 收敛为 `已弃标`，后续重复抽取不再依赖路径上下文兜底。
-
-## 业务层结构化识别不足
-
-后续复核发现：
-
-```text
-E:\SynologyDrive\项目文件\项目丢标\居家药学服务系统_V1_0
-E:\SynologyDrive\项目文件\项目执行\居家药学服务系统项目
-```
-
-这两个目录存在名称相似和状态冲突。问题不应定义为“需要项目别名归一/自动合并”，而应定义为业务层结构化识别能力不足：
-
-- 业务层没有把“名称相似”作为结构化信号输出。
-- 业务层没有把“项目丢标 vs 项目执行”的状态冲突清晰输出为待复核样本。
-- 业务层不应直接决定目录合并、账本迁移或项目名改写。
-
-### 根因
-
-当前抽取和账本更新容易把目录上下文、文件名、项目记录状态混在一起，导致结构化输出没有清楚表达：
-
-- 两个名称是否只是相似，而不是已经确认同一项目。
-- 证据来自哪个文件、哪个目录、哪个抽取方法。
-- 状态冲突是确定事实，还是需要人工复核。
-
-### 修复策略
-
-修复方向是输出结构化判断样本，而不是增加运维脚本、自动合并工具或自动项目名归一：
+名称相似只是信号，不等于身份已经确认。业务层应输出结构化复核案例，而不是自动合并目录、迁移账本或改写项目名：
 
 ```json
 {
@@ -177,19 +101,15 @@ E:\SynologyDrive\项目文件\项目执行\居家药学服务系统项目
   },
   "output": {
     "decision": "needs_review",
-    "reason": "名称相似但状态冲突，业务层不自动合并、不自动覆盖"
+    "reason": "名称相似但状态冲突；不自动合并或覆盖"
   }
 }
 ```
 
-业务层只输出结构化信号、证据、冲突和不确定性；文件移动、目录合并、账本迁移必须保持在归档执行链路之外，且不得由业务层自动触发。
+对应回归覆盖：
 
-回归测试：
+- 保留项目原名且不自动合并别名；
+- 账本不因名称相似自动合并项目；
+- 执行阶段与关闭投标状态冲突时生成复核项。
 
-- `tests/test_archive_decision.py::test_archive_decision_preserves_project_name_and_does_not_auto_merge_aliases`
-- `tests/test_loop.py::test_project_ledger_does_not_auto_merge_similar_project_names`
-- `tests/test_loop.py::test_business_rules_flag_execution_project_with_closed_bid_status_as_conflict`
-
-### 操作原则
-
-发现疑似同项目别名时，不自动归一、不自动合并、不自动改目录。业务层只输出结构化复核样本，由后续人工确认或单独归档执行链路处理。后续优化应基于这些结构化样本提升业务层识别能力，而不是增加 skill 和 tools 之间的耦合。
+任何文件移动、目录合并或账本迁移都属于独立归档执行边界，必须经过结构化动作、审批和回读。
