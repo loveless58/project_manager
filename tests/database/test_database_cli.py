@@ -702,3 +702,145 @@ def test_module_entrypoint_smoke_is_read_only_and_returns_action_required(tmp_pa
     assert json.loads(result.stdout)["schema_version"] == "database_cli.v1"
     assert result.stderr == ""
     assert not database.exists()
+
+
+@pytest.mark.parametrize(
+    ("payload", "json_output"),
+    [
+        (b'{"database": SECRET', True),
+        (b"\xffPRIVATE-CONFIG", False),
+    ],
+)
+def test_configuration_decode_failures_are_incompatible_and_redacted(
+    tmp_path, payload, json_output
+):
+    from infrastructure.database.cli import main
+
+    config = tmp_path / "private-settings.json"
+    config.write_bytes(payload)
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    arguments = ["--config", str(config)]
+    if json_output:
+        arguments.append("--json")
+    arguments.append("status")
+
+    code = main(arguments, stdout=stdout, stderr=stderr)
+
+    rendered = stdout.getvalue() + stderr.getvalue()
+    assert code == 3
+    assert "DB.CONFIGURATION" in rendered
+    assert str(config) not in rendered
+    assert "SECRET" not in rendered
+    assert "PRIVATE-CONFIG" not in rendered
+    assert "Expecting" not in rendered
+
+
+def test_configuration_directory_read_failure_is_incompatible_and_redacted(tmp_path):
+    from infrastructure.database.cli import main
+
+    config_directory = tmp_path / "private-config-directory"
+    config_directory.mkdir()
+    stdout = io.StringIO()
+
+    code = main(
+        ["--config", str(config_directory), "--json", "status"],
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    payload = json.loads(stdout.getvalue())
+    assert code == 3
+    assert payload["error_code"] == "DB.CONFIGURATION"
+    assert str(config_directory) not in stdout.getvalue()
+
+
+def test_configuration_permission_failure_is_sanitized(monkeypatch, tmp_path):
+    from infrastructure.database import cli
+
+    config = tmp_path / "private-config.json"
+    monkeypatch.setattr(
+        cli,
+        "load_app_settings",
+        lambda **kwargs: (_ for _ in ()).throw(
+            PermissionError(f"permission denied: {config}")
+        ),
+    )
+    stderr = io.StringIO()
+
+    code = cli.main(
+        ["--config", str(config), "status"],
+        stdout=io.StringIO(),
+        stderr=stderr,
+    )
+
+    assert code == 3
+    assert "DB.CONFIGURATION" in stderr.getvalue()
+    assert str(config) not in stderr.getvalue()
+    assert "permission denied" not in stderr.getvalue()
+
+
+def test_database_os_error_after_settings_is_operation_failure(monkeypatch, tmp_path):
+    from infrastructure.database import cli
+
+    database = tmp_path / "private-state.sqlite3"
+    monkeypatch.setattr(
+        cli,
+        "inspect_schema",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError(f"database read failed: {database}")
+        ),
+    )
+
+    code, payload, stdout, stderr = _json_invoke(
+        "--database", str(database), "status"
+    )
+
+    assert code == 5
+    assert payload["error_code"] == "DB.OPERATION_FAILED"
+    assert str(database) not in stdout + stderr
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_fragment"),
+    [
+        (["--help"], "{status,migrate,check,backup,verify-restore}"),
+        (["migrate", "--help"], "--backup-dir"),
+    ],
+)
+def test_help_uses_injected_stdout_without_terminating_main(
+    capsys, arguments, expected_fragment
+):
+    from infrastructure.database.cli import main
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    code = main(arguments, stdout=stdout, stderr=stderr)
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "usage:" in stdout.getvalue()
+    assert expected_fragment in stdout.getvalue()
+    assert stderr.getvalue() == ""
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_module_help_returns_zero_and_writes_only_stdout(tmp_path):
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(REPOSITORY_ROOT)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "infrastructure.database.cli", "migrate", "--help"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "usage:" in result.stdout
+    assert "--backup-dir" in result.stdout
+    assert result.stderr == ""

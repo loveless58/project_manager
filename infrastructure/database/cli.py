@@ -9,6 +9,7 @@ import secrets
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -73,7 +74,33 @@ class _ArgumentError(Exception):
     pass
 
 
+class _ParserExit(Exception):
+    def __init__(self, status: int) -> None:
+        super().__init__()
+        self.status = status
+
+
 class _SafeArgumentParser(argparse.ArgumentParser):
+    def __init__(
+        self,
+        *args,
+        stdout: TextIO,
+        stderr: TextIO,
+        **kwargs,
+    ) -> None:
+        self._stdout = stdout
+        self._stderr = stderr
+        super().__init__(*args, **kwargs)
+
+    def print_help(self, file: TextIO | None = None) -> None:
+        super().print_help(file=self._stdout if file is None else file)
+
+    def exit(self, status: int = 0, message: str | None = None) -> None:
+        if message:
+            destination = self._stdout if status == 0 else self._stderr
+            destination.write(message)
+        raise _ParserExit(status)
+
     def error(self, message: str) -> None:
         raise _ArgumentError from None
 
@@ -87,7 +114,12 @@ def main(
     arguments = list(sys.argv[1:] if argv is None else argv)
     json_output = "--json" in arguments
     try:
-        parsed = _build_parser().parse_args(arguments)
+        parsed = _build_parser(
+            stdout=stdout,
+            stderr=stderr,
+        ).parse_args(arguments)
+    except _ParserExit as result:
+        return result.status
     except _ArgumentError:
         return _emit_error(
             "arguments",
@@ -101,10 +133,7 @@ def main(
 
     command = parsed.command
     try:
-        settings = load_app_settings(
-            config_file=parsed.config,
-            sqlite_path=parsed.database,
-        )
+        settings = _load_cli_settings(parsed)
         if settings.database.provider != "sqlite":
             raise UnsupportedDatabaseProviderError(
                 "database provider is unsupported"
@@ -159,12 +188,21 @@ def main(
         )
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = _SafeArgumentParser(add_help=True)
+def _build_parser(*, stdout: TextIO, stderr: TextIO) -> argparse.ArgumentParser:
+    parser_factory = partial(
+        _SafeArgumentParser,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    parser = parser_factory(add_help=True)
     parser.add_argument("--config")
     parser.add_argument("--database")
     parser.add_argument("--json", action="store_true")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+        parser_class=parser_factory,
+    )
     subparsers.add_parser("status", add_help=True)
 
     migrate = subparsers.add_parser("migrate", add_help=True)
@@ -180,6 +218,18 @@ def _build_parser() -> argparse.ArgumentParser:
     restore.add_argument("--manifest", required=True)
     restore.add_argument("--target", required=True)
     return parser
+
+
+def _load_cli_settings(parsed):
+    try:
+        return load_app_settings(
+            config_file=parsed.config,
+            sqlite_path=parsed.database,
+        )
+    except SettingsError:
+        raise
+    except (json.JSONDecodeError, UnicodeError, OSError):
+        raise SettingsError("database configuration is invalid") from None
 
 
 def _load_production_catalog():
