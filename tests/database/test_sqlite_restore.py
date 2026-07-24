@@ -507,11 +507,14 @@ def test_publication_failure_cleans_owned_temp_and_preserves_foreign_files(
     target = tmp_path / "restored.sqlite3"
     sentinel = tmp_path / "foreign.txt"
     sentinel.write_text("preserve", encoding="utf-8")
-    monkeypatch.setattr(
-        restore_module.os,
-        "link",
-        lambda *args: (_ for _ in ()).throw(OSError("sensitive link failure")),
-    )
+    real_link = os.link
+
+    def fail_target_link(source, destination):
+        if Path(destination) == target:
+            raise OSError("sensitive link failure")
+        real_link(source, destination)
+
+    monkeypatch.setattr(restore_module.os, "link", fail_target_link)
 
     with pytest.raises(RestoreVerificationError, match="publication failed") as raised:
         verify_and_restore_sqlite(
@@ -537,7 +540,8 @@ def test_link_that_creates_target_then_raises_is_compensated(
 
     def link_then_raise(source, destination):
         real_link(source, destination)
-        raise OSError("injected post-link ambiguity")
+        if Path(destination) == target:
+            raise OSError("injected post-link ambiguity")
 
     monkeypatch.setattr(restore_module.os, "link", link_then_raise)
 
@@ -564,8 +568,9 @@ def test_replaced_target_is_never_deleted_or_reported_as_success(
 
     def link_then_replace(source, destination):
         real_link(source, destination)
-        Path(destination).unlink()
-        Path(destination).write_bytes(replacement)
+        if Path(destination) == target:
+            Path(destination).unlink()
+            Path(destination).write_bytes(replacement)
 
     monkeypatch.setattr(restore_module.os, "link", link_then_replace)
 
@@ -706,7 +711,7 @@ def test_replaced_temporary_target_is_not_deleted_during_failure_cleanup(
 
     with pytest.raises(
         RestoreVerificationError,
-        match="injected validation failure",
+        match="temporary file cleanup failed",
     ):
         verify_and_restore_sqlite(
             backup_result.backup_path,
@@ -721,10 +726,349 @@ def test_replaced_temporary_target_is_not_deleted_during_failure_cleanup(
     assert not target.exists()
 
 
+def test_source_path_ab_swap_cannot_publish_replacement_business_data(
+    monkeypatch: pytest.MonkeyPatch,
+    backup_result,
+    tmp_path: Path,
+) -> None:
+    if os.name == "nt":
+        pytest.skip(
+            "Windows denies renaming an opened SQLite source; POSIX CI exercises the swap"
+        )
+    target = tmp_path / "restored.sqlite3"
+    replacement = tmp_path / "replacement.sqlite3"
+    initialize_schema_metadata(replacement)
+    with sqlite3.connect(replacement) as connection:
+        connection.execute("CREATE TABLE snapshot_value (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO snapshot_value VALUES ('replacement')")
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        connection.execute("PRAGMA journal_mode = DELETE")
+
+    original_hash = _sha256(backup_result.backup_path)
+    held_original = tmp_path / "held-original.sqlite3"
+    real_open = restore_module._open_backup_read_only
+    swapped = False
+
+    def swap_original_around_open(path, **kwargs):
+        nonlocal swapped
+        backup_result.backup_path.replace(held_original)
+        replacement.replace(backup_result.backup_path)
+        try:
+            connection = real_open(path, **kwargs)
+            connection.execute("SELECT value FROM snapshot_value").fetchone()
+        finally:
+            backup_result.backup_path.replace(replacement)
+            held_original.replace(backup_result.backup_path)
+        swapped = True
+        return connection
+
+    monkeypatch.setattr(
+        restore_module,
+        "_open_backup_read_only",
+        swap_original_around_open,
+    )
+
+    verify_and_restore_sqlite(
+        backup_result.backup_path,
+        backup_result.manifest_path,
+        target,
+        active_database_path=tmp_path / "active.sqlite3",
+        catalog=(),
+    )
+
+    assert swapped
+    assert _sha256(backup_result.backup_path) == original_hash
+    with sqlite3.connect(target) as connection:
+        assert connection.execute(
+            "SELECT value FROM snapshot_value"
+        ).fetchone()[0] == "committed"
+
+
+def _create_symlink_or_skip(link: Path, destination: Path) -> None:
+    try:
+        link.symlink_to(destination)
+    except (NotImplementedError, OSError) as error:
+        pytest.skip(f"symbolic links unavailable: {type(error).__name__}")
+
+
+def test_broken_target_symlink_is_refused_before_resolution(
+    backup_result,
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing.sqlite3"
+    target = tmp_path / "broken-target.sqlite3"
+    _create_symlink_or_skip(target, missing)
+
+    with pytest.raises(RestoreVerificationError, match="target must not exist"):
+        verify_and_restore_sqlite(
+            backup_result.backup_path,
+            backup_result.manifest_path,
+            target,
+            active_database_path=tmp_path / "active.sqlite3",
+            catalog=(),
+        )
+
+    assert target.is_symlink()
+    assert not missing.exists()
+
+
+def test_target_symlink_to_existing_file_is_preserved(
+    backup_result,
+    tmp_path: Path,
+) -> None:
+    existing = tmp_path / "existing.sqlite3"
+    existing.write_bytes(b"preserve existing")
+    target = tmp_path / "existing-target.sqlite3"
+    _create_symlink_or_skip(target, existing)
+
+    with pytest.raises(RestoreVerificationError, match="target must not exist"):
+        verify_and_restore_sqlite(
+            backup_result.backup_path,
+            backup_result.manifest_path,
+            target,
+            active_database_path=tmp_path / "active.sqlite3",
+            catalog=(),
+        )
+
+    assert target.is_symlink()
+    assert existing.read_bytes() == b"preserve existing"
+
+
+def test_target_symlink_to_active_database_keeps_active_alias_check(
+    backup_result,
+    tmp_path: Path,
+) -> None:
+    active = tmp_path / "active.sqlite3"
+    initialize_schema_metadata(active)
+    active_hash = _sha256(active)
+    target = tmp_path / "active-target.sqlite3"
+    _create_symlink_or_skip(target, active)
+
+    with pytest.raises(
+        RestoreVerificationError,
+        match="target must be a new path",
+    ):
+        verify_and_restore_sqlite(
+            backup_result.backup_path,
+            backup_result.manifest_path,
+            target,
+            active_database_path=active,
+            catalog=(),
+        )
+
+    assert target.is_symlink()
+    assert _sha256(active) == active_hash
+
+
+def test_plain_new_target_still_restores_after_raw_entry_check(
+    backup_result,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "plain-new.sqlite3"
+
+    verify_and_restore_sqlite(
+        backup_result.backup_path,
+        backup_result.manifest_path,
+        target,
+        active_database_path=tmp_path / "active.sqlite3",
+        catalog=(),
+    )
+
+    assert target.is_file()
+    assert not target.is_symlink()
+
+
+def test_source_link_that_creates_then_raises_is_cleaned(
+    monkeypatch: pytest.MonkeyPatch,
+    backup_result,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "restored.sqlite3"
+    real_link = os.link
+
+    def source_link_then_raise(source, destination):
+        real_link(source, destination)
+        if Path(destination).name == "verified-source.sqlite3":
+            raise OSError("injected source link ambiguity")
+
+    monkeypatch.setattr(restore_module.os, "link", source_link_then_raise)
+
+    with pytest.raises(
+        RestoreVerificationError,
+        match="backup source binding failed",
+    ) as raised:
+        verify_and_restore_sqlite(
+            backup_result.backup_path,
+            backup_result.manifest_path,
+            target,
+            active_database_path=tmp_path / "active.sqlite3",
+            catalog=(),
+        )
+
+    assert raised.value.__cause__ is None
+    _assert_no_restore_artifacts(target)
+
+
+def test_source_binding_stat_failure_cleans_private_link(
+    monkeypatch: pytest.MonkeyPatch,
+    backup_result,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "restored.sqlite3"
+    real_identity = restore_module._path_identity
+    failed = False
+
+    def fail_bound_identity_once(path):
+        nonlocal failed
+        if not failed and path.name == "verified-source.sqlite3":
+            failed = True
+            raise OSError("injected bound identity failure")
+        return real_identity(path)
+
+    monkeypatch.setattr(restore_module, "_path_identity", fail_bound_identity_once)
+
+    with pytest.raises(
+        RestoreVerificationError,
+        match="backup source binding failed",
+    ):
+        verify_and_restore_sqlite(
+            backup_result.backup_path,
+            backup_result.manifest_path,
+            target,
+            active_database_path=tmp_path / "active.sqlite3",
+            catalog=(),
+        )
+
+    assert failed
+    _assert_no_restore_artifacts(target)
+
+
+def test_replaced_bound_source_is_not_deleted_during_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    backup_result,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "restored.sqlite3"
+    replacement = b"foreign bound replacement"
+    replaced_path: Path | None = None
+    real_bind = restore_module._bind_backup_source
+
+    def bind_then_replace(*args, **kwargs):
+        nonlocal replaced_path
+        path, identity = real_bind(*args, **kwargs)
+        path.unlink()
+        path.write_bytes(replacement)
+        replaced_path = path
+        return path, identity
+
+    monkeypatch.setattr(restore_module, "_bind_backup_source", bind_then_replace)
+
+    with pytest.raises(
+        RestoreVerificationError,
+        match="temporary file cleanup failed",
+    ):
+        verify_and_restore_sqlite(
+            backup_result.backup_path,
+            backup_result.manifest_path,
+            target,
+            active_database_path=tmp_path / "active.sqlite3",
+            catalog=(),
+        )
+
+    assert replaced_path is not None
+    assert replaced_path.read_bytes() == replacement
+    assert not target.exists()
+
+
+def test_source_and_target_use_separate_local_staging_directories(
+    monkeypatch: pytest.MonkeyPatch,
+    database: Path,
+    tmp_path: Path,
+) -> None:
+    backup_dir = tmp_path / "backup-operations"
+    target_dir = tmp_path / "target-operations"
+    backup_dir.mkdir()
+    target_dir.mkdir()
+    backup = create_sqlite_backup(database, backup_dir / "backup.sqlite3", ())
+    target = target_dir / "restored.sqlite3"
+    real_create = restore_module._create_staging_directory
+    observed: dict[str, tuple[Path, Path]] = {}
+
+    def observe_staging(parent, final_name, *, purpose):
+        path, identity = real_create(parent, final_name, purpose=purpose)
+        observed[purpose] = (path, parent)
+        return path, identity
+
+    monkeypatch.setattr(
+        restore_module,
+        "_create_staging_directory",
+        observe_staging,
+    )
+
+    verify_and_restore_sqlite(
+        backup.backup_path,
+        backup.manifest_path,
+        target,
+        active_database_path=database,
+        catalog=(),
+    )
+
+    source_staging, source_parent = observed["source"]
+    target_staging, target_parent = observed["target"]
+    assert source_parent == backup_dir.resolve()
+    assert target_parent == target_dir.resolve()
+    assert source_staging != target_staging
+    assert not source_staging.exists()
+    assert not target_staging.exists()
+
+def test_source_link_error_never_deletes_non_owned_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    backup_result,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "restored.sqlite3"
+    replacement = b"foreign link replacement"
+    replaced_path: Path | None = None
+    real_link = os.link
+
+    def replace_destination_then_raise(source, destination):
+        nonlocal replaced_path
+        if Path(destination).name == "verified-source.sqlite3":
+            Path(destination).write_bytes(replacement)
+            replaced_path = Path(destination)
+            raise OSError("injected source replacement")
+        real_link(source, destination)
+
+    monkeypatch.setattr(
+        restore_module.os,
+        "link",
+        replace_destination_then_raise,
+    )
+
+    with pytest.raises(
+        RestoreVerificationError,
+        match="temporary file cleanup failed",
+    ):
+        verify_and_restore_sqlite(
+            backup_result.backup_path,
+            backup_result.manifest_path,
+            target,
+            active_database_path=tmp_path / "active.sqlite3",
+            catalog=(),
+        )
+
+    assert replaced_path is not None
+    assert replaced_path.read_bytes() == replacement
+    assert not target.exists()
+
+
+
 def test_restore_documents_trusted_target_directory_boundary() -> None:
     module_documentation = restore_module.__doc__ or ""
     api_documentation = verify_and_restore_sqlite.__doc__ or ""
 
     assert "trusted local operations directory" in module_documentation
     assert "same-privilege malicious path replacement" in module_documentation
+    assert "backup_path.parent" in api_documentation
     assert "target_path.parent" in api_documentation

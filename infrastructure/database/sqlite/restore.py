@@ -1,10 +1,11 @@
-"""Verified SQLite restores for a trusted local operations directory.
+"""Verified SQLite restores between trusted local operations directories.
 
-`target_path.parent` must be controlled by trusted local operators. Hard-link
-no-overwrite publication protects cooperating processes. Python's standard
-library cannot atomically compare a directory entry's identity and unlink it,
-so same-privilege malicious path replacement is outside this module's
-guarantees.
+Each parent must be a trusted local operations directory controlled by local
+operators. Private staging and hard-link no-overwrite operations protect
+cooperating processes. Python's standard library cannot atomically compare a
+directory entry's identity and unlink it. It also cannot prevent
+same-privilege malicious path replacement or in-place inode modification, so
+those attacks are outside this module's guarantees.
 """
 
 import hashlib
@@ -61,8 +62,10 @@ def verify_and_restore_sqlite(
     catalog: Sequence[MigrationInfo],
     options: SqliteConnectionOptions = SqliteConnectionOptions(),
 ) -> RestoreResult:
-    """Verify and publish beneath a trusted `target_path.parent`.
+    """Verify and publish between trusted backup and target parents.
 
+    Both `backup_path.parent` and `target_path.parent` must be trusted local
+    operations directories. The source is identity-bound before SQLite opens.
     The target must be a new path distinct from the active database. This
     operation never switches application settings or replaces the active
     database.
@@ -92,33 +95,55 @@ def _verify_and_restore_sqlite(
     catalog: Sequence[MigrationInfo],
     options: SqliteConnectionOptions,
 ) -> RestoreResult:
+    raw_target_exists = os.path.lexists(target_path)
     resolved_target = target_path.resolve()
     resolved_active = active_database_path.resolve()
     if resolved_target == resolved_active:
         raise RestoreVerificationError("target must be a new path")
-    if os.path.lexists(resolved_target):
+    if raw_target_exists or os.path.lexists(resolved_target):
         raise RestoreVerificationError("target must not exist")
 
-    manifest = _verify_manifest_and_backup(backup_path, manifest_path)
-    staging_dir: Path | None = None
+    resolved_backup = backup_path.resolve()
+    manifest = _load_restore_manifest(manifest_path)
+    source_staging_dir: Path | None = None
+    source_staging_identity: tuple[int, int] | None = None
+    bound_backup: Path | None = None
+    bound_backup_identity: tuple[int, int] | None = None
+    target_staging_dir: Path | None = None
+    target_staging_identity: tuple[int, int] | None = None
     temporary_target: Path | None = None
-    staging_identity: tuple[int, int] | None = None
     temporary_identity: tuple[int, int] | None = None
     published = False
 
     try:
-        staging_dir, staging_identity = _create_staging_directory(
+        source_staging_dir, source_staging_identity = _create_staging_directory(
+            resolved_backup.parent,
+            resolved_backup.name,
+            purpose="source",
+        )
+        bound_backup, bound_backup_identity = _bind_backup_source(
+            resolved_backup,
+            source_staging_dir,
+        )
+        _verify_bound_backup(
+            bound_backup,
+            bound_backup_identity,
+            manifest,
+        )
+        target_staging_dir, target_staging_identity = _create_staging_directory(
             resolved_target.parent,
             resolved_target.name,
+            purpose="target",
         )
         temporary_target, temporary_identity = _create_temp_file(
-            staging_dir,
+            target_staging_dir,
             resolved_target.name,
         )
         _materialize_sqlite_backup(
-            backup_path,
+            bound_backup,
             temporary_target,
             manifest,
+            bound_backup_identity,
             options=options,
         )
         schema_version = _validate_restored_database(
@@ -169,11 +194,11 @@ def _verify_and_restore_sqlite(
             )
 
         staging_result = _remove_owned_directory(
-            staging_dir,
-            staging_identity,
+            target_staging_dir,
+            target_staging_identity,
         )
         if staging_result in _REMOVED_OR_ABSENT:
-            staging_dir = None
+            target_staging_dir = None
         else:
             if not _compensate_published_target(
                 resolved_target,
@@ -197,6 +222,40 @@ def _verify_and_restore_sqlite(
                 )
             published = False
             raise RestoreVerificationError("restore publication failed")
+
+        bound_result = _remove_owned_path(
+            bound_backup,
+            bound_backup_identity,
+        )
+        if bound_result in _REMOVED_OR_ABSENT:
+            bound_backup = None
+        else:
+            if not _compensate_published_target(
+                resolved_target,
+                temporary_identity,
+            ):
+                raise RestoreVerificationError(
+                    "restore publication cleanup failed"
+                )
+            published = False
+            raise RestoreVerificationError("restore temporary file cleanup failed")
+
+        source_staging_result = _remove_owned_directory(
+            source_staging_dir,
+            source_staging_identity,
+        )
+        if source_staging_result in _REMOVED_OR_ABSENT:
+            source_staging_dir = None
+        else:
+            if not _compensate_published_target(
+                resolved_target,
+                temporary_identity,
+            ):
+                raise RestoreVerificationError(
+                    "restore publication cleanup failed"
+                )
+            published = False
+            raise RestoreVerificationError("restore temporary file cleanup failed")
         return result
     except (
         RestoreVerificationError,
@@ -215,14 +274,44 @@ def _verify_and_restore_sqlite(
                 ) from None
         raise
     finally:
+        cleanup_failed = False
         if temporary_target is not None and temporary_identity is not None:
-            _remove_owned_path(temporary_target, temporary_identity)
-        if staging_dir is not None and staging_identity is not None:
-            _remove_owned_directory(staging_dir, staging_identity)
+            result = _remove_owned_path(temporary_target, temporary_identity)
+            if result is _RemovalResult.FAILED:
+                result = _remove_owned_path(temporary_target, temporary_identity)
+            cleanup_failed = cleanup_failed or result is _RemovalResult.FAILED
+        if target_staging_dir is not None and target_staging_identity is not None:
+            result = _remove_owned_directory(
+                target_staging_dir,
+                target_staging_identity,
+            )
+            if result is _RemovalResult.FAILED:
+                result = _remove_owned_directory(
+                    target_staging_dir,
+                    target_staging_identity,
+                )
+            cleanup_failed = cleanup_failed or result is _RemovalResult.FAILED
+        if bound_backup is not None and bound_backup_identity is not None:
+            result = _remove_owned_path(bound_backup, bound_backup_identity)
+            if result is _RemovalResult.FAILED:
+                result = _remove_owned_path(bound_backup, bound_backup_identity)
+            cleanup_failed = cleanup_failed or result is _RemovalResult.FAILED
+        if source_staging_dir is not None and source_staging_identity is not None:
+            result = _remove_owned_directory(
+                source_staging_dir,
+                source_staging_identity,
+            )
+            if result is _RemovalResult.FAILED:
+                result = _remove_owned_directory(
+                    source_staging_dir,
+                    source_staging_identity,
+                )
+            cleanup_failed = cleanup_failed or result is _RemovalResult.FAILED
+        if cleanup_failed:
+            raise RestoreVerificationError("restore temporary file cleanup failed") from None
 
 
-def _verify_manifest_and_backup(
-    backup_path: Path,
+def _load_restore_manifest(
     manifest_path: Path,
 ) -> BackupManifest:
     try:
@@ -230,7 +319,6 @@ def _verify_manifest_and_backup(
     except BackupError:
         raise RestoreVerificationError("backup manifest is invalid") from None
 
-    _verify_backup_bytes(backup_path, manifest)
     return manifest
 
 
@@ -249,16 +337,34 @@ def _verify_backup_bytes(
         raise RestoreVerificationError("backup verification failed") from None
 
 
+def _verify_bound_backup(
+    backup_path: Path,
+    identity: tuple[int, int],
+    manifest: BackupManifest,
+) -> None:
+    try:
+        if _path_identity(backup_path) != identity:
+            raise RestoreVerificationError("backup source identity changed")
+        _verify_backup_bytes(backup_path, manifest)
+        if _path_identity(backup_path) != identity:
+            raise RestoreVerificationError("backup source identity changed")
+    except RestoreVerificationError:
+        raise
+    except OSError:
+        raise RestoreVerificationError("backup verification failed") from None
+
+
 def _materialize_sqlite_backup(
     backup_path: Path,
     destination_path: Path,
     manifest: BackupManifest,
+    backup_identity: tuple[int, int],
     *,
     options: SqliteConnectionOptions,
 ) -> None:
     source = _open_backup_read_only(backup_path, options=options)
     try:
-        _verify_backup_bytes(backup_path, manifest)
+        _verify_bound_backup(backup_path, backup_identity, manifest)
         destination = _open_restore_destination(
             destination_path,
             timeout=options.busy_timeout_ms / 1_000,
@@ -268,6 +374,7 @@ def _materialize_sqlite_backup(
             source.backup(destination)
         finally:
             destination.close()
+        _verify_bound_backup(backup_path, backup_identity, manifest)
     finally:
         source.close()
 
@@ -331,10 +438,12 @@ def _validate_restored_database(
 def _create_staging_directory(
     parent: Path,
     final_name: str,
+    *,
+    purpose: str,
 ) -> tuple[Path, tuple[int, int]]:
     path = Path(
         tempfile.mkdtemp(
-            prefix=f".{final_name}.restore-staging.",
+            prefix=f".{final_name}.restore-staging.{purpose}.",
             dir=parent,
         )
     )
@@ -349,6 +458,38 @@ def _create_staging_directory(
         _remove_owned_directory(path, identity)
         raise
     return path, identity
+
+
+def _bind_backup_source(
+    backup_path: Path,
+    staging_dir: Path,
+) -> tuple[Path, tuple[int, int]]:
+    bound_path = staging_dir / "verified-source.sqlite3"
+    try:
+        source_identity = _path_identity(backup_path)
+    except OSError:
+        raise RestoreVerificationError("backup source binding failed") from None
+
+    try:
+        os.link(backup_path, bound_path)
+    except OSError:
+        cleanup_result = _remove_owned_path(bound_path, source_identity)
+        if cleanup_result is _RemovalResult.FAILED:
+            raise RestoreVerificationError(
+                "backup source binding cleanup failed"
+            ) from None
+        raise RestoreVerificationError("backup source binding failed") from None
+
+    try:
+        identity = _path_identity(bound_path)
+    except OSError:
+        cleanup_result = _remove_owned_path(bound_path, source_identity)
+        if cleanup_result is _RemovalResult.FAILED:
+            raise RestoreVerificationError(
+                "backup source binding cleanup failed"
+            ) from None
+        raise RestoreVerificationError("backup source binding failed") from None
+    return bound_path, identity
 
 
 def _create_temp_file(
