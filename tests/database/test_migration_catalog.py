@@ -139,6 +139,65 @@ def test_catalog_allows_transaction_control_words_in_literals_and_comments(tmp_p
     assert [item.version for item in load_migration_catalog(tmp_path)] == [1]
 
 
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "ATTACH DATABASE 'side.sqlite3' AS side;",
+        "DETACH DATABASE side;",
+        "CREATE TEMP TABLE transient_item(id INTEGER);",
+        "CREATE TEMPORARY VIEW transient_view AS SELECT 1;",
+        "CREATE TABLE temp.transient_item(id INTEGER);",
+        "CREATE TABLE auxiliary.item(id INTEGER);",
+        'CREATE TABLE "auxiliary"."item"(id INTEGER);',
+        "DROP VIEW auxiliary.item_view;",
+        "ALTER TABLE auxiliary.item ADD COLUMN value TEXT;",
+        "INSERT INTO auxiliary.item(id) VALUES (1);",
+        "UPDATE auxiliary.item SET id = 2;",
+        "DELETE FROM auxiliary.item;",
+        "WITH payload(id) AS (VALUES (1)) "
+        "INSERT INTO auxiliary.item(id) SELECT id FROM payload;",
+        "CREATE TRIGGER main.escape AFTER INSERT ON main.item BEGIN "
+        "INSERT INTO auxiliary.audit(item_id) VALUES (NEW.id); "
+        "END;",
+    ],
+)
+def test_catalog_rejects_sqlite_schema_boundary_escape(tmp_path, statement):
+    (tmp_path / "0001_schema_escape.sql").write_text(
+        statement,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MigrationCatalogError, match="schema boundary"):
+        load_migration_catalog(tmp_path)
+
+
+def test_catalog_allows_schema_boundary_words_in_literals_and_comments(tmp_path):
+    (tmp_path / "0001_safe_schema_text.sql").write_text(
+        "CREATE TABLE main.note(text TEXT DEFAULT 'ATTACH DATABASE side;');\n"
+        "-- DETACH DATABASE side;\n"
+        "/* CREATE TEMP TABLE escaped(id INTEGER); */\n"
+        "INSERT INTO main.note(text) VALUES ('UPDATE auxiliary.note SET x = 1;');\n",
+        encoding="utf-8",
+    )
+
+    assert [item.version for item in load_migration_catalog(tmp_path)] == [1]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "CREATE TABLE main.item(id INTEGER);",
+        "INSERT INTO main.item(id) VALUES (1);",
+        "UPDATE main.item SET id = 2;",
+        "DELETE FROM main.item;",
+    ],
+)
+def test_catalog_allows_explicit_main_schema_operations(tmp_path, statement):
+    (tmp_path / "0001_main_schema.sql").write_text(statement, encoding="utf-8")
+
+    assert [item.version for item in load_migration_catalog(tmp_path)] == [1]
+
+
 @pytest.mark.parametrize("sql", ["SELECT 'unterminated", "/* unterminated"])
 def test_catalog_rejects_lexically_incomplete_sql(tmp_path, sql):
     (tmp_path / "0001_incomplete.sql").write_text(sql, encoding="utf-8")

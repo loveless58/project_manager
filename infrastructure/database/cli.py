@@ -28,7 +28,12 @@ from .contracts import (
     UnsupportedDatabaseProviderError,
 )
 from .migration_catalog import load_migration_catalog
-from .sqlite.backup import create_sqlite_backup, verify_backup_artifacts
+from .sqlite.backup import (
+    authorize_migration_backup,
+    create_sqlite_backup,
+    verify_backup_artifacts,
+    verify_migration_backup,
+)
 from .sqlite.migration_runner import apply_pending_migrations, initialize_database
 from .sqlite.restore import verify_and_restore_sqlite
 from .sqlite.schema import inspect_schema
@@ -275,20 +280,22 @@ def _migrate(database_path: Path, backup_dir: Path, catalog):
 
     backup_path = _new_migration_backup_path(backup_dir)
     backup_result = create_sqlite_backup(database_path, backup_path, catalog)
-    verified_manifest = verify_backup_artifacts(
-        backup_result.backup_path,
-        backup_result.manifest_path,
+    verified_backup = verify_migration_backup(backup_result)
+    authorization = authorize_migration_backup(
+        database_path,
+        verified_backup,
+        catalog,
     )
     migration_result = apply_pending_migrations(
         database_path,
         catalog,
-        backup_manifest=verified_manifest,
+        backup_authorization=authorization,
     )
     details = {
         "previous_version": migration_result.previous_version,
         "current_version": migration_result.current_version,
         "applied_count": len(migration_result.applied_versions),
-        "backup_id": _backup_identifier(verified_manifest.sha256),
+        "backup_id": _backup_identifier(backup_result.manifest.sha256),
     }
     return _payload("migrate", "current", None, details), EXIT_OK
 

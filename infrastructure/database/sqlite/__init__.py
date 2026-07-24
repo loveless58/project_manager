@@ -1,8 +1,10 @@
 from .backup import (
     BackupResult,
+    authorize_migration_backup,
     create_sqlite_backup,
     load_backup_manifest,
     verify_backup_artifacts,
+    verify_migration_backup,
 )
 from .connection import SqliteConnectionOptions, open_sqlite_connection
 from .migration_runner import (
@@ -27,6 +29,7 @@ __all__ = [
     "SqliteUnitOfWork",
     "UowMode",
     "apply_pending_migrations",
+    "authorize_migration_backup",
     "check_database_integrity",
     "create_sqlite_backup",
     "initialize_database",
@@ -37,4 +40,5 @@ __all__ = [
     "read_applied_migrations",
     "verify_and_restore_sqlite",
     "verify_backup_artifacts",
+    "verify_migration_backup",
 ]

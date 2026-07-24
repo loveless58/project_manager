@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 import infrastructure.database.sqlite.unit_of_work as unit_of_work_module
-from infrastructure.database.contracts import BackupManifest, UnitOfWorkStateError
+from infrastructure.database.contracts import UnitOfWorkStateError
 from infrastructure.database.migration_catalog import load_migration_catalog
 from infrastructure.database.sqlite.migration_runner import (
     apply_pending_migrations,
@@ -12,6 +12,7 @@ from infrastructure.database.sqlite.migration_runner import (
 )
 from infrastructure.database.sqlite.unit_of_work import SqliteUnitOfWork
 from tests.database.fixture_repository import FixtureEntity, FixtureRepository
+from tests.database.migration_authorization import create_migration_authorization
 
 
 FIXTURE_MIGRATIONS = Path(__file__).parent / "fixtures" / "migrations"
@@ -20,19 +21,15 @@ FIXTURE_MIGRATIONS = Path(__file__).parent / "fixtures" / "migrations"
 @pytest.fixture
 def database(tmp_path: Path) -> Path:
     database_path = tmp_path / "state.sqlite3"
+    catalog = load_migration_catalog(FIXTURE_MIGRATIONS)
     initialize_database(database_path)
     apply_pending_migrations(
         database_path,
-        load_migration_catalog(FIXTURE_MIGRATIONS),
-        backup_manifest=BackupManifest(
-            format_version=1,
-            schema_version=0,
-            catalog_target_version=2,
-            sha256="0" * 64,
-            size_bytes=1,
-            created_at_utc="2026-07-24T00:00:00Z",
-            sqlite_version=sqlite3.sqlite_version,
-            integrity_check="ok",
+        catalog,
+        backup_authorization=create_migration_authorization(
+            database_path,
+            catalog,
+            tmp_path / "uow-review-migration-backup.sqlite3",
         ),
     )
     return database_path

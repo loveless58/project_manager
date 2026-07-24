@@ -34,6 +34,7 @@ SQLITE_PUBLIC_NAMES = {
     "SqliteUnitOfWork",
     "UowMode",
     "apply_pending_migrations",
+    "authorize_migration_backup",
     "check_database_integrity",
     "create_sqlite_backup",
     "initialize_database",
@@ -44,6 +45,7 @@ SQLITE_PUBLIC_NAMES = {
     "read_applied_migrations",
     "verify_and_restore_sqlite",
     "verify_backup_artifacts",
+    "verify_migration_backup",
 }
 
 
@@ -61,6 +63,9 @@ def test_sqlite_package_does_not_export_fault_or_publication_internals():
     forbidden = {
         "before_record_insert",
         "_MigrationTransactionAuthorizer",
+        "_BackupCreationProvenance",
+        "_MigrationBackupAuthorization",
+        "_VerifiedMigrationBackup",
         "_PublicationFailure",
         "_RemovalResult",
         "_remove_owned_path",

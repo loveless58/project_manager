@@ -4,6 +4,98 @@ from pathlib import Path
 import pytest
 
 
+def test_explicit_missing_config_is_rejected_without_path_leak(tmp_path):
+    from platform_core.settings import SettingsError, load_app_settings
+
+    missing = tmp_path / "private" / "missing-settings.json"
+
+    with pytest.raises(
+        SettingsError,
+        match="configuration file is not a readable regular file",
+    ) as raised:
+        load_app_settings(config_file=missing, environ={})
+
+    assert str(missing) not in str(raised.value)
+    assert raised.value.__cause__ is None
+
+
+def test_explicit_config_directory_is_rejected_as_non_regular(tmp_path):
+    from platform_core.settings import SettingsError, load_app_settings
+
+    config_directory = tmp_path / "private-config"
+    config_directory.mkdir()
+
+    with pytest.raises(
+        SettingsError,
+        match="configuration file is not a readable regular file",
+    ) as raised:
+        load_app_settings(config_file=config_directory, environ={})
+
+    assert str(config_directory) not in str(raised.value)
+    assert raised.value.__cause__ is None
+
+
+def test_explicit_unreadable_config_is_rejected_without_os_error(
+    monkeypatch, tmp_path
+):
+    import platform_core.settings as settings_module
+    from platform_core.settings import SettingsError, load_app_settings
+
+    config = tmp_path / "private-settings.json"
+    config.write_text("{}", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if path == config:
+            raise PermissionError(f"permission denied: {config}")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(settings_module.Path, "read_text", read_text)
+
+    with pytest.raises(
+        SettingsError,
+        match="configuration file is not a readable regular file",
+    ) as raised:
+        load_app_settings(config_file=config, environ={})
+
+    assert str(config) not in str(raised.value)
+    assert raised.value.__cause__ is None
+
+
+def test_missing_autodiscovery_files_still_use_defaults(monkeypatch, tmp_path):
+    import platform_core.settings as settings_module
+
+    monkeypatch.setattr(
+        settings_module,
+        "DEFAULT_CONFIG_FILE",
+        tmp_path / "missing-default.json",
+    )
+    monkeypatch.setattr(
+        settings_module,
+        "LEGACY_CONFIG_FILE",
+        tmp_path / "missing-legacy.json",
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+    settings = settings_module.load_app_settings(config_file=None, environ={})
+
+    assert settings.deployment_mode == "local"
+    assert settings.runtime_workspace == (tmp_path / "home" / ".project_manager")
+
+
+def test_empty_config_argument_disables_autodiscovery(monkeypatch, tmp_path):
+    import platform_core.settings as settings_module
+
+    invalid_default = tmp_path / "project-manager.local.json"
+    invalid_default.write_text("not-json", encoding="utf-8")
+    monkeypatch.setattr(settings_module, "DEFAULT_CONFIG_FILE", invalid_default)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+
+    settings = settings_module.load_app_settings(config_file="", environ={})
+
+    assert settings.deployment_mode == "local"
+
+
 def test_portable_local_defaults_do_not_contain_windows_drive(monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     from platform_core.settings import load_app_settings
@@ -76,7 +168,7 @@ def test_central_postgresql_does_not_apply_sqlite_locality_rules(tmp_path):
             "PROJECT_MANAGER_DEPLOYMENT_MODE": "central",
             "PROJECT_MANAGER_DATABASE_PROVIDER": "postgresql",
             "PROJECT_MANAGER_BUSINESS_ROOT": str(business_root),
-            "PROJECT_MANAGER_WORKSPACE_DIR": str(business_root / "runtime"),
+            "PROJECT_MANAGER_WORKSPACE_DIR": str(tmp_path / "runtime"),
             "PROJECT_MANAGER_SQLITE_PATH": str(business_root / "ignored.sqlite3"),
         },
     )

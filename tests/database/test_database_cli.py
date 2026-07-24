@@ -3,7 +3,6 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -23,8 +22,10 @@ from infrastructure.database.contracts import (
 )
 from infrastructure.database.migration_catalog import load_migration_catalog
 from infrastructure.database.sqlite.backup import (
+    authorize_migration_backup,
     create_sqlite_backup,
     verify_backup_artifacts,
+    verify_migration_backup,
 )
 from infrastructure.database.sqlite.migration_runner import (
     apply_pending_migrations,
@@ -334,7 +335,7 @@ def test_migrate_without_pending_versions_creates_no_backup(monkeypatch, tmp_pat
     }
 
 
-def test_migrate_creates_and_verifies_backup_before_runner_with_manifest_provenance(
+def test_migrate_create_verify_authorize_apply_provenance(
     monkeypatch, tmp_path
 ):
     from infrastructure.database import cli
@@ -346,7 +347,8 @@ def test_migrate_creates_and_verifies_backup_before_runner_with_manifest_provena
     events = []
     captured = {}
     real_create = create_sqlite_backup
-    real_verify = verify_backup_artifacts
+    real_verify = verify_migration_backup
+    real_authorize = authorize_migration_backup
     real_apply = apply_pending_migrations
 
     monkeypatch.setattr(cli, "_load_production_catalog", lambda: catalog)
@@ -354,23 +356,29 @@ def test_migrate_creates_and_verifies_backup_before_runner_with_manifest_provena
     def create(*args, **kwargs):
         events.append("create")
         result = real_create(*args, **kwargs)
-        captured["created"] = result.manifest
+        captured["created"] = result
         return result
 
     def verify(*args, **kwargs):
         events.append("verify")
-        manifest = real_verify(*args, **kwargs)
-        verified = replace(manifest)
+        verified = real_verify(*args, **kwargs)
         captured["verified"] = verified
         return verified
 
+    def authorize(*args, **kwargs):
+        events.append("authorize")
+        authorization = real_authorize(*args, **kwargs)
+        captured["authorization"] = authorization
+        return authorization
+
     def apply(*args, **kwargs):
         events.append("migrate")
-        captured["authorized"] = kwargs["backup_manifest"]
+        captured["runner_authorization"] = kwargs["backup_authorization"]
         return real_apply(*args, **kwargs)
 
     monkeypatch.setattr(cli, "create_sqlite_backup", create)
-    monkeypatch.setattr(cli, "verify_backup_artifacts", verify)
+    monkeypatch.setattr(cli, "verify_migration_backup", verify)
+    monkeypatch.setattr(cli, "authorize_migration_backup", authorize)
     monkeypatch.setattr(cli, "apply_pending_migrations", apply)
 
     code, payload, stdout, stderr = _json_invoke(
@@ -382,9 +390,10 @@ def test_migrate_creates_and_verifies_backup_before_runner_with_manifest_provena
     )
 
     assert code == 0
-    assert events == ["create", "verify", "migrate"]
-    assert captured["authorized"] is captured["verified"]
-    assert captured["authorized"] is not captured["created"]
+    assert events == ["create", "verify", "authorize", "migrate"]
+    assert captured["runner_authorization"] is captured["authorization"]
+    assert captured["authorization"] is not captured["verified"]
+    assert captured["verified"] is not captured["created"]
     assert payload["details"]["applied_count"] == 2
     assert payload["details"]["backup_id"].startswith("sha256:")
     assert len(payload["details"]["backup_id"]) == len("sha256:") + 12
@@ -402,7 +411,7 @@ def test_migrate_does_not_run_when_backup_verification_fails(monkeypatch, tmp_pa
     monkeypatch.setattr(cli, "_load_production_catalog", lambda: catalog)
     monkeypatch.setattr(
         cli,
-        "verify_backup_artifacts",
+        "verify_migration_backup",
         lambda *args, **kwargs: (_ for _ in ()).throw(BackupError("safe failure")),
     )
     runner_calls = []
@@ -734,6 +743,40 @@ def test_configuration_decode_failures_are_incompatible_and_redacted(
     assert "SECRET" not in rendered
     assert "PRIVATE-CONFIG" not in rendered
     assert "Expecting" not in rendered
+
+
+def test_explicit_missing_config_stops_migrate_before_creating_artifacts(tmp_path):
+    from infrastructure.database.cli import main
+
+    operation_root = tmp_path / "must-not-be-created"
+    config = operation_root / "private-missing-settings.json"
+    database = operation_root / "state" / "state.sqlite3"
+    backup_dir = operation_root / "backups"
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    code = main(
+        [
+            "--config",
+            str(config),
+            "--database",
+            str(database),
+            "--json",
+            "migrate",
+            "--backup-dir",
+            str(backup_dir),
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    payload = json.loads(stdout.getvalue())
+    assert code == 3
+    assert payload["error_code"] == "DB.CONFIGURATION"
+    assert not operation_root.exists()
+    assert str(config) not in stdout.getvalue() + stderr.getvalue()
+    assert str(database) not in stdout.getvalue() + stderr.getvalue()
+    assert str(backup_dir) not in stdout.getvalue() + stderr.getvalue()
 
 
 def test_configuration_directory_read_failure_is_incompatible_and_redacted(tmp_path):

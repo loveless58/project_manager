@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
 
+from .path_locality import NodeLocalPathError, ensure_node_local_path
+
 
 PathLike = Union[str, os.PathLike]
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -24,23 +26,42 @@ def _path(value: Optional[PathLike]) -> Optional[Path]:
     return Path(value).expanduser().resolve()
 
 
-def _is_obvious_network_path(value: PathLike) -> bool:
-    raw = str(value).strip()
-    return bool(re.match(r"^(?:\\\\|//|smb://|nfs://|afp://)", raw, re.IGNORECASE))
-
-
 def _read_config(config_file: Optional[PathLike]) -> Dict[str, Any]:
     if config_file == "":
         return {}
+
     if config_file is not None:
         path = Path(config_file).expanduser()
-    elif DEFAULT_CONFIG_FILE.exists():
-        path = DEFAULT_CONFIG_FILE
     else:
-        path = LEGACY_CONFIG_FILE
-    if not path.exists():
-        return {}
-    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        try:
+            if DEFAULT_CONFIG_FILE.is_file():
+                path = DEFAULT_CONFIG_FILE
+            elif LEGACY_CONFIG_FILE.is_file():
+                path = LEGACY_CONFIG_FILE
+            else:
+                return {}
+        except OSError:
+            raise SettingsError(
+                "configuration file is not a readable regular file"
+            ) from None
+
+    try:
+        if not path.is_file():
+            raise SettingsError(
+                "configuration file is not a readable regular file"
+            )
+        serialized = path.read_text(encoding="utf-8-sig")
+    except SettingsError:
+        raise
+    except (OSError, UnicodeError):
+        raise SettingsError(
+            "configuration file is not a readable regular file"
+        ) from None
+
+    try:
+        payload = json.loads(serialized)
+    except json.JSONDecodeError:
+        raise SettingsError("configuration file contains invalid JSON") from None
     if not isinstance(payload, dict):
         raise SettingsError("configuration root must be an object")
     return payload
@@ -137,15 +158,15 @@ def load_app_settings(
         )
     )
     default_runtime = Path.home() / ".project_manager"
-    resolved_runtime = _path(
-        _pick(
-            runtime_workspace,
-            env,
-            "PROJECT_MANAGER_WORKSPACE_DIR",
-            local.get("runtime_workspace"),
-            default_runtime,
-        )
+    raw_runtime_workspace = _pick(
+        runtime_workspace,
+        env,
+        "PROJECT_MANAGER_WORKSPACE_DIR",
+        local.get("runtime_workspace"),
+        default_runtime,
     )
+    resolved_runtime = _path(raw_runtime_workspace)
+    assert raw_runtime_workspace is not None
     assert resolved_runtime is not None
 
     default_database = "sqlite" if mode == "local" else "postgresql"
@@ -217,33 +238,50 @@ def load_app_settings(
             "filesystem",
         )
     ).lower()
-    projection_root = _path(
-        _pick(
-            None,
-            env,
-            "PROJECT_MANAGER_PROJECTION_ROOT",
-            local_providers.get("projection_root"),
-            resolved_runtime / "projections",
-        )
+    raw_projection_root = _pick(
+        None,
+        env,
+        "PROJECT_MANAGER_PROJECTION_ROOT",
+        local_providers.get("projection_root"),
+        resolved_runtime / "projections",
     )
+    projection_root = _path(raw_projection_root)
+    assert raw_projection_root is not None
     assert projection_root is not None
 
     if mode == "local" and database_provider != "sqlite":
         raise SettingsError("local deployment requires sqlite")
     if mode == "central" and database_provider != "postgresql":
         raise SettingsError("central deployment requires postgresql")
+
+    try:
+        resolved_runtime = ensure_node_local_path(
+            field_name="runtime_workspace",
+            raw_value=raw_runtime_workspace,
+            resolved_path=resolved_runtime,
+            business_root=resolved_business_root,
+        )
+        projection_root = ensure_node_local_path(
+            field_name="projection_root",
+            raw_value=raw_projection_root,
+            resolved_path=projection_root,
+            business_root=resolved_business_root,
+        )
+    except NodeLocalPathError as exc:
+        raise SettingsError(str(exc)) from exc
+
     if database_provider == "sqlite":
-        if raw_sqlite_path is not None and _is_obvious_network_path(raw_sqlite_path):
-            raise SettingsError("sqlite_path must be node-local")
-        if (
-            sqlite_path is not None
-            and resolved_business_root is not None
-            and (
-                sqlite_path == resolved_business_root
-                or resolved_business_root in sqlite_path.parents
+        assert raw_sqlite_path is not None
+        assert sqlite_path is not None
+        try:
+            sqlite_path = ensure_node_local_path(
+                field_name="sqlite_path",
+                raw_value=raw_sqlite_path,
+                resolved_path=sqlite_path,
+                business_root=resolved_business_root,
             )
-        ):
-            raise SettingsError("sqlite_path must not be inside business_root")
+        except NodeLocalPathError as exc:
+            raise SettingsError(str(exc)) from exc
     if structure_index == "pageindex" and pageindex_dir is None:
         raise SettingsError("pageindex_dir is required when structure_index is pageindex")
     if document_store == "local" and resolved_business_root is None:

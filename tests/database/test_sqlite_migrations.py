@@ -2,7 +2,6 @@ import hashlib
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,7 +9,6 @@ import pytest
 import infrastructure.database.sqlite.migration_runner as migration_runner
 from infrastructure.database.contracts import (
     BackupError,
-    BackupManifest,
     DatabaseBusyError,
     DatabaseIntegrityError,
     MigrationChecksumError,
@@ -29,6 +27,7 @@ from infrastructure.database.sqlite.migration_runner import (
     apply_pending_migrations,
     initialize_database,
 )
+from tests.database.migration_authorization import create_migration_authorization
 
 
 FIXTURE_MIGRATIONS = Path(__file__).parent / "fixtures" / "migrations"
@@ -39,18 +38,11 @@ def fixture_catalog():
     return load_migration_catalog(FIXTURE_MIGRATIONS)
 
 
-def _authorization(
-    *, schema_version: int = 0, catalog_target_version: int = 2
-) -> BackupManifest:
-    return BackupManifest(
-        format_version=1,
-        schema_version=schema_version,
-        catalog_target_version=catalog_target_version,
-        sha256="0" * 64,
-        size_bytes=1,
-        created_at_utc="2026-07-24T00:00:00Z",
-        sqlite_version=sqlite3.sqlite_version,
-        integrity_check="ok",
+def _authorization(database: Path, catalog, tmp_path: Path):
+    return create_migration_authorization(
+        database,
+        catalog,
+        tmp_path / "migration-backup.sqlite3",
     )
 
 
@@ -154,7 +146,7 @@ def test_applies_fixture_migrations_in_order(tmp_path, fixture_catalog):
     result = apply_pending_migrations(
         database,
         fixture_catalog,
-        backup_manifest=_authorization(),
+        backup_authorization=_authorization(database, fixture_catalog, tmp_path),
     )
 
     assert result == MigrationRunResult(
@@ -185,13 +177,13 @@ def test_current_database_is_repeated_no_op_without_backup(tmp_path, fixture_cat
     apply_pending_migrations(
         database,
         fixture_catalog,
-        backup_manifest=_authorization(),
+        backup_authorization=_authorization(database, fixture_catalog, tmp_path),
     )
 
     assert apply_pending_migrations(
         database,
         fixture_catalog,
-        backup_manifest=None,
+        backup_authorization=None,
     ) == MigrationRunResult(
         previous_version=2,
         current_version=2,
@@ -205,34 +197,7 @@ def test_pending_migration_requires_backup_authorization(tmp_path, fixture_catal
     initialize_database(database)
 
     with pytest.raises(BackupError, match="backup authorization"):
-        apply_pending_migrations(database, fixture_catalog, backup_manifest=None)
-
-    assert _applied_versions(database) == []
-
-
-@pytest.mark.parametrize(
-    ("manifest", "message"),
-    [
-        (_authorization(schema_version=1), "schema version"),
-        (_authorization(catalog_target_version=1), "target version"),
-        (replace(_authorization(), integrity_check="failed"), "integrity"),
-        (replace(_authorization(), sha256="A" * 64), "SHA-256"),
-        (replace(_authorization(), sha256="0" * 63), "SHA-256"),
-        (replace(_authorization(), sha256=("0" * 63) + "g"), "SHA-256"),
-    ],
-)
-def test_rejects_invalid_backup_authorization(
-    tmp_path, fixture_catalog, manifest, message
-):
-    database = tmp_path / "state.sqlite3"
-    initialize_database(database)
-
-    with pytest.raises(BackupError, match=message):
-        apply_pending_migrations(
-            database,
-            fixture_catalog,
-            backup_manifest=manifest,
-        )
+        apply_pending_migrations(database, fixture_catalog, backup_authorization=None)
 
     assert _applied_versions(database) == []
 
@@ -253,11 +218,122 @@ def test_transaction_end_cannot_escape_atomic_migration(tmp_path, transaction_en
         apply_pending_migrations(
             database,
             catalog,
-            backup_manifest=_authorization(catalog_target_version=1),
+            backup_authorization=_authorization(database, catalog, tmp_path),
         )
 
     assert raised.value.__cause__ is None
     assert "escaped_transaction" not in _table_names(database)
+    assert _applied_versions(database) == []
+
+
+def test_runtime_authorizer_rejects_attach_before_side_file_creation(tmp_path):
+    side_database = tmp_path / "attached.sqlite3"
+    catalog = _unchecked_catalog(
+        tmp_path,
+        f"ATTACH DATABASE '{side_database.as_posix()}' AS auxiliary;\n"
+        "CREATE TABLE auxiliary.escaped_item(id INTEGER PRIMARY KEY);\n",
+    )
+    database = tmp_path / "state.sqlite3"
+    initialize_database(database)
+
+    with pytest.raises(MigrationExecutionError, match="migration 1 failed") as raised:
+        apply_pending_migrations(
+            database,
+            catalog,
+            backup_authorization=_authorization(database, catalog, tmp_path),
+        )
+
+    assert raised.value.__cause__ is None
+    assert not side_database.exists()
+    assert "escaped_item" not in _table_names(database)
+    assert _applied_versions(database) == []
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "CREATE TEMP TABLE escaped_temp(id INTEGER PRIMARY KEY);",
+        "CREATE TABLE temp.escaped_temp(id INTEGER PRIMARY KEY);",
+    ],
+)
+def test_runtime_authorizer_rejects_temp_schema_before_recording(
+    tmp_path, statement
+):
+    catalog = _unchecked_catalog(tmp_path, statement)
+    database = tmp_path / "state.sqlite3"
+    initialize_database(database)
+
+    with pytest.raises(MigrationExecutionError, match="migration 1 failed"):
+        apply_pending_migrations(
+            database,
+            catalog,
+            backup_authorization=_authorization(database, catalog, tmp_path),
+        )
+
+    assert "escaped_temp" not in _table_names(database)
+    assert _applied_versions(database) == []
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "DETACH DATABASE auxiliary;",
+        "CREATE TABLE auxiliary.escaped_item(id INTEGER PRIMARY KEY);",
+        "INSERT INTO auxiliary.seeded_item(id, value) VALUES (2, 'changed');",
+        "UPDATE auxiliary.seeded_item SET value = 'changed' WHERE id = 1;",
+        "DELETE FROM auxiliary.seeded_item WHERE id = 1;",
+    ],
+)
+def test_runtime_authorizer_rejects_pre_attached_schema_actions(
+    monkeypatch, tmp_path, statement
+):
+    side_database = tmp_path / "pre-attached.sqlite3"
+    with sqlite3.connect(side_database) as side_connection:
+        side_connection.execute(
+            "CREATE TABLE seeded_item(id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        side_connection.execute(
+            "INSERT INTO seeded_item(id, value) VALUES (1, 'original')"
+        )
+
+    catalog = _unchecked_catalog(tmp_path, statement)
+    database = tmp_path / "state.sqlite3"
+    initialize_database(database)
+    authorization = _authorization(database, catalog, tmp_path)
+    real_open = migration_runner.open_sqlite_connection
+    opened_for_migration = 0
+
+    def open_with_pre_attached_schema(database_path, **kwargs):
+        nonlocal opened_for_migration
+        connection = real_open(database_path, **kwargs)
+        if kwargs.get("create") is False:
+            opened_for_migration += 1
+            if opened_for_migration == 2:
+                connection.execute(
+                    "ATTACH DATABASE ? AS auxiliary",
+                    (str(side_database),),
+                )
+        return connection
+
+    monkeypatch.setattr(
+        migration_runner,
+        "open_sqlite_connection",
+        open_with_pre_attached_schema,
+    )
+
+    with pytest.raises(MigrationExecutionError, match="migration 1 failed"):
+        apply_pending_migrations(
+            database,
+            catalog,
+            backup_authorization=authorization,
+        )
+
+    assert "escaped_item" not in _table_names(side_database)
+    with sqlite3.connect(side_database) as side_connection:
+        rows = side_connection.execute(
+            "SELECT id, value FROM seeded_item ORDER BY id"
+        ).fetchall()
+    assert rows == [(1, "original")]
     assert _applied_versions(database) == []
 
 
@@ -274,7 +350,7 @@ def test_sql_failure_rolls_back_current_schema_and_record(tmp_path):
         apply_pending_migrations(
             database,
             catalog,
-            backup_manifest=_authorization(catalog_target_version=1),
+            backup_authorization=_authorization(database, catalog, tmp_path),
         )
 
     assert raised.value.__cause__ is None
@@ -286,7 +362,7 @@ def test_sql_failure_rolls_back_current_schema_and_record(tmp_path):
 def test_metadata_failure_rolls_back_schema_and_record(tmp_path, fixture_catalog):
     database = tmp_path / "state.sqlite3"
     initialize_database(database)
-    authorization = _authorization()
+    authorization = _authorization(database, fixture_catalog, tmp_path)
 
     secret = f"database={database.resolve()} token=do-not-leak"
 
@@ -297,7 +373,7 @@ def test_metadata_failure_rolls_back_schema_and_record(tmp_path, fixture_catalog
         apply_pending_migrations(
             database,
             fixture_catalog,
-            backup_manifest=authorization,
+            backup_authorization=authorization,
             before_record_insert=fail_before_record,
         )
 
@@ -321,7 +397,7 @@ def test_later_sql_failure_preserves_earlier_committed_migration(tmp_path):
         apply_pending_migrations(
             database,
             catalog,
-            backup_manifest=_authorization(),
+            backup_authorization=_authorization(database, catalog, tmp_path),
         )
 
     assert "retained_item" in _table_names(database)
@@ -343,7 +419,7 @@ def test_trigger_body_executes_without_splitting_migration_sql(tmp_path):
     apply_pending_migrations(
         database,
         catalog,
-        backup_manifest=_authorization(catalog_target_version=1),
+        backup_authorization=_authorization(database, catalog, tmp_path),
     )
 
     with sqlite3.connect(database) as connection:
@@ -368,7 +444,7 @@ def test_missing_migration_path_does_not_leak_os_error_cause(tmp_path):
         apply_pending_migrations(
             database,
             catalog,
-            backup_manifest=_authorization(catalog_target_version=1),
+            backup_authorization=_authorization(database, catalog, tmp_path),
         )
 
     assert raised.value.__cause__ is None
@@ -394,7 +470,7 @@ def test_invalid_utf8_does_not_leak_decode_error_cause(tmp_path):
         apply_pending_migrations(
             database,
             catalog,
-            backup_manifest=_authorization(catalog_target_version=1),
+            backup_authorization=_authorization(database, catalog, tmp_path),
         )
 
     assert raised.value.__cause__ is None
@@ -414,7 +490,7 @@ def test_checksum_tampering_is_rejected_before_no_op(tmp_path):
     apply_pending_migrations(
         database,
         original_catalog,
-        backup_manifest=_authorization(catalog_target_version=1),
+        backup_authorization=_authorization(database, original_catalog, tmp_path),
     )
     migration.write_text(
         "CREATE TABLE checksum_item(id INTEGER PRIMARY KEY, value TEXT);\n",
@@ -425,7 +501,7 @@ def test_checksum_tampering_is_rejected_before_no_op(tmp_path):
         apply_pending_migrations(
             database,
             original_catalog,
-            backup_manifest=None,
+            backup_authorization=None,
         )
 
     assert _applied_versions(database) == [1]
@@ -451,7 +527,7 @@ def test_locked_recheck_rejects_corrupt_metadata_columns_before_commit(
         apply_pending_migrations(
             database,
             catalog,
-            backup_manifest=_authorization(),
+            backup_authorization=_authorization(database, catalog, tmp_path),
         )
 
     assert "retained_before_corruption" in _table_names(database)
@@ -478,7 +554,7 @@ def test_sql_failure_recheck_rejects_negative_execution_time(monkeypatch, tmp_pa
         apply_pending_migrations(
             database,
             catalog,
-            backup_manifest=_authorization(),
+            backup_authorization=_authorization(database, catalog, tmp_path),
         )
 
     assert "retained_before_invalid_value" in _table_names(database)
@@ -493,7 +569,7 @@ def test_competing_runner_rechecks_state_after_write_lock(monkeypatch, tmp_path)
     )
     database = tmp_path / "state.sqlite3"
     initialize_database(database)
-    authorization = _authorization(catalog_target_version=1)
+    authorization = _authorization(database, catalog, tmp_path)
     first_has_lock = threading.Event()
     second_read_pending = threading.Event()
     second_waiting_for_write = threading.Event()
@@ -532,7 +608,7 @@ def test_competing_runner_rechecks_state_after_write_lock(monkeypatch, tmp_path)
         return apply_pending_migrations(
             database,
             catalog,
-            backup_manifest=authorization,
+            backup_authorization=authorization,
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -540,7 +616,7 @@ def test_competing_runner_rechecks_state_after_write_lock(monkeypatch, tmp_path)
             apply_pending_migrations,
             database,
             catalog,
-            backup_manifest=authorization,
+            backup_authorization=authorization,
             before_record_insert=hold_first_lock,
         )
         assert first_has_lock.wait(timeout=5)
@@ -573,7 +649,7 @@ def test_busy_timeout_maps_competing_writer_to_database_busy(tmp_path):
             apply_pending_migrations(
                 database,
                 catalog,
-                backup_manifest=_authorization(catalog_target_version=1),
+                backup_authorization=_authorization(database, catalog, tmp_path),
                 options=SqliteConnectionOptions(busy_timeout_ms=1),
             )
     finally:

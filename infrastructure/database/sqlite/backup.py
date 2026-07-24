@@ -14,7 +14,7 @@ import re
 import sqlite3
 import tempfile
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -33,6 +33,10 @@ from .schema import inspect_schema
 _HASH_CHUNK_SIZE = 1024 * 1024
 _LOWERCASE_SHA256 = re.compile(r"[0-9a-f]{64}")
 _MANIFEST_KEYS = frozenset(BackupManifest.__dataclass_fields__)
+_AUTHORIZATION_SEAL = object()
+
+_FileIdentity = tuple[int, int]
+_CatalogFingerprint = tuple[tuple[int, str, str], ...]
 
 
 class _RemovalResult(Enum):
@@ -55,10 +59,56 @@ _OWNED_FINAL_ABSENT = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
+class _BackupCreationProvenance:
+    seal: object = field(repr=False, compare=False)
+    source_path: Path
+    source_identity: _FileIdentity
+    backup_path: Path
+    backup_identity: _FileIdentity
+    manifest_path: Path
+    manifest_identity: _FileIdentity
+    catalog_fingerprint: _CatalogFingerprint
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedMigrationBackup:
+    seal: object = field(repr=False, compare=False)
+    provenance: _BackupCreationProvenance = field(repr=False, compare=False)
+    manifest: BackupManifest
+    backup_sha256: str
+    backup_size_bytes: int
+    manifest_sha256: str
+    manifest_size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class _MigrationBackupAuthorization:
+    seal: object = field(repr=False, compare=False)
+    source_path: Path
+    source_identity: _FileIdentity
+    backup_path: Path
+    backup_identity: _FileIdentity
+    backup_sha256: str
+    backup_size_bytes: int
+    manifest_path: Path
+    manifest_identity: _FileIdentity
+    manifest_sha256: str
+    manifest_size_bytes: int
+    catalog_fingerprint: _CatalogFingerprint
+    starting_schema_version: int
+    catalog_target_version: int
+
+
+@dataclass(frozen=True, slots=True)
 class BackupResult:
     backup_path: Path
     manifest_path: Path
     manifest: BackupManifest
+    _provenance: _BackupCreationProvenance | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
 
 def create_sqlite_backup(
@@ -118,6 +168,177 @@ def verify_backup_artifacts(
     return manifest
 
 
+def verify_migration_backup(
+    backup_result: BackupResult,
+) -> _VerifiedMigrationBackup:
+    """Reload and verify artifacts from a backup created in this process.
+
+    A public manifest is evidence about backup bytes, not migration authority.
+    Migration verification additionally requires sealed source/artifact
+    provenance attached by ``create_sqlite_backup``.
+    """
+
+    try:
+        if type(backup_result) is not BackupResult:
+            raise ValueError
+        provenance = backup_result._provenance
+        if (
+            type(provenance) is not _BackupCreationProvenance
+            or provenance.seal is not _AUTHORIZATION_SEAL
+        ):
+            raise ValueError
+
+        backup_path, backup_identity = _resolved_path_identity(
+            backup_result.backup_path
+        )
+        manifest_path, manifest_identity = _resolved_path_identity(
+            backup_result.manifest_path
+        )
+        if (
+            backup_path != provenance.backup_path
+            or backup_identity != provenance.backup_identity
+            or manifest_path != provenance.manifest_path
+            or manifest_identity != provenance.manifest_identity
+        ):
+            raise ValueError
+
+        manifest = verify_backup_artifacts(backup_path, manifest_path)
+        if manifest != backup_result.manifest:
+            raise ValueError
+        backup_size = backup_path.stat().st_size
+        manifest_size = manifest_path.stat().st_size
+        backup_sha256 = _sha256_file(backup_path)
+        manifest_sha256 = _sha256_file(manifest_path)
+        if backup_size != manifest.size_bytes or backup_sha256 != manifest.sha256:
+            raise ValueError
+
+        return _VerifiedMigrationBackup(
+            seal=_AUTHORIZATION_SEAL,
+            provenance=provenance,
+            manifest=manifest,
+            backup_sha256=backup_sha256,
+            backup_size_bytes=backup_size,
+            manifest_sha256=manifest_sha256,
+            manifest_size_bytes=manifest_size,
+        )
+    except (BackupError, OSError, ValueError):
+        raise BackupError("migration backup verification failed") from None
+
+
+def authorize_migration_backup(
+    database_path: Path,
+    verified_backup: object,
+    catalog: Sequence[MigrationInfo],
+    *,
+    options: SqliteConnectionOptions = SqliteConnectionOptions(),
+) -> _MigrationBackupAuthorization:
+    """Bind a verified backup to one live database instance and catalog."""
+
+    try:
+        if (
+            type(verified_backup) is not _VerifiedMigrationBackup
+            or verified_backup.seal is not _AUTHORIZATION_SEAL
+            or verified_backup.provenance.seal is not _AUTHORIZATION_SEAL
+        ):
+            raise ValueError
+
+        provenance = verified_backup.provenance
+        source_path, source_identity = _resolved_path_identity(database_path)
+        if (
+            source_path != provenance.source_path
+            or source_identity != provenance.source_identity
+            or _catalog_fingerprint(catalog) != provenance.catalog_fingerprint
+        ):
+            raise ValueError
+
+        status = inspect_schema(database_path, catalog, options=options)
+        if (
+            status.state not in (SchemaState.CURRENT, SchemaState.PENDING)
+            or status.current_version != verified_backup.manifest.schema_version
+            or status.target_version
+            != verified_backup.manifest.catalog_target_version
+        ):
+            raise ValueError
+
+        source_path_after, source_identity_after = _resolved_path_identity(
+            database_path
+        )
+        if (
+            source_path_after != source_path
+            or source_identity_after != source_identity
+        ):
+            raise ValueError
+
+        return _MigrationBackupAuthorization(
+            seal=_AUTHORIZATION_SEAL,
+            source_path=source_path,
+            source_identity=source_identity,
+            backup_path=provenance.backup_path,
+            backup_identity=provenance.backup_identity,
+            backup_sha256=verified_backup.backup_sha256,
+            backup_size_bytes=verified_backup.backup_size_bytes,
+            manifest_path=provenance.manifest_path,
+            manifest_identity=provenance.manifest_identity,
+            manifest_sha256=verified_backup.manifest_sha256,
+            manifest_size_bytes=verified_backup.manifest_size_bytes,
+            catalog_fingerprint=provenance.catalog_fingerprint,
+            starting_schema_version=verified_backup.manifest.schema_version,
+            catalog_target_version=verified_backup.manifest.catalog_target_version,
+        )
+    except (BackupError, DatabaseError, OSError, ValueError):
+        raise BackupError("backup authorization is invalid") from None
+
+
+def _revalidate_migration_authorization(
+    authorization: object,
+    database_path: Path,
+    catalog: Sequence[MigrationInfo],
+    *,
+    starting_schema_version: int,
+    catalog_target_version: int,
+) -> None:
+    try:
+        if (
+            type(authorization) is not _MigrationBackupAuthorization
+            or authorization.seal is not _AUTHORIZATION_SEAL
+            or authorization.starting_schema_version != starting_schema_version
+            or authorization.catalog_target_version != catalog_target_version
+            or authorization.catalog_fingerprint != _catalog_fingerprint(catalog)
+        ):
+            raise ValueError
+
+        source_path, source_identity = _resolved_path_identity(database_path)
+        backup_path, backup_identity = _resolved_path_identity(
+            authorization.backup_path
+        )
+        manifest_path, manifest_identity = _resolved_path_identity(
+            authorization.manifest_path
+        )
+        if (
+            source_path != authorization.source_path
+            or source_identity != authorization.source_identity
+            or backup_path != authorization.backup_path
+            or backup_identity != authorization.backup_identity
+            or manifest_path != authorization.manifest_path
+            or manifest_identity != authorization.manifest_identity
+            or backup_path.stat().st_size != authorization.backup_size_bytes
+            or manifest_path.stat().st_size != authorization.manifest_size_bytes
+            or _sha256_file(backup_path) != authorization.backup_sha256
+            or _sha256_file(manifest_path) != authorization.manifest_sha256
+        ):
+            raise ValueError
+
+        manifest = verify_backup_artifacts(backup_path, manifest_path)
+        if (
+            manifest.schema_version != authorization.starting_schema_version
+            or manifest.catalog_target_version
+            != authorization.catalog_target_version
+        ):
+            raise ValueError
+    except (BackupError, OSError, ValueError):
+        raise BackupError("backup authorization is invalid") from None
+
+
 def _create_sqlite_backup(
     database_path: Path,
     output_path: Path,
@@ -125,6 +346,7 @@ def _create_sqlite_backup(
     *,
     options: SqliteConnectionOptions,
 ) -> BackupResult:
+    source_path, source_identity = _resolved_path_identity(database_path)
     source_status = inspect_schema(database_path, catalog, options=options)
     _require_backup_eligible(source_status.state)
     _require_valid_foreign_keys(database_path, options=options)
@@ -155,6 +377,14 @@ def _create_sqlite_backup(
         snapshot_status = inspect_schema(backup_temp, catalog, options=options)
         _require_backup_eligible(snapshot_status.state)
         _require_valid_foreign_keys(backup_temp, options=options)
+        source_path_after, source_identity_after = _resolved_path_identity(
+            database_path
+        )
+        if (
+            source_path_after != source_path
+            or source_identity_after != source_identity
+        ):
+            raise BackupError("database backup source changed")
 
         manifest = BackupManifest(
             format_version=1,
@@ -240,7 +470,21 @@ def _create_sqlite_backup(
             if isinstance(error, BackupError):
                 raise
             raise BackupError("backup publication failed") from None
-        return BackupResult(output_path, manifest_path, manifest)
+        return BackupResult(
+            output_path,
+            manifest_path,
+            manifest,
+            _provenance=_BackupCreationProvenance(
+                seal=_AUTHORIZATION_SEAL,
+                source_path=source_path,
+                source_identity=source_identity,
+                backup_path=output_path.resolve(strict=True),
+                backup_identity=backup_identity,
+                manifest_path=manifest_path.resolve(strict=True),
+                manifest_identity=manifest_identity,
+                catalog_fingerprint=_catalog_fingerprint(catalog),
+            ),
+        )
     finally:
         if backup_temp is not None and backup_identity is not None:
             _remove_owned_path(backup_temp, backup_identity)
@@ -369,6 +613,22 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _catalog_fingerprint(
+    catalog: Sequence[MigrationInfo],
+) -> _CatalogFingerprint:
+    return tuple(
+        (item.version, item.name, item.checksum_sha256)
+        for item in catalog
+    )
+
+
+def _resolved_path_identity(path: Path) -> tuple[Path, _FileIdentity]:
+    resolved = path.resolve(strict=True)
+    if not resolved.is_file():
+        raise OSError
+    return resolved, _path_identity(resolved)
+
+
 def _validate_manifest(manifest: BackupManifest) -> None:
     if type(manifest.format_version) is not int or manifest.format_version != 1:
         raise ValueError
@@ -490,7 +750,9 @@ def _utc_timestamp() -> str:
 
 __all__ = [
     "BackupResult",
+    "authorize_migration_backup",
     "create_sqlite_backup",
     "load_backup_manifest",
     "verify_backup_artifacts",
+    "verify_migration_backup",
 ]
