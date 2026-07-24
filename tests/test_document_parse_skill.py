@@ -43,36 +43,36 @@ class TestDocumentParseSkill(unittest.TestCase):
     # ---- 端到端: docx 分类 ----
 
     def test_parse_docx_zhaobiao_gonggao(self):
-        self._create_docx(["招标公告测试", "项目名称:测试A", "采购人:客户B"])
+        self._create_docx(["招标公告测试", "项目名称:合成项目014", "采购人:合成机构B有限公司"])
         result = parse(self.docx_path)
         self.assertEqual(result["schema_version"], SCHEMA_VERSION)
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["executor_used"], "docx")
         self.assertEqual(result["business_judgement"]["category"], "招标公告")
         # KB 评分:无文件名信号(临时文件)→ score=15 = medium
-        # 有文件名信号(真实样本)→ score=45 = high
+        # 有文件名信号(合成样本)→ score=45 = high
         # 测试接受 high 或 medium,只要不是 low
         self.assertIn(result["business_judgement"]["confidence"], ["high", "medium"])
         self.assertEqual(result["validation"]["schema_valid"], True)
         self.assertGreater(len(result["extracted_data"]["paragraphs"]), 0)
 
     def test_parse_docx_caigou_gonggao(self):
-        self._create_docx(["采购公告", "项目名称:测试B"])
+        self._create_docx(["采购公告", "项目名称:合成项目015"])
         result = parse(self.docx_path)
         self.assertEqual(result["business_judgement"]["category"], "招标公告")
 
     def test_parse_docx_toubiao(self):
-        self._create_docx(["投标文件响应", "投标人:公司X", "报价:95万"])
+        self._create_docx(["投标文件响应", "投标人:合成机构X有限公司", "报价:95万"])
         result = parse(self.docx_path)
         self.assertEqual(result["business_judgement"]["category"], "投标文件")
 
     def test_parse_docx_hetong(self):
-        self._create_docx(["合同文本", "签订合同", "甲方:测试A", "乙方:测试B"])
+        self._create_docx(["合同文本", "签订合同", "甲方:合成机构014有限公司", "乙方:合成机构015有限公司"])
         result = parse(self.docx_path)
         self.assertEqual(result["business_judgement"]["category"], "合同文件")
 
     def test_parse_docx_baoming(self):
-        self._create_docx(["报名表", "项目名称:测试A"])
+        self._create_docx(["报名表", "项目名称:合成项目014"])
         result = parse(self.docx_path)
         self.assertEqual(result["business_judgement"]["category"], "报名材料")
 
@@ -84,7 +84,7 @@ class TestDocumentParseSkill(unittest.TestCase):
     # ---- 端到端: xlsx ----
 
     def test_parse_xlsx_success(self):
-        self._create_xlsx([["项目", "金额"], ["测试A", "100万"]])
+        self._create_xlsx([["项目", "金额"], ["合成项目014", "100万"]])
         result = parse(self.xlsx_path)
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["executor_used"], "xlsx")

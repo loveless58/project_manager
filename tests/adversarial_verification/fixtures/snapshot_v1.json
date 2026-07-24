@@ -7,11 +7,11 @@
         "file": "/tmp/fixtures/sample_bid_doc.pdf",
         "filename": "sample_bid_doc.pdf",
         "document_type": "投标文件",
-        "extracted_text": "项目名称：某智能监控系统建设项目\n预算金额：120万元\n客户：某科技公司\n截止日期：2026年9月30日",
+        "extracted_text": "项目名称：合成项目字段015\n预算：120万元",
         "fields": {
-          "project_name": "某智能监控系统建设项目",
+          "project_name": "合成项目字段015",
           "budget": "120",
-          "customer": "某科技公司",
+          "customer": "合成机构005有限公司",
           "deadline": "2026年9月30日"
         },
         "ocr": {
@@ -20,12 +20,12 @@
       },
       {
         "file": "/tmp/fixtures/contract_doc.pdf",
-        "filename": "合同_华东电网.pdf",
+        "filename": "合同_合成项目字段016.pdf",
         "document_type": "合同",
-        "extracted_text": "合同名称：华东电网运维服务合同\n客户：华东电网有限公司\n合同状态：已签订",
+        "extracted_text": "合同名称：合成项目字段016运维服务合同\n客户：合成机构006有限公司",
         "fields": {
-          "project_name": "华东电网运维服务合同",
-          "customer": "华东电网有限公司",
+          "project_name": "合成项目字段016",
+          "customer": "合成机构006有限公司",
           "contract_status": "已签订"
         },
         "ocr": {
@@ -35,16 +35,16 @@
     ],
     "archive_actions": [
       {
-        "source_file": "/tmp/fixtures/sample_bid_doc.pdf",
-        "target_path": "/项目文件/某智能监控系统建设项目/投标/sample_bid_doc.pdf",
+        "source_file": "synthetic/SYN-SOURCE-017.docx",
+        "target_path": "/项目文件/合成项目字段015/投标/sample_bid_doc.pdf",
         "document_type": "投标文件",
-        "project_name": "某智能监控系统建设项目"
+        "project_name": "合成项目字段015"
       },
       {
-        "source_file": "/tmp/fixtures/contract_doc.pdf",
-        "target_path": "/项目文件/华东电网运维服务合同/合同/合同_华东电网.pdf",
+        "source_file": "synthetic/SYN-SOURCE-018.docx",
+        "target_path": "/项目文件/合成项目字段016/合同/合同_合成项目字段016.pdf",
         "document_type": "合同",
-        "project_name": "华东电网运维服务合同"
+        "project_name": "合成项目字段016"
       }
     ],
     "ledger_results": []

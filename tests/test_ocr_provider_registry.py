@@ -51,7 +51,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
             with open(pdf_path, "wb") as f:
                 f.write(b"%PDF-1.4\n% placeholder\n")
             with open(f"{pdf_path}.ocr.txt", "w", encoding="utf-8") as f:
-                f.write("项目名称：旁路OCR项目\n采购人：测试客户")
+                f.write("项目名称：合成项目022\n采购人：合成机构013有限公司")
 
             result = extract_pdf_or_image(
                 pdf_path,
@@ -62,7 +62,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
             self.assertEqual(result["status"], "success")
             self.assertEqual(result["extract_method"], "ocr")
             self.assertEqual(result["ocr"]["engine"], "sidecar_text")
-            self.assertIn("旁路OCR项目", result["extracted_text"])
+            self.assertIn("合成项目022", result["extracted_text"])
 
     def test_easyocr_provider_is_optional_and_reports_missing_module(self):
         from ocr.providers.easyocr_provider import EasyOcrProvider
@@ -82,8 +82,8 @@ class TestOcrProviderRegistry(unittest.TestCase):
         fake_easyocr = types.SimpleNamespace(
             Reader=lambda languages, gpu=False, verbose=False, model_storage_directory=None: types.SimpleNamespace(
                 readtext=lambda path, detail=1, paragraph=False: [
-                    ([[0, 0], [1, 0], [1, 1], [0, 1]], "项目名称：EasyOCR封装项目", 0.91),
-                    ([[0, 2], [1, 2], [1, 3], [0, 3]], "采购人：测试客户", 0.83),
+                    ([[0, 0], [1, 0], [1, 1], [0, 1]], "项目名称：合成项目025", 0.91),
+                    ([[0, 2], [1, 2], [1, 3], [0, 3]], "采购人：合成机构013有限公司", 0.83),
                 ]
             )
         )
@@ -99,7 +99,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["engine"], "easyocr")
-        self.assertIn("EasyOCR封装项目", result["text"])
+        self.assertIn("合成项目025", result["text"])
         self.assertEqual(result["pages"][0]["confidence"], 0.87)
 
     def test_easyocr_provider_copies_unicode_image_path_before_ocr(self):
@@ -111,7 +111,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
             seen_paths.append(path)
             self.assertTrue(os.path.exists(path))
             self.assertNotIn("付款凭证", path)
-            return [([[0, 0], [1, 0], [1, 1], [0, 1]], "项目名称：中文路径图片项目", 0.92)]
+            return [([[0, 0], [1, 0], [1, 1], [0, 1]], "项目名称：合成项目023", 0.92)]
 
         fake_easyocr = types.SimpleNamespace(
             Reader=lambda languages, gpu=False, verbose=False, model_storage_directory=None: types.SimpleNamespace(
@@ -131,7 +131,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["engine"], "easyocr")
         self.assertEqual(len(seen_paths), 1)
-        self.assertIn("中文路径图片项目", result["text"])
+        self.assertIn("合成项目023", result["text"])
 
     def test_easyocr_low_confidence_keeps_text_for_human_review(self):
         from ocr.providers.easyocr_provider import EasyOcrProvider
@@ -139,7 +139,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
         fake_easyocr = types.SimpleNamespace(
             Reader=lambda languages, gpu=False, verbose=False, model_storage_directory=None: types.SimpleNamespace(
                 readtext=lambda path, detail=1, paragraph=False: [
-                    ([[0, 0], [1, 0], [1, 1], [0, 1]], "收款人：中经国际招标集团有限公司", 0.33),
+                    ([[0, 0], [1, 0], [1, 1], [0, 1]], "收款人：合成机构011有限公司", 0.33),
                 ]
             )
         )
@@ -169,7 +169,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
             reader_count["count"] += 1
             return types.SimpleNamespace(
                 readtext=lambda path, detail=1, paragraph=False: [
-                    ([[0, 0], [1, 0], [1, 1], [0, 1]], "项目名称：缓存验证项目", 0.9),
+                    ([[0, 0], [1, 0], [1, 1], [0, 1]], "项目名称：合成项目024", 0.9),
                 ]
             )
 
@@ -213,7 +213,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
         fake_easyocr = types.SimpleNamespace(
             Reader=lambda languages, gpu=False, verbose=False, model_storage_directory=None: types.SimpleNamespace(
                 readtext=lambda path, detail=1, paragraph=False: [
-                    ([[0, 0], [1, 0], [1, 1], [0, 1]], f"项目名称：PDF扫描项目-{os.path.basename(path)}", 0.9),
+                    ([[0, 0], [1, 0], [1, 1], [0, 1]], f"项目名称：合成项目PDF扫描-{os.path.basename(path)}", 0.9),
                 ]
             )
         )
@@ -227,7 +227,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
         self.assertEqual(len(result["pages"]), 2)
         self.assertEqual(len(seen_paths), 2)
         self.assertTrue(all(path.endswith(".png") for path in seen_paths))
-        self.assertIn("PDF扫描项目", result["text"])
+        self.assertIn("合成项目PDF扫描", result["text"])
 
     def test_registry_uses_easyocr_as_pluggable_fallback_for_images(self):
         from ocr.provider_registry import extract_pdf_or_image
@@ -235,7 +235,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
         fake_easyocr = types.SimpleNamespace(
             Reader=lambda languages, gpu=False, verbose=False, model_storage_directory=None: types.SimpleNamespace(
                 readtext=lambda path, detail=1, paragraph=False: [
-                    ([[0, 0], [1, 0], [1, 1], [0, 1]], "项目名称：图片识别项目", 0.88),
+                    ([[0, 0], [1, 0], [1, 1], [0, 1]], "项目名称：合成项目026", 0.88),
                 ]
             )
         )
@@ -254,7 +254,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["ocr"]["engine"], "easyocr")
-        self.assertIn("图片识别项目", result["extracted_text"])
+        self.assertIn("合成项目026", result["extracted_text"])
 
     def test_ofd_uses_same_stem_xml_sidecar_without_converter_dependency(self):
         from ocr.provider_registry import extract_pdf_or_image
@@ -265,7 +265,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
             with open(ofd_path, "wb") as f:
                 f.write(b"fake ofd bytes")
             with open(xml_path, "w", encoding="utf-8") as f:
-                f.write("<root><buyer>测试客户</buyer><amount>123.45</amount></root>")
+                f.write("<root><buyer>合成机构013有限公司</buyer><amount>123.45</amount></root>")
 
             result = extract_pdf_or_image(
                 ofd_path,
@@ -275,7 +275,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["extract_method"], "ofd_sidecar")
-        self.assertIn("测试客户", result["extracted_text"])
+        self.assertIn("合成机构013有限公司", result["extracted_text"])
         self.assertIn("123.45", result["extracted_text"])
 
     def test_ofd_without_sidecar_returns_converter_unavailable_blocked(self):

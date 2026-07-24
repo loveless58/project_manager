@@ -20,7 +20,7 @@ class AgentRoleTests(unittest.TestCase):
                     {
                         "file": os.path.join(td, "scan.png"),
                         "document_type": "采购公告",
-                        "fields": {"project_name": "低置信项目"},
+                        "fields": {"project_name": "合成项目008"},
                         "ocr": {"pages": [{"confidence": 0.2}]},
                     }
                 ],

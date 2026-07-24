@@ -18,7 +18,7 @@ def test_ocr_low_confidence_escalates_to_human_review(tmp_workspace):
         "filename": "low_quality.pdf",
         "document_type": "投标文件",
         "extracted_text": "模糊不清的内容",
-        "fields": {"project_name": "X"},
+        "fields": {"project_name": "合成项目005"},
         "ocr": {"pages": [{"confidence": 0.40}]},  # 低于 0.60 阈值
     }]
     result = av.run(run_id="test_run_001", extracted_items=items)
@@ -86,7 +86,7 @@ def test_high_severity_findings_need_correction(tmp_workspace):
         "filename": "bad.pdf",
         "document_type": "投标文件",
         "extracted_text": "少量内容",
-        "fields": {"project_name": "X"},  # 只 1 个字段
+        "fields": {"project_name": "合成项目005"},  # 只 1 个字段
         "ocr": {"pages": [{"confidence": 0.95}]},
     }]
     result = av.run(run_id="test_run_bad", extracted_items=items)

@@ -23,9 +23,9 @@ class ContractParserTests(unittest.TestCase):
     def test_parse_sales_person_normalizes_single_and_multi_owner_values(self):
         from contracts.parsers import parse_sales_person
 
-        self.assertEqual(parse_sales_person("邹迅"), ["邹迅"])
-        self.assertEqual(parse_sales_person("张三 / 李四"), ["张三", "李四"])
-        self.assertEqual(parse_sales_person("赵月伟（联系人） / 田晓光（销售总监）"), ["赵月伟", "田晓光"])
+        self.assertEqual(parse_sales_person("虚构甲"), ["虚构甲"])
+        self.assertEqual(parse_sales_person("虚构乙 / 虚构丙"), ["虚构乙", "虚构丙"])
+        self.assertEqual(parse_sales_person("虚构丁（联系人） / 虚构戊（销售总监）"), ["虚构丁", "虚构戊"])
         self.assertEqual(parse_sales_person("待确认"), [])
         self.assertEqual(parse_sales_person("—"), [])
 

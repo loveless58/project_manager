@@ -435,28 +435,39 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertEqual(second["conflicts"][0]["field"], "customer_name")
 
     def test_project_ledger_does_not_auto_merge_similar_project_names(self):
+        import re
         import tempfile
+        from difflib import SequenceMatcher
         from pathlib import Path
         from ledger import ProjectLedger
+
+        first_name = "合成项目Alpha安全平台升级"
+        second_name = "合成项目 Alpha安全平台升级 V2"
+        normalized_first = re.sub(r"\s+", "", first_name).casefold()
+        normalized_second = re.sub(r"\s+", "", second_name).casefold()
+        self.assertGreater(
+            SequenceMatcher(None, normalized_first, normalized_second).ratio(),
+            0.90,
+        )
 
         with tempfile.TemporaryDirectory() as td:
             ledger = ProjectLedger(base_dir=td)
             first = ledger.apply_patch({
-                "project_name": '合成项目003',
-                "facts": {"project_name": '合成项目003', "bid_status": "已弃标"},
+                "project_name": first_name,
+                "facts": {"project_name": first_name, "bid_status": "已弃标"},
                 "evidence": [{"field": "project_name", "source_ref": "lost", "confidence": 0.9}],
                 "source_type": "unit_test",
             })
             second = ledger.apply_patch({
-                "project_name": '合成项目004',
-                "facts": {"project_name": '合成项目004', "lifecycle_stage": "execution"},
+                "project_name": second_name,
+                "facts": {"project_name": second_name, "lifecycle_stage": "execution"},
                 "evidence": [{"field": "project_name", "source_ref": "execution", "confidence": 0.9}],
                 "source_type": "unit_test",
             })
 
             self.assertNotEqual(Path(first["project_dir"]), Path(second["project_dir"]))
-            self.assertTrue((Path(td) / '合成项目003' / "数字资产" / "project_ledger.json").exists())
-            self.assertTrue((Path(td) / '合成项目004' / "数字资产" / "project_ledger.json").exists())
+            self.assertTrue((Path(first["project_dir"]) / "数字资产" / "project_ledger.json").exists())
+            self.assertTrue((Path(second["project_dir"]) / "数字资产" / "project_ledger.json").exists())
 
     def test_update_project_ledger_tool_returns_structured_artifacts(self):
         import tempfile
@@ -484,7 +495,7 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             doc_path = os.path.join(td, "采购公告.docx")
             doc = Document()
-            doc.add_paragraph("航天时代飞鸿技术有限公司")
+            doc.add_paragraph("合成机构022有限公司")
             doc.add_paragraph("《采购公告》")
             doc.add_paragraph("项目名称：")
             doc.add_paragraph('合成项目006')
@@ -650,7 +661,7 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
                 "facts": {
                     "project_name": '合成项目013',
                     "customer_name": "待确认",
-                    "sales_owner": "待确认",
+                    "sales_owner": "虚构人员字段019",
                     "bid_status": "已弃标",
                     "registration_status": "待报名",
                 },
@@ -697,12 +708,12 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
                 "备注", "立项金额", "招标编号",
             ])
             ws.append([
-                1, "工业互联网网络基础条件项目", "C000027902", "首都航天机械有限公司", "邹迅",
+                1, "合成项目020", "SYN-PROJECT-003", "合成机构023有限公司", "虚构甲",
                 "2026-05-12", "2026-05-12", 50000, "是", "产品", "已报名", "已中标", "未签约",
                 "中标通知书已归档", 3438800, "BID-001",
             ])
             ws.append([
-                2, '合成项目014', "C000028118", "XXZYBDCGFW", '虚构乙',
+                2, '合成项目014', "SYN-PROJECT-005", "SYN-CUSTOMER-001", '虚构乙',
                 "2026-05-13", "2026-05-22", None, "否", "产品", "已报名", "已弃标", "未签约",
                 "已弃标", None, "BID-002",
             ])
@@ -712,7 +723,7 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
                 "签订日期", "签约状态", "里程碑节点", "预计完成", "实际完成", "备注",
             ])
             exec_ws.append([
-                1, "工业互联网网络基础条件项目", "C000027902", "首都航天机械有限公司", "邹迅",
+                1, "合成项目020", "SYN-PROJECT-003", "合成机构023有限公司", "虚构甲",
                 3438800, 'SYN-CONTRACT-001', "2026-05-29", "已签合同", "合同签订", "2026-05", "2026-05",
                 "合同已归档",
             ])
@@ -725,7 +736,7 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertEqual(result["status"], "success")
             self.assertEqual(result["processed_projects"], 2)
             self.assertEqual(result["execution_rows"], 1)
-            self.assertEqual(result["projects"][0]["facts"]["project_code"], "C000027902")
+            self.assertEqual(result["projects"][0]["facts"]["project_code"], "SYN-PROJECT-003")
             self.assertEqual(result["projects"][0]["facts"]["bid_status"], "已中标")
             self.assertEqual(result["projects"][0]["facts"]["lifecycle_stage"], "execution")
             self.assertEqual(result["projects"][0]["facts"]["contract_code"], 'SYN-CONTRACT-001')
@@ -778,12 +789,12 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
                 "备注", "立项金额", "招标编号",
             ])
             ws.append([
-                1, "工业互联网网络基础条件项目", "C000027902", "首都航天机械有限公司", "邹迅",
+                1, "合成项目020", "SYN-PROJECT-003", "合成机构023有限公司", "虚构甲",
                 "2026-05-12", "2026-05-12", 50000, "是", "产品", "已报名", "已中标", "已签合同",
                 "中标通知书已归档", 3438800, "BID-001",
             ])
             ws.append([
-                2, "服务器区防火墙系统升级采购", "C000028121", "北京外企数字科技有限责任公司", "邹迅",
+                2, "合成项目021", "SYN-PROJECT-006", "合成机构024有限公司", "虚构甲",
                 "", "", "", "否", "产品", "待报名", "待开标", "未签约", "", "", "",
             ])
             wb.save(xlsx_path)
@@ -802,8 +813,8 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
                 content = f.read()
             self.assertIn("投标进度总览", content)
             self.assertIn("BPM销售合同号/非订单编号", content)
-            self.assertIn("工业互联网网络基础条件项目", content)
-            self.assertIn("服务器区防火墙系统升级采购", content)
+            self.assertIn("合成项目020", content)
+            self.assertIn("合成项目021", content)
             self.assertIn('<col class="col-index">', content)
             self.assertIn('<col class="col-project">', content)
             self.assertIn('<th class="center">序号</th>', content)
@@ -895,7 +906,7 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             doc_path = os.path.join(td, "采购公告.docx")
             doc = Document()
-            doc.add_paragraph("航天时代飞鸿技术有限公司")
+            doc.add_paragraph("合成机构022有限公司")
             doc.add_paragraph("《采购公告》")
             doc.add_paragraph("项目名称：")
             doc.add_paragraph('合成项目006')
@@ -1039,7 +1050,7 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             os.makedirs(source_dir)
             doc_path = os.path.join(source_dir, "采购公告.docx")
             doc = Document()
-            doc.add_paragraph("航天时代飞鸿技术有限公司")
+            doc.add_paragraph("合成机构022有限公司")
             doc.add_paragraph("《采购公告》")
             doc.add_paragraph("项目名称：")
             doc.add_paragraph('合成项目006')
@@ -1195,13 +1206,13 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
         from tools.data_cleaning_tools import DataCleaningTools
 
         tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
-        text = '# 项目记录：合成项目014\n\n## 基本信息\n- **项目名称**：合成项目014\n- **CRM 编号**：C000028118\n- **招标人/客户**：XXZYBDCGFW\n- **负责销售**：虚构乙\n\n## 项目状态\n- 报名状态：已弃标\n- 中标状态：已弃标\n- 签约状态：未签约\n'
+        text = '# 项目记录：合成项目014\n\n## 基本信息\n- **项目名称**：合成项目014\n- **CRM 编号**：SYN-PROJECT-005\n- **招标人/客户**：SYN-CUSTOMER-001\n- **负责销售**：虚构乙\n\n## 项目状态\n- 报名状态：已弃标\n- 中标状态：已弃标\n- 签约状态：未签约\n'
 
         fields = tools._extract_fields(text)
 
         self.assertEqual(fields["project_name"], '合成项目014')
-        self.assertEqual(fields["project_code"], "C000028118")
-        self.assertEqual(fields["customer_name"], "XXZYBDCGFW")
+        self.assertEqual(fields["project_code"], "SYN-PROJECT-005")
+        self.assertEqual(fields["customer_name"], "SYN-CUSTOMER-001")
         self.assertEqual(fields["sales_owner"], '虚构乙')
         self.assertEqual(fields["registration_status"], "已弃标")
         self.assertEqual(fields["bid_status"], "已弃标")
@@ -1213,11 +1224,11 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
         from tools.data_cleaning_tools import DataCleaningTools
 
         tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
-        text = '# 项目记录：合成项目010\n\n## 基本信息\n- **招标人/客户**：）普华和诚(北京)信息有限公司\n- **负责销售**：| | |\n'
+        text = '# 项目记录：合成项目010\n\n## 基本信息\n- **招标人/客户**：）合成机构021有限公司\n- **负责销售**：| | |\n'
 
         fields = tools._extract_fields(text)
 
-        self.assertEqual(fields["customer_name"], "普华和诚(北京)信息有限公司")
+        self.assertEqual(fields["customer_name"], "合成机构021有限公司")
         self.assertNotIn("sales_owner", fields)
 
     def test_project_record_field_extraction_skips_placeholder_values(self):
@@ -1239,7 +1250,7 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
         tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
         document_type = tools._classify_text_document(
             '技术开发合同-合成项目01020260626-关键页扫描.pdf',
-            "合同登记编号:\n技 术 开 发 合 同\n委托人: 普华和诚(北京)信息有限公司\n受托人: 北京华胜天成科技股份有限公司",
+            "合同登记编号:\n技 术 开 发 合 同\n委托人: 合成机构021有限公司\n受托人: 合成机构003有限公司",
         )
 
         self.assertEqual(document_type, "合同")
@@ -1360,8 +1371,8 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             project_name = '合成项目023'
             material_dir = Path(td) / "项目文件" / "项目丢标" / project_name / "报名材料"
             material_dir.mkdir(parents=True)
-            material = material_dir / "四川银行报名材料.md"
-            material.write_text("# 报名材料\n\n单位名称：北京华胜天成软件技术有限公司\n", encoding="utf-8")
+            material = material_dir / "合成银行025报名材料.md"
+            material.write_text("# 报名材料\n\n单位名称：合成机构026有限公司\n", encoding="utf-8")
 
             tools = DataCleaningTools(workspace_dir=os.path.join(td, "workspace"))
             result = tools.prepare_file_organization_run([str(material)])
@@ -1462,7 +1473,7 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             project_dir.mkdir(parents=True)
             record = project_dir / "项目记录.md"
             record.write_text(
-                f"# 项目记录：{project_name}\n\n客户名称：合成科技有限公司\n负责销售：陈丞\n",
+                f"# 项目记录：{project_name}\n\n客户名称：合成科技有限公司\n负责销售：虚构人员补充\n",
                 encoding="utf-8",
             )
 
@@ -1665,7 +1676,7 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             current = source_dir / "项目记录.md"
             current.write_text(
                 '# 项目记录：合成项目010\n'
-                "- **招标人/客户**：普华和诚(北京)信息有限公司\n"
+                "- **招标人/客户**：合成机构021有限公司\n"
                 '电子发票已开具\n发票号码：SYN-INVOICE-001\n',
                 encoding="utf-8",
             )
@@ -1675,7 +1686,7 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
                 "- 报名状态：已弃标\n"
                 "- 中标状态：已弃标\n"
                 "- 签约状态：未签约\n"
-                "- 负责销售：待确认\n",
+                "- 负责销售：虚构人员补充\n",
                 encoding="utf-8",
             )
             backup = source_dir / "项目记录.md.bak_state_consistency"
@@ -2059,7 +2070,7 @@ class TestLoopEngine(unittest.TestCase):
         """简单场景：Planner 直接返回 Final Answer，循环立即完成"""
         mock_llm = MockLLMAdapter()
         mock_llm.set_mock_responses([
-            "Final Answer: 测试完成"
+            "Final Answer: 合成项目004完成"
         ])
         
         engine = LoopEngine(agent_name="test", max_rounds=5)
@@ -2069,15 +2080,15 @@ class TestLoopEngine(unittest.TestCase):
             return resp.text, resp.tokens_used
         
         trace = engine.run(
-            goal="测试",
-            system_prompt="你是测试 Agent",
+            goal="合成项目004",
+            system_prompt="你是合成项目004 Agent",
             llm_call=llm_call,
             tools=self.tools,
         )
         
         self.assertEqual(trace.status, "completed")
         self.assertEqual(len(trace.rounds), 1)
-        self.assertEqual(trace.final_result, "Final Answer: 测试完成")
+        self.assertEqual(trace.final_result, "Final Answer: 合成项目004完成")
     
     def test_two_round_loop(self):
         """两轮场景：先调用工具，再返回结论"""
@@ -2095,7 +2106,7 @@ class TestLoopEngine(unittest.TestCase):
         
         trace = engine.run(
             goal="扫描项目",
-            system_prompt="你是测试 Agent",
+            system_prompt="你是合成项目004 Agent",
             llm_call=llm_call,
             tools=self.tools,
         )
@@ -2123,8 +2134,8 @@ class TestLoopEngine(unittest.TestCase):
             return resp.text, resp.tokens_used
         
         trace = engine.run(
-            goal="测试",
-            system_prompt="你是测试 Agent",
+            goal="合成项目004",
+            system_prompt="你是合成项目004 Agent",
             llm_call=llm_call,
             tools=self.tools,
         )
@@ -2158,7 +2169,7 @@ class TestLoopEngine(unittest.TestCase):
         engine = LoopEngine(agent_name="test", max_rounds=3)
         trace = engine.run(
             goal="解析扫描图片",
-            system_prompt="你是测试 Agent",
+            system_prompt="你是合成项目004 Agent",
             llm_call=llm_call,
             tools={"extract_document": blocked_tool},
         )
@@ -2177,7 +2188,7 @@ class TestLoopEngine(unittest.TestCase):
         """needs_confirmation 结果应明确提示下一轮需要人工确认而不是自动继续提交"""
         captured_messages = []
         responses = [
-            "Thought: 填写 CRM 草稿\nAction: cloudcc_fill_draft_gated\nAction Input: {\"draft\": {\"name\": \"测试\"}}",
+            "Thought: 填写 CRM 草稿\nAction: cloudcc_fill_draft_gated\nAction Input: {\"draft\": {\"name\": \"合成项目004\"}}",
             "Final Answer: 已停在提交前确认状态",
         ]
 
@@ -2196,7 +2207,7 @@ class TestLoopEngine(unittest.TestCase):
         engine = LoopEngine(agent_name="test", max_rounds=3)
         trace = engine.run(
             goal="CRM 草稿填写",
-            system_prompt="你是测试 Agent",
+            system_prompt="你是合成项目004 Agent",
             llm_call=llm_call,
             tools={"cloudcc_fill_draft_gated": confirmation_tool},
         )
@@ -2224,7 +2235,7 @@ class TestLoopEngine(unittest.TestCase):
         
         trace = engine.run(
             goal="扫描项目",
-            system_prompt="你是测试 Agent",
+            system_prompt="你是合成项目004 Agent",
             llm_call=llm_call,
             tools=self.tools,
         )
@@ -2251,7 +2262,7 @@ class TestLoopEngine(unittest.TestCase):
         
         trace = engine.run(
             goal="扫描项目",
-            system_prompt="你是测试 Agent",
+            system_prompt="你是合成项目004 Agent",
             llm_call=llm_call,
             tools=self.tools,
         )
@@ -2267,7 +2278,7 @@ class TestLoopEngine(unittest.TestCase):
         import tempfile
         
         mock_llm = MockLLMAdapter()
-        mock_llm.set_mock_responses(["Final Answer: 测试"])
+        mock_llm.set_mock_responses(["Final Answer: 合成项目004"])
         
         engine = LoopEngine(agent_name="test", max_rounds=5)
         
@@ -2276,8 +2287,8 @@ class TestLoopEngine(unittest.TestCase):
             return resp.text, resp.tokens_used
         
         trace = engine.run(
-            goal="测试",
-            system_prompt="你是测试 Agent",
+            goal="合成项目004",
+            system_prompt="你是合成项目004 Agent",
             llm_call=llm_call,
             tools=self.tools,
         )
@@ -2290,7 +2301,7 @@ class TestLoopEngine(unittest.TestCase):
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.assertEqual(data["status"], "completed")
-            self.assertEqual(data["goal"], "测试")
+            self.assertEqual(data["goal"], "合成项目004")
         finally:
             os.unlink(path)
 
@@ -2355,11 +2366,11 @@ class TestReActPrompt(unittest.TestCase):
     def test_build_prompt(self):
         """prompt 包含必要元素"""
         prompt = build_react_prompt(
-            goal="测试目标",
+            goal="合成项目004目标",
             tools_text="工具列表",
             memory_text="记忆内容"
         )
-        self.assertIn("测试目标", prompt)
+        self.assertIn("合成项目004目标", prompt)
         self.assertIn("工具列表", prompt)
         self.assertIn("记忆内容", prompt)
         self.assertIn("Thought:", prompt)
@@ -2456,7 +2467,7 @@ class TestEndToEnd(unittest.TestCase):
 
             doc_path = os.path.join(source_dir, "采购公告.docx")
             doc = Document()
-            doc.add_paragraph("航天时代飞鸿技术有限公司")
+            doc.add_paragraph("合成机构022有限公司")
             doc.add_paragraph("《采购公告》")
             doc.add_paragraph("项目名称：")
             doc.add_paragraph('合成项目006')
@@ -2518,8 +2529,8 @@ class TestErrorRecovery(unittest.TestCase):
             return resp.text, resp.tokens_used
         
         trace = engine.run(
-            goal="测试",
-            system_prompt="你是测试 Agent",
+            goal="合成项目004",
+            system_prompt="你是合成项目004 Agent",
             llm_call=llm_call,
             tools=tools,
         )

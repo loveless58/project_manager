@@ -1,4 +1,4 @@
-"""DocxExecutor 真实样本测试。"""
+"""DocxExecutor 合成样本测试。"""
 
 import os
 import tempfile

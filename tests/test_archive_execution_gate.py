@@ -29,7 +29,7 @@ class ArchiveExecutionGateTests(unittest.TestCase):
                         {
                             "source_file": source_path,
                             "target_path": target_path,
-                            "project_name": "Gate Project",
+                            "project_name": "合成项目010",
                             "document_type": "contract",
                             "blockers": [],
                         }
@@ -97,7 +97,7 @@ class ArchiveExecutionGateTests(unittest.TestCase):
                         {
                             "source_file": source_path,
                             "target_path": target_path,
-                            "project_name": "Gate Project",
+                            "project_name": "合成项目010",
                             "document_type": "contract",
                             "blockers": [],
                         }

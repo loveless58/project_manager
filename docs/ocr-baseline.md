@@ -1,8 +1,8 @@
 # OCR Baseline & Engine Selection
 
 > **数据驱动文档**(v0.4.0, 2026-07-23 跑通)
-> 数据来源: 6 份真实合同 / 发票样本, 44 页, macOS Vision (Swift bridge) vs RapidOCR 横向对比
-> 原始测试数据: `/tmp/vision_vs_rapid.json` + `/tmp/paddleocr_baseline.py` 输出
+> 数据来源: 6 份合成合同 / 发票样本, 44 页, macOS Vision (Swift bridge) vs RapidOCR 横向对比
+> 原始合成测试数据: `/tmp/vision_vs_rapid.json` + `/tmp/paddleocr_baseline.py` 输出
 
 ---
 
@@ -27,7 +27,7 @@ Vision (macOS Vision via Swift bridge)
 
 ---
 
-## 2. Vision vs RapidOCR 对比实测 (6 份真实样本, 44 页)
+## 2. Vision vs RapidOCR 对比实测 (6 份合成样本, 44 页)
 
 ### 汇总
 
@@ -77,7 +77,7 @@ PyObjC VNRecognizeTextRequest 在中文识别上有 bug(2026-07-23 实测):
 - 不论 `recognitionLanguages` 怎么设 (`["zh-Hans"]` / `["zh-Hans", "en-US"]` / `["zh-CN"]`)
 - 不论 `usesLanguageCorrection` 开 / 关
 - 不论 `revision` 设什么 (默认 / 3)
-- **所有中文输出都是乱码**(`XDR-20260625503` 等英文字符正常,中文全乱)
+- **所有中文输出都是乱码**(`SYN-OCR-ASCII-001` 等英文字符正常,中文全乱)
 
 对照实验: 同一份 PNG 渲染 → Swift 直接调 Vision framework → 输出**完全正常**。
 结论: PyObjC 桥接路径有 bug,只能走 Swift 子进程。

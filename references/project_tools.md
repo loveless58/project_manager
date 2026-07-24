@@ -130,7 +130,7 @@
   "matched": 30,
   "archived": 28,
   "failed": 2,
-  "migrations": ["建议迁移: XX项目 -> 项目执行"]
+  "migrations": ["建议迁移: 合成项目待迁移 -> 项目执行"]
 }
 ```
 
@@ -190,7 +190,7 @@
 
 ## DataCleaningTools
 
-数据清洗工具。业务输入根由 `AppSettings.business_root` 提供；运行包、日志、数据库和结构化输出位于节点本地的 `AppSettings.runtime_workspace`，跨平台默认值为 `~/.project_manager`。`common.workspace_config` 只是旧工具使用的兼容门面，不维护独立默认值或配置优先级。`00-原始文件（待处理）` 不再是标准工作区目录，仅在显式 `DataCleaningTools(workspace_dir=...)` 的兼容/测试场景中作为隔离入口使用。
+数据清洗工具。业务输入根由 `AppSettings.business_root` 提供；运行包、日志、数据库和结构化输出位于节点本地的 `AppSettings.runtime_workspace`，跨平台默认值为 `~/.project_manager`。`common.workspace_config` 只是旧工具使用的兼容门面，不维护独立默认值或配置优先级。`00-原始文件（待处理）` 不再是标准工作区目录，仅在显式 `DataCleaningTools(workspace_dir=...)` 的兼容/合成测试场景中作为隔离入口使用。
 
 业务根可以是本机挂载或同步目录；运行工作区与投影目录不能等于或位于业务根内，也不能使用明显的网络 URI/UNC 路径。
 
@@ -246,7 +246,7 @@
   "paragraph_count": 96,
   "table_count": 4,
   "fields": {
-    "project_name": "...",
+    "project_name": "合成项目字段008",
     "customer_name": "...",
     "supplier_name": "..."
   }
@@ -354,7 +354,7 @@ provider diagnostics:
   "schema_version": "data_cleaning.documents_to_ledger.v1",
   "status": "success|partial|failed",
   "processed": 2,
-  "project_name": "...",
+  "project_name": "合成项目字段008",
   "structured_outputs": ["..."],
   "artifacts": {
     "project_overview_md": "...",
@@ -421,7 +421,7 @@ provider diagnostics:
     }
   },
   "accepted_business_facts": {
-    "project_name": "项目名称"
+    "project_name": "合成项目字段009"
   },
   "semantic_guardrail": {
     "schema_version": "semantic_guardrail.v1",
@@ -473,8 +473,8 @@ Before extraction, each source file is checked with `probe_readable_file`. A clo
     {
       "schema_version": "archive_action.v1",
       "status": "ready|needs_review",
-      "source_file": "...",
-      "project_name": "...",
+      "source_file": "synthetic/source-010.docx",
+      "project_name": "合成项目字段008",
       "target_path": ".../project_ledgers/<项目>/source_files/<重命名文件>",
       "blockers": []
     }
@@ -507,7 +507,7 @@ Before extraction, each source file is checked with `probe_readable_file`. A clo
   "results": [
     {
       "status": "success",
-      "project_name": "...",
+      "project_name": "合成项目字段008",
       "facts": {"bid_status": "已中标", "contract_status": "未签约"},
       "business_judgement": {"business_stage": "won_pending_contract"}
     }
@@ -543,7 +543,7 @@ When `confirmed=true`, archive execution rechecks source readability, target exi
   "results": [
     {
       "status": "success",
-      "source_file": "...",
+      "source_file": "synthetic/source-010.docx",
       "archived_path": ".../source_files/..."
     }
   ],
@@ -570,9 +570,9 @@ When `confirmed=true`, archive execution rechecks source readability, target exi
   "execution_rows": 3,
   "projects": [
     {
-      "project_name": "...",
+      "project_name": "合成项目字段008",
       "facts": {
-        "project_code": "C000027902",
+        "project_code": "SYN-PROJECT-003",
         "customer_name": "...",
         "bid_status": "已中标",
         "lifecycle_stage": "execution"
@@ -642,9 +642,9 @@ When `confirmed=true`, archive execution rechecks source readability, target exi
 **返回**：
 ```json
 {
-  "project_name": "...",
+  "project_name": "合成项目字段008",
   "project_code": "...",
-  "buyer": "...",
+  "buyer": "合成机构字段011有限公司",
   "deadline": "YYYY-MM-DD HH:MM",
   "budget": "...",
   "qualification": "...",
@@ -696,10 +696,10 @@ When `confirmed=true`, archive execution rechecks source readability, target exi
 ```json
 {
   "suggestion": {
-    "project_name": "...",
+    "project_name": "合成项目字段008",
     "customer": "...",
     "amount": "...",
-    "sales_owner": "...",
+    "sales_owner": "虚构人员字段012",
     "deadline": "...",
     "next_action": "..."
   },

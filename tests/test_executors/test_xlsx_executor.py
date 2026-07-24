@@ -1,4 +1,4 @@
-"""XlsxExecutor 真实样本测试。"""
+"""XlsxExecutor 合成样本测试。"""
 
 import os
 import tempfile
@@ -62,7 +62,7 @@ class TestXlsxExecutor(unittest.TestCase):
     def test_extract_multi_sheets(self):
         self._create_test_xlsx([
             {"name": "项目清单", "rows": [["项目A", "100万"]]},
-            {"name": "投标人", "rows": [["公司X", "95万"]]},
+            {"name": "投标人", "rows": [["合成机构X有限公司", "95万"]]},
         ])
         result = self.ex.extract(self.path)
         self.assertEqual(len(result["raw_data"]["sheets"]), 2)

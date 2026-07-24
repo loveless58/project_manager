@@ -44,7 +44,7 @@ description: |
   "run_id": "run-2026-07-23-001",
   "status": "success | needs_review | blocked",
   "source_type": "file | url",
-  "source_path": "/abs/path/file.docx | https://example.com/page.html",
+  "source_path": "synthetic/source-014.docx",
   "file_type": ".docx | .xlsx | .pdf | .wps | .html",
   "executor_used": "docx | xlsx | pdf | wps | url",
   "parse_intent": "structured_business_fields | raw_content | metadata_only",
@@ -57,7 +57,7 @@ description: |
   "business_judgement": {
     "category": "招标公告 | 投标文件 | 合同文件 | 报名材料 | 其他",
     "extracted_fields": {
-      "project_name": "...",
+      "project_name": "合成项目字段008",
       "bid_deadline": "...",
       "amount": "..."
     },

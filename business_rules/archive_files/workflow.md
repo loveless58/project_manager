@@ -109,7 +109,7 @@ action = build_archive_action(
     run_id="run-001",
     source_file="/abs/path/file.pdf",
     project_name="...",
-    extracted={"document_type": "...", "fields": {"project_name": "..."}},
+    extracted={"document_type": "...", "fields": {"project_name": "合成项目字段008"}},
     ledger_result={"business_judgement": {}},
     project_files_dir="/abs/path/项目投标",  # 项目投标/项目弃标/项目丢标/项目执行 父目录
 )

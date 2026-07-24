@@ -33,14 +33,14 @@ class TestDataCleaningOcrProvider(unittest.TestCase):
                 "file_type": ".pdf",
                 "extract_method": "ocr",
                 "text_length": 28,
-                "extracted_text": "项目名称：封装OCR项目\n采购人：测试客户",
+                "extracted_text": "项目名称：合成项目011\n采购人：合成机构013有限公司",
                 "is_scanned": True,
                 "fields": {},
                 "ocr": {
                     "schema_version": "ocr.result.v1",
                     "status": "success",
                     "engine": "fake-provider",
-                    "text": "项目名称：封装OCR项目\n采购人：测试客户",
+                    "text": "项目名称：合成项目011\n采购人：合成机构013有限公司",
                     "pages": [],
                     "quality": {"needs_human_review": False},
                 },
@@ -55,7 +55,7 @@ class TestDataCleaningOcrProvider(unittest.TestCase):
             self.assertEqual(provider.call_args.kwargs["ocr_adapter"].__name__, "_default_ocr_adapter")
             self.assertEqual(extracted["status"], "success")
             self.assertEqual(extracted["ocr"]["engine"], "fake-provider")
-            self.assertEqual(extracted["fields"]["project_name"], "封装OCR项目")
+            self.assertEqual(extracted["fields"]["project_name"], "合成项目011")
             self.assertEqual(extracted["engine_candidates"][0]["engine"], "fake-provider")
 
     def test_explicit_ocr_adapter_remains_higher_priority_than_default_provider(self):
@@ -67,7 +67,7 @@ class TestDataCleaningOcrProvider(unittest.TestCase):
                 f.write(b"fake image bytes")
 
             def explicit_adapter(path):
-                return {"status": "success", "engine": "explicit", "text": "项目名称：显式OCR项目"}
+                return {"status": "success", "engine": "explicit", "text": "项目名称：合成项目012"}
 
             provider_result = {
                 "schema_version": "document.extract.v1",
@@ -77,14 +77,14 @@ class TestDataCleaningOcrProvider(unittest.TestCase):
                 "file_type": ".png",
                 "extract_method": "ocr",
                 "text_length": 14,
-                "extracted_text": "项目名称：显式OCR项目",
+                "extracted_text": "项目名称：合成项目012",
                 "is_scanned": True,
                 "fields": {},
                 "ocr": {
                     "schema_version": "ocr.result.v1",
                     "status": "success",
                     "engine": "explicit",
-                    "text": "项目名称：显式OCR项目",
+                    "text": "项目名称：合成项目012",
                     "pages": [],
                     "quality": {"needs_human_review": False},
                 },
@@ -150,7 +150,7 @@ class TestDataCleaningOcrProvider(unittest.TestCase):
                 "file_type": ".ofd",
                 "extract_method": "ofd_sidecar",
                 "text_length": 20,
-                "extracted_text": "项目名称：OFD发票项目\n采购人：测试客户",
+                "extracted_text": "项目名称：合成项目013\n采购人：合成机构013有限公司",
                 "is_scanned": False,
                 "fields": {},
                 "engine_candidates": [],
@@ -163,7 +163,7 @@ class TestDataCleaningOcrProvider(unittest.TestCase):
             self.assertEqual(provider.call_args.args[0], ofd_path)
             self.assertEqual(extracted["status"], "success")
             self.assertEqual(extracted["extract_method"], "ofd_sidecar")
-            self.assertEqual(extracted["fields"]["project_name"], "OFD发票项目")
+            self.assertEqual(extracted["fields"]["project_name"], "合成项目013")
 
     def test_payment_receipt_ocr_text_extracts_structured_payment_fields(self):
         from tools.data_cleaning_tools import DataCleaningTools
@@ -183,8 +183,8 @@ class TestDataCleaningOcrProvider(unittest.TestCase):
                 "text_length": 120,
                 "extracted_text": "\n".join([
                     "交易日期: 2026年06月26日",
-                    "付款人: 北京华胜天成科技股份有限公司",
-                    "收款人: 中经国际招标集团有限公司",
+                    "付款人: 合成机构003有限公司",
+                    "收款人: 合成机构011有限公司",
                     "交易金额 (小写): 800.00",
                     "交易摘要: CEITCL-BJ04-2606013-01标书费",
                 ]),
@@ -204,8 +204,8 @@ class TestDataCleaningOcrProvider(unittest.TestCase):
             with patch("ocr.provider_registry.extract_pdf_or_image", return_value=provider_result):
                 extracted = DataCleaningTools(workspace_dir=td).extract_document(image_path)
 
-            self.assertEqual(extracted["fields"]["payer"], "北京华胜天成科技股份有限公司")
-            self.assertEqual(extracted["fields"]["payee"], "中经国际招标集团有限公司")
+            self.assertEqual(extracted["fields"]["payer"], "合成机构003有限公司")
+            self.assertEqual(extracted["fields"]["payee"], "合成机构011有限公司")
             self.assertEqual(extracted["fields"]["payment_amount"], "800.00")
             self.assertEqual(extracted["fields"]["payment_date"], "2026年06月26日")
             self.assertEqual(extracted["fields"]["payment_summary"], "CEITCL-BJ04-2606013-01标书费")
@@ -254,10 +254,10 @@ class TestDataCleaningOcrProvider(unittest.TestCase):
                 "document_type": "招标公告",
                 "extract_method": "ocr",
                 "text_length": 18,
-                "extracted_text": "招标公告\n项目名称：OCR字段映射项目",
+                "extracted_text": "招标公告\n项目名称：合成项目014",
                 "is_scanned": True,
                 "fields": {
-                    "buyer": "测试客户",
+                    "buyer": "合成机构013有限公司",
                     "date": "2026-05-26",
                     "project_no": "ABC12345",
                     "amount": "800 元",
@@ -277,7 +277,7 @@ class TestDataCleaningOcrProvider(unittest.TestCase):
                 extracted = DataCleaningTools(workspace_dir=td).extract_document(image_path)
 
             self.assertEqual(extracted["document_type"], "招标公告")
-            self.assertEqual(extracted["fields"]["customer"], "测试客户")
+            self.assertEqual(extracted["fields"]["customer"], "合成机构013有限公司")
             self.assertEqual(extracted["fields"]["bid_deadline"], "2026-05-26")
             self.assertEqual(extracted["fields"]["deadline"], "2026-05-26")
             self.assertEqual(extracted["fields"]["bid_code"], "ABC12345")

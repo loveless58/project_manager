@@ -38,8 +38,8 @@ class TestRapidOcrProvider(unittest.TestCase):
         # box 是 4 角点 [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
         fake_engine = lambda path: (
             [
-                [[[0, 0], [1, 0], [1, 1], [0, 1]], "项目名称：RapidOCR封装项目", 0.93],
-                [[[0, 2], [1, 2], [1, 3], [0, 3]], "采购人：测试客户", 0.81],
+                [[[0, 0], [1, 0], [1, 1], [0, 1]], "项目名称：合成项目028", 0.93],
+                [[[0, 2], [1, 2], [1, 3], [0, 3]], "采购人：合成机构013有限公司", 0.81],
             ],
             [0.05, 0.10, 0.20],  # elapse 三段耗时
         )
@@ -56,7 +56,7 @@ class TestRapidOcrProvider(unittest.TestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["engine"], "rapidocr")
-        self.assertIn("RapidOCR封装项目", result["text"])
+        self.assertIn("合成项目028", result["text"])
         self.assertIn("采购人", result["text"])
         # 置信度应该被记录下来
         mean_conf = result["pages"][0]["confidence"]
@@ -68,7 +68,7 @@ class TestRapidOcrProvider(unittest.TestCase):
 
         fake_engine = lambda path: (
             [
-                [[[0, 0], [1, 0], [1, 1], [0, 1]], "收款人：中经国际招标集团有限公司", 0.33],
+                [[[0, 0], [1, 0], [1, 1], [0, 1]], "收款人：合成机构011有限公司", 0.33],
             ],
             [0.05, 0.10, 0.20],
         )
@@ -100,7 +100,7 @@ class TestRapidOcrProvider(unittest.TestCase):
         def make_engine():
             engine_count["count"] += 1
             return lambda path: (
-                [[[[0, 0], [1, 0], [1, 1], [0, 1]], "项目名称：缓存验证项目", 0.9]],
+                [[[[0, 0], [1, 0], [1, 1], [0, 1]], "项目名称：合成项目024", 0.9]],
                 [0.05, 0.10, 0.20],
             )
 
@@ -144,7 +144,7 @@ class TestRapidOcrProvider(unittest.TestCase):
 
         fake_engine = lambda path: (
             [[[[0, 0], [1, 0], [1, 1], [0, 1]],
-               f"PDF扫描项目-{os.path.basename(path)}", 0.91]],
+               f"合成项目PDF扫描-{os.path.basename(path)}", 0.91]],
             [0.05, 0.10, 0.20],
         )
         fake_rapidocr = types.SimpleNamespace(RapidOCR=lambda: fake_engine)
@@ -163,7 +163,7 @@ class TestRapidOcrProvider(unittest.TestCase):
         self.assertEqual(len(result["pages"]), 2)
         self.assertEqual(len(seen_paths), 2)
         self.assertTrue(all(path.endswith(".png") for path in seen_paths))
-        self.assertIn("PDF扫描项目", result["text"])
+        self.assertIn("合成项目PDF扫描", result["text"])
 
     def test_rapidocr_provider_returns_blocked_when_pdf_renderer_missing(self):
         from ocr.providers.rapidocr_provider import RapidOcrProvider

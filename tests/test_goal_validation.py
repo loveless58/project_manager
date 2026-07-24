@@ -22,8 +22,8 @@ class TestGoalValidation(unittest.TestCase):
                 return {
                     "status": "success",
                     "engine": "fake-low-quality",
-                    "text": "项目名称：低置信扫描项目",
-                    "pages": [{"page": 1, "text": "项目名称：低置信扫描项目", "confidence": 0.52}],
+                    "text": "项目名称：合成项目018",
+                    "pages": [{"page": 1, "text": "项目名称：合成项目018", "confidence": 0.52}],
                 }
 
             extracted = DataCleaningTools(workspace_dir=td, ocr_adapter=low_quality_ocr).extract_document(image_path)
@@ -122,7 +122,7 @@ class TestGoalValidation(unittest.TestCase):
             with open(pdf_path, "wb") as f:
                 f.write(b"%PDF-1.4\n% scanned fixture placeholder\n")
             with open(f"{pdf_path}.ocr.txt", "w", encoding="utf-8") as f:
-                f.write("项目名称：旧入口OCR项目\n采购人：测试客户\n销售负责人：张三")
+                f.write("项目名称：合成项目019\n采购人：合成机构013有限公司\n销售负责人：虚构丙")
 
             result = DataCleaningTools(workspace_dir=td).process_documents_to_ledger([pdf_path])
 
@@ -145,7 +145,7 @@ class TestGoalValidation(unittest.TestCase):
             self.assertEqual({case["case"] for case in report["cases"]}, {
                 "normal_simulation",
                 "failure_simulation",
-                "real_case_simulation",
+                "synthetic_case_simulation",
             })
             self.assertTrue(os.path.exists(report["report_path"]))
             self.assertTrue(os.path.exists(report["summary_path"]))

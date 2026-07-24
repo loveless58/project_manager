@@ -321,3 +321,135 @@ def test_tracked_business_examples_contain_no_unsanitized_content(relative_path)
         finding["id"] == "REPO-REAL-BUSINESS-CONTENT"
         for finding in report.findings
     )
+
+
+@pytest.mark.parametrize("separator", [": ", " = ", "="])
+def test_repository_hygiene_rejects_unquoted_prefixed_credentials(
+    tmp_path, separator
+):
+    credential_name = "PROJECT_MANAGER_" + "ACCESS_TOKEN"
+    content = credential_name + separator + "production-value-0123456789"
+
+    errors, warnings, findings = _scan(tmp_path, "config/provider.env", content)
+
+    assert errors == 1
+    assert warnings == 0
+    assert findings[0]["id"] == "REPO-HARDCODED-CREDENTIAL"
+
+
+@pytest.mark.parametrize(
+    "placeholder",
+    ["${PROVIDER_TOKEN}", "{{ provider_token }}", "env:PROVIDER_TOKEN"],
+)
+def test_repository_hygiene_allows_unquoted_credential_placeholders(
+    tmp_path, placeholder
+):
+    credential_name = "PROJECT_MANAGER_" + "ACCESS_TOKEN"
+    content = credential_name + "=" + placeholder
+
+    errors, warnings, findings = _scan(tmp_path, "config/provider.env", content)
+
+    assert (errors, warnings, findings) == (0, 0, [])
+
+
+def test_repository_hygiene_rejects_local_business_json_without_name_hint(tmp_path):
+    payload = json.dumps(
+        {
+            "fixture_kind": "local_" + "business",
+            "samples": [
+                {
+                    "source_file": "CustomerAlpha/contract.docx",
+                    "expected_category": "contract",
+                }
+            ],
+        }
+    )
+
+    errors, warnings, findings = _scan(
+        tmp_path,
+        "tests/fixtures/import_manifest.json",
+        payload,
+    )
+
+    assert errors == 1
+    assert warnings == 0
+    assert findings[0]["id"] == "REPO-REAL-" + "SAMPLE-MANIFEST"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "签约主体：" + "示例科技有限" + "公司",
+        "采购人：" + "示例科技" + "公司",
+        "销售负责人：" + "Person " + "Omega",
+        "项目名称：" + "Commercial " + "Upgrade",
+        "合同编号：" + "ABC" + "-2026-0001",
+        'subject_name = "' + "Commercial Delivery" + '"',
+    ],
+)
+def test_repository_hygiene_rejects_single_explicit_business_value(
+    tmp_path, content
+):
+    errors, warnings, findings = _scan(
+        tmp_path,
+        "tests/business_fragment.txt",
+        content,
+    )
+
+    assert errors == 1
+    assert warnings == 0
+    assert findings[0]["id"] == "REPO-REAL-BUSINESS-CONTENT"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "签约主体：合成科技有限公司",
+        "销售负责人：虚构人员甲",
+        "项目名称：合成项目Alpha",
+        "合同编号：SYN-CONTRACT-001",
+        "项目名称：{project_name}",
+        "project_name = record.project_name",
+        "project_name = payload['project_name']",
+        'project_name = "..."',
+        "客户：{record.get('customer_name')}",
+        "f\"- 客户: {record.get('basic_info', {}).get('客户', 'N/A')}\"",
+        'subject_name = "project_manager"',
+        "开户银行：合成银行",
+        r"前缀\n开户银行：合成银行",
+    ],
+)
+def test_repository_hygiene_allows_single_synthetic_business_value(
+    tmp_path, content
+):
+    errors, warnings, findings = _scan(
+        tmp_path,
+        "tests/business_fragment.txt",
+        content,
+    )
+
+    assert (errors, warnings, findings) == (0, 0, [])
+
+
+def test_repository_hygiene_rejects_declared_production_provenance(tmp_path):
+    content = "数据来源：" + "真实" + "样本"
+
+    errors, warnings, findings = _scan(
+        tmp_path,
+        "contracts/data_provenance.md",
+        content,
+    )
+
+    assert errors == 1
+    assert warnings == 0
+    assert findings[0]["id"] == "REPO-REAL-BUSINESS-CONTENT"
+
+
+def test_repository_hygiene_allows_declared_synthetic_provenance(tmp_path):
+    errors, warnings, findings = _scan(
+        tmp_path,
+        "contracts/data_provenance.md",
+        "数据来源：合成样本",
+    )
+
+    assert (errors, warnings, findings) == (0, 0, [])

@@ -51,11 +51,11 @@ def test_reviewer_detects_value_not_in_text():
         "file": "/tmp/test.pdf",
         "filename": "test.pdf",
         "document_type": "投标文件",
-        "extracted_text": "项目名称：测试\n客户：某公司\n截止日期：2026-09-30",  # 无 budget 信息
+        "extracted_text": "项目名称：合成项目004\n客户：合成机构008有限公司\n截止日期：2026-09-30",  # 无 budget 信息
         "fields": {
-            "project_name": "测试",
+            "project_name": "合成项目004",
             "budget": "999",  # 原文中找不到
-            "customer": "某公司",
+            "customer": "合成机构008有限公司",
             "deadline": "2026-09-30",
         },
         "ocr": {"pages": [{"confidence": 0.95}]},
@@ -76,10 +76,10 @@ def test_reviewer_detects_classification_mismatch():
     reviewer = ReviewerAgent(workspace_dir="/tmp")
     items = [{
         "file": "/tmp/test.pdf",
-        "filename": "某项目投标书.pdf",  # 文件名暗示投标文件
+        "filename": "合成项目003投标书.pdf",  # 文件名暗示投标文件
         "document_type": "合同",  # 但分类为合同
         "extracted_text": "内容",
-        "fields": {"project_name": "测试"},
+        "fields": {"project_name": "合成项目004"},
         "ocr": {"pages": [{"confidence": 0.95}]},
     }]
     report = reviewer.review(extracted_items=items, archive_actions=[], ledger_results=[])
@@ -100,7 +100,7 @@ def test_reviewer_detects_archive_path_missing_project_name():
         "source_file": "/tmp/test.pdf",
         "target_path": "/some/random/path/test.pdf",  # 不含项目名
         "document_type": "投标文件",
-        "project_name": "测试项目",
+        "project_name": "合成项目002",
     }]
     report = reviewer.review(extracted_items=items, archive_actions=actions, ledger_results=[])
 
@@ -119,20 +119,20 @@ def test_reviewer_clean_input_produces_minimal_findings():
         "file": "/tmp/clean.pdf",
         "filename": "clean_bid.pdf",
         "document_type": "投标文件",
-        "extracted_text": "项目：某项目 预算：100万 客户：某公司 截止：2026年9月30日",
+        "extracted_text": "项目：合成项目003 预算：100万 客户：合成机构009有限公司",
         "fields": {
-            "project_name": "某项目",
+            "project_name": "合成项目003",
             "budget": "100",
-            "customer": "某公司",
+            "customer": "合成机构008有限公司",
             "deadline": "2026年9月30日",
         },
         "ocr": {"pages": [{"confidence": 0.95}]},
     }]
     actions = [{
         "source_file": "/tmp/clean.pdf",
-        "target_path": "/项目文件/某项目/投标/clean_bid.pdf",
+        "target_path": "/项目文件/合成项目003/投标/clean_bid.pdf",
         "document_type": "投标文件",
-        "project_name": "某项目",
+        "project_name": "合成项目003",
     }]
     report = reviewer.review(extracted_items=items, archive_actions=actions, ledger_results=[])
 

@@ -42,8 +42,8 @@ N files → 1 ArchiveManifest (archive_manifest.v1)
   "schema_version": "archive_action.v1",
   "run_id": "run-2026-07-17-001",
   "status": "ready | needs_review | already_archived",
-  "source_file": "/abs/path/to/file.pdf",
-  "project_name": "...",
+  "source_file": "synthetic/source-013.docx",
+  "project_name": "合成项目字段008",
   "document_type": "...",
   "proposed_name": "...",
   "target_dir": "/abs/path/项目投标/<project>/原始文件",
@@ -178,7 +178,7 @@ SKILL.md 描述契约 + 工作流;具体实现在 `scripts/`:
 - **[../../../business_rules/archive_files/workflow.md](../../../business_rules/archive_files/workflow.md)** — 5 阶段工作流详细步骤
 - **[../../../business_rules/archive_files/three-layer-fallback.md](../../../business_rules/archive_files/three-layer-fallback.md)** — kb → hard → llm 数据驱动原理详解
 - **[../../../business_rules/archive_files/knowledge-base-pattern.md](../../../business_rules/archive_files/knowledge-base-pattern.md)** — 从历史归档反向抽取到知识库的流程
-- **[../../../business_rules/archive_files/examples/01-bid-contract.md](../../../business_rules/archive_files/examples/01-bid-contract.md)** — 真实案例:投标合同归档
+- **[../../../business_rules/archive_files/examples/01-bid-contract.md](../../../business_rules/archive_files/examples/01-bid-contract.md)** — 合成案例:投标合同归档
 - **[../../../business_rules/archive_files/examples/02-internal-pm-doc.md](../../../business_rules/archive_files/examples/02-internal-pm-doc.md)** — PM 内部文档(待 redesign)
 - **[../../../business_rules/archive_files/examples/03-source-missing.md](../../../business_rules/archive_files/examples/03-source-missing.md)** — 文件缺失场景
 - **[docs/ocr-baseline.md](../../docs/ocr-baseline.md)** — OCR 引擎优先级链 + Vision vs RapidOCR 对比基线 (v0.4.0, 2026-07-23)

@@ -13,7 +13,7 @@
 extracted = {
     "document_type": "项目治理文档",
     "extracted_text": "...Project Manager OCR Provider 设计方案...",
-    "fields": {"project_name": "project_manager"},
+    "fields": {"project_name": "合成项目字段004"},
 }
 ```
 
@@ -23,7 +23,7 @@ extracted = {
 action = build_archive_action(
     run_id="run-2026-07-17-002",
     source_file="${BUSINESS_ROOT}/PRD-project-manager-ocr.md",
-    project_name="project_manager",
+    project_name="合成项目字段004",
     extracted=extracted,
     ledger_result={"business_judgement": {}},
     project_files_dir="${BUSINESS_ROOT}/项目文件/项目投标",
@@ -45,8 +45,8 @@ action = build_archive_action(
   "schema_version": "archive_action.v1",
   "run_id": "run-2026-07-17-002",
   "status": "needs_review",
-  "source_file": "${BUSINESS_ROOT}/PRD-project-manager-ocr.md",
-  "project_name": "project_manager",
+  "source_file": "synthetic/SYN-SOURCE-005.docx",
+  "project_name": "合成项目字段004",
   "document_type": "项目治理文档",
   "proposed_name": "",
   "target_dir": null,

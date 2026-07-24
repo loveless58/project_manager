@@ -20,7 +20,7 @@ from contracts.parsers import (
 # =========================================================================
 
 class TestParseAmount:
-    """parse_amount 测试 — 覆盖 28 项目中的 8 种 amount 格式。"""
+    """parse_amount 测试 — 覆盖 合成样本中的 8 种 amount 格式。"""
 
     def test_wan_unit(self):
         """'100万元' / '126万元' / '500万元' — 中文万单位。"""
@@ -74,22 +74,22 @@ class TestParseAmount:
 # =========================================================================
 
 class TestParseSalesPerson:
-    """parse_sales_person 测试 — 覆盖 28 项目中的 6 种 sales_person 写法。"""
+    """parse_sales_person 测试 — 覆盖 合成样本中的 6 种 sales_person 写法。"""
 
     def test_single_name(self):
-        """'邹迅' / '陈丞' / '高应山' — 单人姓名。"""
-        assert parse_sales_person("邹迅") == ["邹迅"]
-        assert parse_sales_person("陈丞") == ["陈丞"]
-        assert parse_sales_person("高应山") == ["高应山"]
+        """'虚构甲' / '虚构乙' / '虚构丁' — 单人姓名。"""
+        assert parse_sales_person("虚构甲") == ["虚构甲"]
+        assert parse_sales_person("虚构乙") == ["虚构乙"]
+        assert parse_sales_person("虚构丁") == ["虚构丁"]
 
     def test_two_persons_with_roles(self):
-        """'赵月伟（联系人） / 田晓光（销售总监）' — 双人带职级。"""
-        result = parse_sales_person("赵月伟（联系人） / 田晓光（销售总监）")
-        assert result == ["赵月伟", "田晓光"]
+        """'虚构戊（联系人） / 虚构己（销售总监）' — 双人带职级。"""
+        result = parse_sales_person("虚构戊（联系人） / 虚构己（销售总监）")
+        assert result == ["虚构戊", "虚构己"]
 
     def test_two_persons_without_roles(self):
-        """'张三 / 李四' — 双人无职级（边界）。"""
-        assert parse_sales_person("张三 / 李四") == ["张三", "李四"]
+        """'虚构丙 / 虚构庚' — 双人无职级（边界）。"""
+        assert parse_sales_person("虚构丙 / 虚构庚") == ["虚构丙", "虚构庚"]
 
     def test_dash_placeholder(self):
         """'—' — 占位符。"""
@@ -178,12 +178,12 @@ class TestExtractDeadlines:
 
     def test_no_deadlines(self):
         """没有 deadline 字段的文本。"""
-        text = "# 项目记录\n## 基本信息\n- 项目名称：xxx\n"
+        text = "# 项目记录\n## 基本信息\n- 项目名称：合成项目006\n"
         result = extract_deadlines(text)
         assert all(v is None for v in result.values())
 
-    def test_real_sample_gpu_server(self):
-        """真实样本：GPU 服务器项目记录.md（节选）。"""
+    def test_synthetic_sample_gpu_server(self):
+        """合成样本：GPU 服务器项目记录.md（节选）。"""
         text = """## 时间节点
 - **招标文件获取**：2026-05-13 20:00 ~ 2026-05-22 16:00
 - **投标截止/开标**：2026-05-26 09:30
@@ -221,16 +221,16 @@ class TestOCRAliases:
         assert resolve_ocr_field("project_no", "招标公告") == "bid_code"
         assert resolve_ocr_field("project_no", "标书费回单") == "business_reference_no"
 
-    def test_real_sample_intermediary_agreement(self):
-        """真实样本：居间协议 extracted_fields 全部映射。"""
+    def test_synthetic_sample_intermediary_agreement(self):
+        """合成样本：居间协议 extracted_fields 全部映射。"""
         from contracts.ocr_aliases import resolve_ocr_field
 
         # 居间协议的实际 extracted_fields
         ocr_fields = {
-            "buyer": "北京华胜天成科技股份有限公司",
-            "seller": "北京睿嘉顺达科技有限公司",
+            "buyer": "合成机构003有限公司",
+            "seller": "合成机构010有限公司",
             "date": "2026年6月15日",
-            "project_no": "ZYCG20260609287",
+            "project_no": "SYN-PROJECT-004",
             "service_rate": "8%",
             "penalty_rate": "20%",
         }
@@ -242,18 +242,18 @@ class TestOCRAliases:
         assert resolve_ocr_field("project_no", "居间协议") == "bid_code"
 
         # 业务含义：实际 customer 字段填 buyer（甲方）
-        assert ocr_fields["buyer"] == "北京华胜天成科技股份有限公司"
+        assert ocr_fields["buyer"] == "合成机构003有限公司"
 
-    def test_real_sample_bid_fee_receipt(self):
-        """真实样本：标书费回单 extracted_fields 全部映射。"""
+    def test_synthetic_sample_bid_fee_receipt(self):
+        """合成样本：标书费回单 extracted_fields 全部映射。"""
         from contracts.ocr_aliases import resolve_ocr_field
 
         ocr_fields = {
-            "buyer": "北京华胜天成科技股份有限公司",
-            "seller": "中经国际招标集团有限公司",
+            "buyer": "合成机构003有限公司",
+            "seller": "合成机构011有限公司",
             "date": "2026年06月26日",
             "amount": 800.0,
-            "project_no": "25S037GN000005103460",
+            "project_no": "SYN-BUSINESS-REFERENCE-001",
             "payment_purpose": "CEITCL-BT04-2606017-01标书费（标段一",
         }
 
@@ -264,7 +264,7 @@ class TestOCRAliases:
         assert resolve_ocr_field("project_no", "标书费回单") == "business_reference_no"
 
         # 业务含义：凭证类的 customer 是付款人
-        assert ocr_fields["buyer"] == "北京华胜天成科技股份有限公司"
+        assert ocr_fields["buyer"] == "合成机构003有限公司"
         assert ocr_fields["amount"] == 800.0
 
     def test_unknown_field_passthrough(self):

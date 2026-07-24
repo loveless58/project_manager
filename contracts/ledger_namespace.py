@@ -1,10 +1,13 @@
 """Ledger Namespace — 账本字段契约。
 
-数据来源：由部署方配置的真实样本根目录下的 项目文件/index.json（28 个项目真实样本）。
+repo-hygiene: data=synthetic
+本模块中的覆盖率、数量、金额与编号仅为不可关联的合成契约示例。
+
+数据来源：由部署方配置的合成样本根目录下的 项目文件/index.json（28 个项目合成样本）。
 设计原则：数据驱动（不是凭空设计），反映真实业务用法。
 
 历史：
-- 2026-07-08 创建。从 28 个项目样本反向抽取字段命名约定。
+- 2026-07-08 创建。从 合成项目样本反向抽取字段命名约定。
 - 之前 contracts/fields.py 用 4 字段硬必填（project_name/budget/customer/deadline）
   和真实业务脱节：customer 实际只 32% 填，bid_deadline 0% 填。
 - 本模块不强制必填规则——只声明字段命名空间 + 填充率 + 来源。
@@ -61,7 +64,7 @@ LEDGER_FIELDS = {
         "fill_rate": "中",
         "fill_rate_pct": 36,
         "source": "index.json crm_id / 项目记录.md 基本信息",
-        "note": "格式 'C000028186' 或 '待录入'。CRM 流转前常空。",
+        "note": "格式 'SYN-PROJECT-001' 或 '待录入'。CRM 流转前常空。",
     },
     "customer": {
         "zh": "招标人/客户",
@@ -190,12 +193,12 @@ LEDGER_FIELDS = {
 
 FIELD_ALIASES = {
     "sales_person": {
-        "邹迅": "邹迅",
-        "陈丞": "陈丞",
-        "高应山": "高应山",
+        "虚构甲": "虚构甲",
+        "虚构乙": "虚构乙",
+        "虚构丁": "虚构丁",
         "—": None,  # 空值
         "待确认": None,  # 占位
-        "赵月伟（联系人） / 田晓光（销售总监）": "赵月伟;田晓光",  # 双人拆分
+        "虚构戊（联系人） / 虚构己（销售总监）": "虚构戊;虚构己",  # 双人拆分
     },
     # 注：完整别名表由 contracts/parsers.py 处理（parsers.py 用正则做）
 }

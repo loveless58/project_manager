@@ -19,7 +19,7 @@ class ReviewQueueContractTests(unittest.TestCase):
                 {
                     "type": "archive_action_review",
                     "severity": "medium",
-                    "project_name": "测试项目",
+                    "project_name": "合成项目002",
                     "source_file": "a.docx",
                     "target_path": "归档/a.docx",
                     "blockers": ["human_review_recommended"],
@@ -45,7 +45,7 @@ class ReviewQueueContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             source = os.path.join(td, "采购公告.md")
             with open(source, "w", encoding="utf-8") as f:
-                f.write("项目名称：标准化复核项目\n招标人：测试客户\n投标截止：2026-05-26\n")
+                f.write("项目名称：合成项目029\n招标人：合成机构013有限公司\n投标截止：2026-05-26\n")
 
             tools = DataCleaningTools(workspace_dir=td)
             with patch.object(tools, "_use_archive_metadata_passthrough", return_value=True):

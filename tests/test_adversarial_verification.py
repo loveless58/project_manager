@@ -25,7 +25,7 @@ class AdversarialVerificationTests(unittest.TestCase):
                         "file": os.path.join(td, "scan.png"),
                         "filename": "scan.png",
                         "document_type": "招标公告",
-                        "fields": {"project_name": "低置信项目"},
+                        "fields": {"project_name": "合成项目008"},
                         "ocr": {"pages": [{"confidence": OCR_CONFIDENCE_THRESHOLD - 0.1}]},
                     }
                 ],
@@ -52,8 +52,8 @@ class AdversarialVerificationTests(unittest.TestCase):
                         "file": os.path.join(td, "notice.pdf"),
                         "filename": "采购公告.pdf",
                         "document_type": "采购公告",
-                        "extracted_text": "项目名称：测试项目",
-                        "fields": {"project_name": "测试项目"},
+                        "extracted_text": "项目名称：合成项目002",
+                        "fields": {"project_name": "合成项目002"},
                     }
                 ],
                 ledger_results=[],
@@ -85,8 +85,8 @@ class AdversarialVerificationTests(unittest.TestCase):
                         "filename": "合同.docx",
                         "document_type": "合同",
                         "fields": {
-                            "project_name": "华胜合同项目",
-                            "customer": "测试客户有限公司",
+                            "project_name": "合成项目007",
+                            "customer": "合成机构012有限公司",
                             "contract_status": "已签约",
                         },
                     }
@@ -95,7 +95,7 @@ class AdversarialVerificationTests(unittest.TestCase):
                 archive_actions=[
                     {
                         "source_file": os.path.join(td, "contract.docx"),
-                        "project_name": "华胜合同项目",
+                        "project_name": "合成项目007",
                         "document_type": "合同",
                         "target_path": os.path.join(td, "项目执行", "原始文件", "合同.docx"),
                     }
@@ -123,8 +123,8 @@ class AdversarialVerificationTests(unittest.TestCase):
             source = os.path.join(td, "采购公告.md")
             with open(source, "w", encoding="utf-8") as f:
                 f.write("\n".join([
-                    "项目名称：验证工具项目",
-                    "招标人：测试客户有限公司",
+                    "项目名称：合成项目009",
+                    "招标人：合成机构012有限公司",
                     "投标截止：2026-05-26",
                 ]))
 

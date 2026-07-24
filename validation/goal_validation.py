@@ -23,7 +23,7 @@ def run_goal_validation(workspace_dir: str) -> Dict[str, Any]:
     cases = [
         _run_normal_simulation(cases_root),
         _run_failure_simulation(cases_root),
-        _run_real_case_simulation(cases_root),
+        _run_synthetic_case_simulation(cases_root),
     ]
     module_scores = _score_modules(cases)
     below_threshold = {
@@ -63,10 +63,10 @@ def _run_normal_simulation(cases_root: str) -> Dict[str, Any]:
     os.makedirs(case_dir, exist_ok=True)
     source_path = os.path.join(case_dir, "采购公告.docx")
     _write_docx(source_path, [
-        "航天时代飞鸿技术有限公司",
+        "合成机构022有限公司",
         "《采购公告》",
-        "项目名称：打印刻录系统采购项目",
-        "采购人：测试客户",
+        "项目名称：合成项目030",
+        "采购人：合成机构013有限公司",
         "报名截止时间：2026-07-10",
         "开标时间：2026-07-12",
     ])
@@ -87,27 +87,27 @@ def _run_failure_simulation(cases_root: str) -> Dict[str, Any]:
     return _case_report("failure_simulation", "failed", result)
 
 
-def _run_real_case_simulation(cases_root: str) -> Dict[str, Any]:
-    case_dir = os.path.join(cases_root, "real_case_simulation")
+def _run_synthetic_case_simulation(cases_root: str) -> Dict[str, Any]:
+    case_dir = os.path.join(cases_root, "synthetic_case_simulation")
     os.makedirs(case_dir, exist_ok=True)
-    docx_path = os.path.join(case_dir, "真实案例-采购公告.docx")
-    scanned_pdf = os.path.join(case_dir, "真实案例-扫描补充.pdf")
+    docx_path = os.path.join(case_dir, "合成案例-采购公告.docx")
+    scanned_pdf = os.path.join(case_dir, "合成案例-扫描补充.pdf")
     _write_docx(docx_path, [
-        "项目名称：工业互联网网络基础条件项目",
-        "采购人：某工业互联网公司",
-        "项目详情：服务器区防火墙系统升级采购",
+        "项目名称：合成项目020",
+        "采购人：合成机构012有限公司",
+        "项目详情：合成项目021",
         "中标结果：已中标",
         "合同状态：未签约",
-        "销售负责人：张三",
+        "销售负责人：虚构丙",
     ])
     with open(scanned_pdf, "wb") as f:
         f.write(b"%PDF-1.4\n% scanned validation fixture\n")
     with open(f"{scanned_pdf}.ocr.txt", "w", encoding="utf-8") as f:
-        f.write("项目名称：工业互联网网络基础条件项目\n采购人：某工业互联网公司\n补充说明：扫描件OCR旁路文本")
+        f.write("项目名称：合成项目020\n采购人：合成机构012有限公司\n补充说明：扫描件OCR旁路文本")
 
     tools = DataCleaningTools(workspace_dir=os.path.join(case_dir, "workspace"))
     result = tools.prepare_file_organization_run([docx_path, scanned_pdf])
-    return _case_report("real_case_simulation", "success", result)
+    return _case_report("synthetic_case_simulation", "success", result)
 
 
 def _case_report(case_name: str, expected_status: str, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -181,46 +181,46 @@ def _case_report(case_name: str, expected_status: str, result: Dict[str, Any]) -
 
 
 def _score_modules(cases: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    normal_or_real = [case for case in cases if case["expected_status"] == "success"]
+    normal_or_synthetic = [case for case in cases if case["expected_status"] == "success"]
     failure = [case for case in cases if case["expected_status"] == "failed"]
 
     checks = {
         "file_organization_run_package": [
             ("all cases write run package artifacts", all(case["module_evidence"]["file_organization"]["has_run_package"] for case in cases)),
-            ("success cases process at least one file", all(case["result"].get("processed", 0) >= 1 for case in normal_or_real)),
+            ("success cases process at least one file", all(case["result"].get("processed", 0) >= 1 for case in normal_or_synthetic)),
             ("failure case preserves failure evidence", all(case["result"].get("failed", 0) >= 1 for case in failure)),
         ],
         "project_overview_ledger": [
-            ("success cases write ledger artifacts", all(case["module_evidence"]["project_ledger"]["has_ledger_artifacts"] for case in normal_or_real)),
-            ("success cases write decision logs", all(case["module_evidence"]["project_ledger"]["has_decision_log"] for case in normal_or_real)),
-            ("success cases persist evidence index", all(case["module_evidence"]["project_ledger"]["has_evidence_index"] for case in normal_or_real)),
-            ("success cases persist business judgement", all(case["module_evidence"]["project_ledger"]["has_persisted_business_judgement"] for case in normal_or_real)),
+            ("success cases write ledger artifacts", all(case["module_evidence"]["project_ledger"]["has_ledger_artifacts"] for case in normal_or_synthetic)),
+            ("success cases write decision logs", all(case["module_evidence"]["project_ledger"]["has_decision_log"] for case in normal_or_synthetic)),
+            ("success cases persist evidence index", all(case["module_evidence"]["project_ledger"]["has_evidence_index"] for case in normal_or_synthetic)),
+            ("success cases persist business judgement", all(case["module_evidence"]["project_ledger"]["has_persisted_business_judgement"] for case in normal_or_synthetic)),
             ("failure case does not fabricate ledger success", all(not case["module_evidence"]["project_ledger"]["has_ledger_artifacts"] for case in failure)),
         ],
         "business_rule_judgement": [
-            ("success cases include business judgement", all(case["module_evidence"]["business_rules"]["has_business_judgement"] for case in normal_or_real)),
+            ("success cases include business judgement", all(case["module_evidence"]["business_rules"]["has_business_judgement"] for case in normal_or_synthetic)),
             ("at least one validation case reaches non-unknown business stage", any(
                 _has_non_unknown_stage(case["module_evidence"]["business_rules"]["business_judgements"])
-                for case in normal_or_real
+                for case in normal_or_synthetic
             )),
-            ("real case reaches won_pending_contract stage", any(
-                case["case"] == "real_case_simulation"
+            ("synthetic case reaches won_pending_contract stage", any(
+                case["case"] == "synthetic_case_simulation"
                 and _has_stage(case["module_evidence"]["business_rules"]["business_judgements"], "won_pending_contract")
-                for case in normal_or_real
+                for case in normal_or_synthetic
             )),
             ("non-unknown business judgements include next actions", all(
                 _non_unknown_stages_have_next_actions(case["module_evidence"]["business_rules"]["business_judgements"])
-                for case in normal_or_real
+                for case in normal_or_synthetic
             )),
             ("business judgement has next action or stage", all(
                 _has_rule_content(case["module_evidence"]["business_rules"]["business_judgements"])
-                for case in normal_or_real
+                for case in normal_or_synthetic
             )),
         ],
         "image_scanned_document_processing": [
             ("OCR is exposed as explicit data-cleaning tool", _has_registered_ocr_tool()),
             ("scanned/image without OCR is blocked", any(case["module_evidence"]["scanned_document_processing"]["blocked_without_ocr"] for case in failure)),
-            ("scanned PDF sidecar OCR succeeds", any(case["module_evidence"]["scanned_document_processing"]["has_successful_ocr"] for case in normal_or_real)),
+            ("scanned PDF sidecar OCR succeeds", any(case["module_evidence"]["scanned_document_processing"]["has_successful_ocr"] for case in normal_or_synthetic)),
         ],
     }
 

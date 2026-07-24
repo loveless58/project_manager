@@ -46,8 +46,10 @@ _CREDENTIAL_DSN = re.compile(
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?:[\"'])?\b(?:[A-Za-z][A-Za-z0-9_-]*[_-])?"
     r"(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|passwd)\b"
-    r"(?:[\"'])?\s*[:=]\s*(?:[rubf]{0,2})?[\"'](?P<secret>[^\"'\r\n]{8,})[\"']",
-    re.IGNORECASE,
+    r"(?:[\"'])?\s*[:=]\s*(?:[rubf]{0,2})?"
+    r"(?:[\"'](?P<quoted>[^\"'\r\n]{8,})[\"']|"
+    r"(?P<bare>[^\s#;,()]{8,})(?=\s*(?:#.*)?$))",
+    re.IGNORECASE | re.MULTILINE,
 )
 _BEARER_CREDENTIAL = re.compile(
     r"\bAuthorization\s*:\s*Bearer\s+(?P<secret>[A-Za-z0-9._~-]{16,})",
@@ -79,16 +81,46 @@ _SAMPLE_DOCUMENT_ENTRY = re.compile(
     re.IGNORECASE,
 )
 _STRUCTURED_BUSINESS_VALUE = re.compile(
-    r"(?:[\"'](?P<field>customer_name|client_name|project_name|project_id|"
+    r"(?:[\"'](?P<field>customer_name|client_name|project_name|subject_name|project_id|"
     r"project_number|sales_owner|contact_name|invoice_number|invoice_id|"
     r"ticket_number|ticket_id|source_file|source_path)[\"']\s*[:=]\s*"
     r"[\"'](?P<quoted>[^\"'\r\n]{2,})[\"'])"
     r"|(?:"
     r"(?P<label>客户(?:名称)?|项目(?:名称|编号|记录)|销售负责人|联系人|"
     r"发票(?:号码|号)|票号|来源文件|文件名)\s*[：:]\s*"
-    r"(?P<label_value>(?:(?!\\n)[^\r\n|,，;；\"']){2,})"
+    r"(?P<label_value>\{[^{}\r\n]+\}|"
+    r"(?:(?!\\n)[^\r\n|,，;；\"']){2,})"
     r")",
     re.IGNORECASE,
+)
+_UNQUOTED_STRUCTURED_BUSINESS_VALUE = re.compile(
+    r"\b(?P<field>customer_name|client_name|buyer|seller|project_name|subject_name|"
+    r"project_id|project_number|sales_owner|contact_name|invoice_number|"
+    r"invoice_id|ticket_number|ticket_id|contract_number|contract_id)\b"
+    r"\s*[:=]\s*(?P<value>[^\r\n,，;；#}\]]{2,80})",
+    re.IGNORECASE,
+)
+_ORGANIZATION_BUSINESS_VALUE = re.compile(
+    r"(?<!\\)[\u4e00-\u9fffA-Za-z0-9（）()·]{2,40}"
+    r"(?:股份有限" + r"公司|有限责任" + r"公司|有限" + r"公司|公司|"
+    r"集团|银行|研究院|大学)"
+)
+_LABELED_BUSINESS_IDENTIFIER = re.compile(
+    r"(?:合同编号|发票(?:号码|号)|票号|订单号|统一社会信用代码|"
+    r"invoice_(?:number|id)|ticket_(?:number|id)|contract_(?:number|id))"
+    r"\s*[：:=]\s*[\"']?(?P<value>[A-Za-z0-9_-]{4,})",
+    re.IGNORECASE,
+)
+_LABELED_BUSINESS_VALUE = re.compile(
+    r"(?:客户(?:名称)?|招标人/客户|采购人|甲方|乙方|买受人|出卖人|签约主体|"
+    r"项目(?:名称|编号|记录)|销售负责人|负责销售|负责人|联系人)"
+    r"\s*[：:]\s*(?P<value>\{[^{}\r\n]+\}|"
+    r"(?:(?!\\n)[^\"'\r\n|,，;；]){2,80})",
+    re.IGNORECASE,
+)
+_REAL_SOURCE_CLAIM = re.compile(
+    r"(?:数据来源|来源类型|fixture_kind|source_kind)\s*[：:=]"
+    r"[^\"'\r\n]{0,80}(?:真实|real)", re.IGNORECASE
 )
 _SYNTHETIC_BUSINESS_VALUE = re.compile(
     r"(?:合成|虚构|synthetic|\bSYN[-_]|example\.invalid)",
@@ -345,13 +377,25 @@ def _contains_hardcoded_credential(text: str) -> bool:
         _DIRECT_API_CREDENTIAL,
     ):
         for match in pattern.finditer(text):
-            secret = match.groupdict().get("secret", match.group(0))
+            groups = match.groupdict()
+            secret = (
+                groups.get("secret") or groups.get("quoted") or groups.get("bare")
+                or match.group(0)
+            )
             if not _is_placeholder_secret(secret):
                 return True
     return False
 
 
 def _contains_real_sample_manifest(relative_path: str, text: str) -> bool:
+    if relative_path.casefold().endswith(".json"):
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("fixture_kind") == "local_business":
+            return True
+
     evidence = f"{relative_path}\n{text}"
     if not _REAL_SAMPLE_HINT.search(evidence):
         return False
@@ -389,6 +433,37 @@ def _business_content_category(field: str) -> str:
     return "source"
 
 
+def _is_allowed_business_value(value: str) -> bool:
+    normalized = value.strip().strip("`*_#-:：.。\"'").casefold()
+    if not normalized:
+        return True
+    if normalized in _BUSINESS_CONTENT_PLACEHOLDERS:
+        return True
+    if normalized in {
+        "str", "string", "optional", "null", "true", "false", "project_manager", "开户银行", "公司",
+        "有限公司", "有限责任公司", "股份有限公司", "集团", "银行", "研究院", "大学",
+    }:
+        return True
+    if re.fullmatch(r"\{[^{}\r\n]+\}", normalized):
+        return True
+    raw = value.strip()
+    if re.fullmatch(r"[\"']{2}[)\]}]*", raw):
+        return True
+    if re.fullmatch(
+        r"\{[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\($",
+        raw,
+    ):
+        return True
+    if re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+[\"'`)]*",
+        raw.strip("\"'`"),
+    ):
+        return True
+    if re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*[\[(]", raw.strip("\"'`")):
+        return True
+    return bool(_SYNTHETIC_BUSINESS_VALUE.search(value))
+
+
 def _contains_unsanitized_business_content(relative_path: str, text: str) -> bool:
     normalized_path = relative_path.replace("\\", "/")
     if (
@@ -397,21 +472,33 @@ def _contains_unsanitized_business_content(relative_path: str, text: str) -> boo
     ):
         return True
 
-    categories = set()
     for match in _STRUCTURED_BUSINESS_VALUE.finditer(text):
         value = (match.group("quoted") or match.group("label_value") or "").strip()
-        normalized = value.casefold()
-        if normalized in _BUSINESS_CONTENT_PLACEHOLDERS:
-            continue
-        if _SYNTHETIC_BUSINESS_VALUE.search(value):
+        if _is_allowed_business_value(value):
             continue
         field = (match.group("field") or match.group("label") or "").casefold()
         if field in {"source_file", "source_path", "来源文件", "文件名"}:
             filename = Path(value.replace("\\", "/")).name
             if not re.search(r"\d{4,}", filename) and len(filename) <= 16:
                 continue
-        categories.add(_business_content_category(field))
-    return len(categories) >= 4
+        return True
+
+    if not normalized_path.casefold().endswith(".py"):
+        for match in _UNQUOTED_STRUCTURED_BUSINESS_VALUE.finditer(text):
+            if not _is_allowed_business_value(match.group("value")):
+                return True
+
+    for pattern in (
+        _ORGANIZATION_BUSINESS_VALUE,
+        _LABELED_BUSINESS_IDENTIFIER,
+        _LABELED_BUSINESS_VALUE,
+    ):
+        for match in pattern.finditer(text):
+            value = match.groupdict().get("value") or match.group(0)
+            if not _is_allowed_business_value(value):
+                return True
+
+    return bool(_REAL_SOURCE_CLAIM.search(text))
 
 
 def validate_repository_hygiene(

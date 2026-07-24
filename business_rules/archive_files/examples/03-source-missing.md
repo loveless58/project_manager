@@ -12,7 +12,7 @@
 ```python
 extracted = {
     "document_type": "...",
-    "fields": {"project_name": "测试项目"},
+    "fields": {"project_name": "合成项目字段006"},
 }
 ```
 
@@ -22,7 +22,7 @@ extracted = {
 action = build_archive_action(
     run_id="run-2026-07-17-003",
     source_file="/nonexistent/path/file.pdf",
-    project_name="测试项目",
+    project_name="合成项目字段006",
     extracted=extracted,
     ledger_result={"business_judgement": {}},
     project_files_dir="/tmp/archive_test",
@@ -50,12 +50,12 @@ action = build_archive_action(
   "schema_version": "archive_action.v1",
   "run_id": "run-2026-07-17-003",
   "status": "needs_review",
-  "source_file": "/nonexistent/path/file.pdf",
-  "project_name": "测试项目",
+  "source_file": "synthetic/SYN-SOURCE-007.docx",
+  "project_name": "合成项目字段006",
   "document_type": "...",
   "proposed_name": "file.pdf",
-  "target_dir": "/tmp/archive_test/项目投标/测试项目/原始文件",
-  "target_path": "/tmp/archive_test/项目投标/测试项目/原始文件/file.pdf",
+  "target_dir": "/tmp/archive_test/项目投标/合成项目字段006/原始文件",
+  "target_path": "/tmp/archive_test/项目投标/合成项目字段006/原始文件/file.pdf",
   "blockers": ["source_missing"],
   "business_judgement": {},
   "archive_decision": {...},

@@ -6,17 +6,17 @@
 
 ## 输入
 
-**文件**: `TS软件外包云泰智汇电子26722V.pdf`(5 页扫描件,150dpi,2.4MB)
+**文件**: `SYN-SOURCE-001.pdf`(5 页扫描件,150dpi,2.4MB)
 
 **extracted**(来自 data_cleaning_tools.py):
 ```python
 extracted = {
     "document_type": "扫描件",
-    "extracted_text": "...喀什大学-国产化XDR-20260625503资产接入...",
+    "extracted_text": "...合成项目字段001资产接入...",
     "fields": {
-        "project_name": "云泰智汇电子",
-        "subject_name": "云泰智汇电子",
-        "contract_number": "20260625503",
+        "project_name": "合成项目字段001",
+        "subject_name": "合成项目字段001",
+        "contract_number": "SYN-CONTRACT-FIELD-002",
     },
     "ocr": {
         "engine": "rapidocr",
@@ -39,8 +39,8 @@ from skills.archive_files.scripts.build_archive_decision import build_archive_ac
 
 action = build_archive_action(
     run_id="run-2026-07-17-001",
-    source_file="${BUSINESS_ROOT}/TS软件外包云泰智汇电子26722V.pdf",
-    project_name="云泰智汇电子",
+    source_file="${BUSINESS_ROOT}/SYN-SOURCE-001.pdf",
+    project_name="合成项目字段001",
     extracted=extracted,
     ledger_result={"business_judgement": {"human_review_required": False}},
     project_files_dir="${BUSINESS_ROOT}/项目文件/项目投标",
@@ -49,11 +49,11 @@ action = build_archive_action(
 
 ## 决策路径(Three-Layer Fallback)
 
-1. **Layer 1 知识库**: `business_knowledge/归档规则_v1.md` 当前是种子,无 "TS 软件外包" 相关规则
+1. **Layer 1 知识库**: `business_knowledge/归档规则_v1.md` 当前是种子,无 "合成软件外包" 相关规则
    - kb_result.reason = `knowledge_base_no_match`
 2. **Layer 2 硬编码**: `evaluate_archive_decision()`
    - source_file 路径无 phase 段
-   - `extracted.fields.project_name = "云泰智汇电子"` 有值
+   - `extracted.fields.project_name = "合成项目字段001"` 有值
    - archive_phase = "项目投标" (默认)
    - confidence = 0.45 (有 project_name + 非项目丢标)
 3. **Layer 3 LLM 兜底**: kb 是 no_match → 触发 LLM
@@ -67,17 +67,17 @@ action = build_archive_action(
   "schema_version": "archive_action.v1",
   "run_id": "run-2026-07-17-001",
   "status": "ready",
-  "source_file": "${BUSINESS_ROOT}/TS软件外包云泰智汇电子26722V.pdf",
-  "project_name": "云泰智汇电子",
+  "source_file": "synthetic/SYN-SOURCE-003.docx",
+  "project_name": "合成项目字段001",
   "document_type": "扫描件",
-  "proposed_name": "TS软件外包云泰智汇电子26722V.pdf",
-  "target_dir": "${BUSINESS_ROOT}/项目文件/项目投标/云泰智汇电子/原始文件",
-  "target_path": "${BUSINESS_ROOT}/项目文件/项目投标/云泰智汇电子/原始文件/TS软件外包云泰智汇电子26722V.pdf",
+  "proposed_name": "SYN-SOURCE-001.pdf",
+  "target_dir": "${BUSINESS_ROOT}/项目文件/项目投标/合成项目字段001/原始文件",
+  "target_path": "${BUSINESS_ROOT}/项目文件/项目投标/合成项目字段001/原始文件/SYN-SOURCE-001.pdf",
   "blockers": [],
   "business_judgement": {"human_review_required": false},
   "archive_decision": {
     "subject_type": "bid_project",
-    "subject_name": "云泰智汇电子",
+    "subject_name": "合成项目字段001",
     "archive_phase": "项目投标",
     "document_type": "扫描件",
     "confidence": 0.45,
@@ -104,11 +104,11 @@ assert "target_exists" not in action["blockers"]
 
 ## 关键字段验证(人工核对)
 
-实际 OCR 抽取到的字段(用于确认项目名提取正确):
-- 合同名: 喀什大学-国产化XDR-20260625503资产接入功能定制服务合同
-- 甲方: 新疆云泰智汇电子科技有限公司
-- 乙方: 北京华胜天成科技股份有限公司
-- 联系人: 张大师(zhangds@yuntaie.com)
+合成 OCR 抽取到的字段(用于确认项目名提取正确):
+- 合同名: 合成项目字段001资产接入功能定制服务合同
+- 甲方: 合成机构002有限公司
+- 乙方: 合成机构003有限公司
+- 联系人: 虚构人员001
 - 签署日期: 2026年7月15日
 
-**项目名推断**: extracted.fields.project_name = "云泰智汇电子"(从甲方简化),如果未来要更精确可改为 "新疆云泰智汇电子科技有限公司"。
+**项目名推断**: extracted.fields.project_name = "合成项目字段001"(从甲方简化),如果未来要更精确可改为 "合成机构002有限公司"。
