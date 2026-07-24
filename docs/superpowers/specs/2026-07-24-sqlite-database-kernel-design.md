@@ -241,10 +241,12 @@ CREATE TABLE IF NOT EXISTS _schema_migrations (
 
 实现不得在已经由 Python 开启的事务中直接调用会隐式提交的裸
 `sqlite3.Connection.executescript()`。Runner 必须采用经过测试的受控执行方式：
-要么把 `BEGIN IMMEDIATE`、单份 migration SQL、applied record 写入和 `COMMIT`
-组成同一个由 runner 生成的脚本，要么使用能够正确处理 SQLite 语句边界的逐语句执行器；
-无论采用哪种方式，都必须证明 migration SQL 与 applied record 原子提交，并在任一语句
-失败时不留下半迁移 schema 或伪造的 applied record。不得使用基于分号的朴素字符串切分。
+由 runner 生成只包含 `BEGIN IMMEDIATE` 与单份 migration SQL、但不包含 `COMMIT`
+的受控脚本；脚本成功返回后计算执行耗时，通过参数化 SQL 写入 applied record，最后调用
+连接的 `commit()`。脚本或元数据写入任一步失败都调用连接的 `rollback()`。这样既允许
+trigger 等合法多语句 SQL，又保证 migration SQL 与 applied record 在同一个 SQLite
+事务中原子提交。实现必须用故障注入测试证明失败时不留下半迁移 schema 或伪造的
+applied record，不得使用基于分号的朴素字符串切分 migration SQL。
 
 并发 runner 通过 SQLite 写锁和 `busy_timeout` 串行化。锁等待超时映射为稳定 `DatabaseBusyError`，不向调用方暴露底层 SQL 或数据库路径。
 
