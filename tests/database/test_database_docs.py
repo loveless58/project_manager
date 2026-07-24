@@ -38,6 +38,15 @@ def test_readme_documents_migration_backup_and_restore_safety():
     assert all(text in README for text in required_text)
 
 
+def test_readme_documents_restore_verification_lifecycle_order():
+    expected = (
+        "恢复顺序为：先验证 manifest、SHA-256 和字节大小；再用 SQLite Backup API "
+        "物化临时候选库；随后在临时库执行 integrity、外键和 schema 验证；全部通过后"
+        "才以 no-overwrite 方式发布最终候选路径"
+    )
+    assert expected in README
+
+
 def test_readme_documents_node_local_trust_and_provider_boundaries():
     required_text = (
         "显式 `--database` 路径优先",
