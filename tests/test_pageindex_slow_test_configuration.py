@@ -9,24 +9,54 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _run_pageindex_slow_tests(environment):
-    return subprocess.run(
-        [
-            sys.executable,
-            "-X",
-            "utf8",
-            "-B",
-            "-m",
-            "pytest",
-            "tests/test_pageindex_client.py",
-            "-q",
-        ],
-        cwd=REPOSITORY_ROOT,
-        env=environment,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=False,
-    )
+    isolated_environment = environment.copy()
+    isolated_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    with tempfile.TemporaryDirectory(prefix="project-manager-pageindex-pytest-") as td:
+        return subprocess.run(
+            [
+                sys.executable,
+                "-X",
+                "utf8",
+                "-B",
+                "-m",
+                "pytest",
+                "tests/test_pageindex_client.py",
+                "-q",
+                "-p",
+                "no:cacheprovider",
+                "--basetemp",
+                str(Path(td) / "pytest"),
+            ],
+            cwd=REPOSITORY_ROOT,
+            env=isolated_environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+
+
+def test_nested_pytest_uses_ephemeral_cache_and_no_bytecode(monkeypatch):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    _run_pageindex_slow_tests({})
+
+    command = captured["command"]
+    assert "-B" in command
+    assert ["-p", "no:cacheprovider"] == command[
+        command.index("-p") : command.index("-p") + 2
+    ]
+    basetemp_index = command.index("--basetemp") + 1
+    basetemp = Path(command[basetemp_index])
+    assert not basetemp.is_relative_to(REPOSITORY_ROOT)
+    assert captured["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
 
 
 def test_enabling_pageindex_slow_tests_without_configuration_fails():
