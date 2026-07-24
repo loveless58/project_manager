@@ -24,8 +24,14 @@ def test_directory_contract_points_to_new_settings_source():
     )
     assert payload["version"] == "3.0.0"
     assert payload["config_source"] == "platform_core.settings.load_app_settings"
+    assert payload["business_root_default"] == "${HOME}/ProjectManagerData"
+    assert payload["runtime_workspace_default"] == "${HOME}/.project_manager"
+    assert payload["base_dir_default"] == payload["runtime_workspace_default"]
+    assert payload["compatibility_facade"] == (
+        "common.workspace_config.resolve_workspace_config"
+    )
     assert "E:\\SynologyDrive" not in json.dumps(payload)
-    assert "common.workspace_config" not in json.dumps(payload)
+    assert "compatibility facade" in payload["description"]
     assert all(
         "缺失仅记录为 info，不阻塞命令执行" in spec["description"]
         for spec in payload["required_dirs"].values()
@@ -58,6 +64,47 @@ def test_legacy_workspace_prd_is_marked_as_superseded():
     assert "状态：已被" in prd
     assert "跨平台部署设计取代" in prd
     assert "不再是代码默认值" in prd
+
+
+def test_tool_reference_uses_app_settings_and_marks_legacy_facade():
+    reference = (PROJECT_DIR / "references" / "project_tools.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "AppSettings.business_root" in reference
+    assert "AppSettings.runtime_workspace" in reference
+    assert "common.workspace_config" in reference
+    assert "兼容门面" in reference
+    assert "~/.project_manager" in reference
+    assert "production default workspace" not in reference
+    assert "~/Desktop/工作文件" not in reference
+    assert "E:\\SynologyDrive" not in reference
+
+
+def test_main_docstring_describes_current_settings_and_node_local_runtime():
+    import ast
+
+    source = (PROJECT_DIR / "main.py").read_text(encoding="utf-8")
+    docstring = ast.get_docstring(ast.parse(source)) or ""
+
+    assert "AppSettings" in docstring
+    assert "节点本地" in docstring
+    assert "Kimi Work" not in docstring
+    assert "PythonRun" not in docstring
+
+
+def test_runtime_artifact_policy_documents_locality_and_mapped_drive_limit():
+    policy = (
+        PROJECT_DIR / "docs" / "operations" / "2026-07-05-runtime-artifact-policy.md"
+    ).read_text(encoding="utf-8")
+
+    assert "runtime_workspace" in policy
+    assert "projection_root" in policy
+    assert "business_root" in policy
+    assert "UNC" in policy
+    assert "SMB" in policy and "NFS" in policy and "AFP" in policy
+    assert "映射盘" in policy
+    assert "无法仅凭盘符" in policy
 
 
 def test_directory_governance_uses_dynamic_platform_settings(monkeypatch, tmp_path):

@@ -1,13 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Project Manager Agent - Directory Contract",
-  "description": "Runtime paths are resolved by platform_core.settings and mapped per deployment node.",
+  "description": "Runtime paths are resolved by platform_core.settings and mapped per deployment node; common.workspace_config remains a compatibility facade for legacy callers.",
   "version": "3.0.0",
   "config_source": "platform_core.settings.load_app_settings",
+  "compatibility_facade": "common.workspace_config.resolve_workspace_config",
   "business_root_env": "PROJECT_MANAGER_BUSINESS_ROOT",
   "workspace_dir_env": "PROJECT_MANAGER_WORKSPACE_DIR",
   "compat_base_dir_env": "LOOP_PROJECT_BASE_DIR",
-  "base_dir_default": "${HOME}/ProjectManagerData/.project_manager",
+  "business_root_default": "${HOME}/ProjectManagerData",
+  "runtime_workspace_default": "${HOME}/.project_manager",
+  "base_dir_default": "${HOME}/.project_manager",
   "required_dirs": {
     "project_files": {
       "path": "项目文件",
@@ -56,6 +59,12 @@
       "level": "info",
       "check": "cloud-drive files must be readable before extraction or archive execution",
       "fix": "Let the sync client hydrate files, then rerun the loop."
+    },
+    {
+      "id": "DIR-003",
+      "level": "error",
+      "check": "runtime_workspace and projection_root are node-local and outside business_root",
+      "fix": "Configure runtime and projection paths on node-local storage; do not use business roots, UNC paths, network URIs, or mapped network drives."
     }
   ]
 }

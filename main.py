@@ -2,10 +2,12 @@
 """
 Project Manager Agent — 主 Agent 执行器
 
-本文件由 agent.md 触发后调用，通过 Kimi Work 的 PythonRun / Cron 执行。
-不独立运行，不接受命令行参数。
+本模块是项目管理运行时的统一组合入口。启动时通过 AppSettings 解析部署模式、
+业务根和节点本地运行目录；runtime_workspace、projection_root 及数据库运行产物
+必须位于节点本地存储，并与 business_root 分离。common.workspace_config 仅为旧工具
+提供兼容门面，不拥有独立默认值或配置优先级。
 
-架构：一个 LoopEngine，多业务 Skill，运行时只注册 active skill 的工具子集
+架构：一个 LoopEngine，多业务 Skill，运行时只注册 active skill 的工具子集：
   - 项目管理工具：ProjectTools, ArchiveTools, ReportTools, MigrateTools
   - 数据清洗工具：DataCleaningTools
   - 商机管理工具：OpportunityManagerTools
@@ -13,7 +15,8 @@ Project Manager Agent — 主 Agent 执行器
   - bid_files 工具：（预留）
 
 数据流：
-  agent.md (触发) → main.run() → SkillRouter → ToolRegistry(active skill tools) → Planner → LoopEngine → 返回结果
+  调用方 → main.run() → AppSettings/组合根 → SkillRouter
+  → ToolRegistry(active skill tools) → Planner → LoopEngine → 结构化结果
 
 只有一个 LoopEngine；SkillRouter 先选择业务域，Planner 只能在 active skill 暴露的工具内规划。
 """

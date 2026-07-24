@@ -121,7 +121,7 @@
 智能归档散落文件。
 
 **参数**：
-- `source_dir` (str, default="~/Desktop/工作文件"): 源目录
+- `source_dir` (str, optional): 源目录；未提供时使用 `AppSettings.business_root`
 
 **返回**：
 ```json
@@ -190,14 +190,16 @@
 
 ## DataCleaningTools
 
-数据清洗工具。默认源文件来自 `WorkspaceConfig.business_root`（例如 `E:\SynologyDrive`），运行包和结构化输出写入 `数据清洗工作台/runs` 及结构化输出目录。`00-原始文件（待处理）` 不再是标准工作区目录，仅在显式 `DataCleaningTools(workspace_dir=...)` 的兼容/测试场景中作为隔离入口使用。
+数据清洗工具。业务输入根由 `AppSettings.business_root` 提供；运行包、日志、数据库和结构化输出位于节点本地的 `AppSettings.runtime_workspace`，跨平台默认值为 `~/.project_manager`。`common.workspace_config` 只是旧工具使用的兼容门面，不维护独立默认值或配置优先级。`00-原始文件（待处理）` 不再是标准工作区目录，仅在显式 `DataCleaningTools(workspace_dir=...)` 的兼容/测试场景中作为隔离入口使用。
+
+业务根可以是本机挂载或同步目录；运行工作区与投影目录不能等于或位于业务根内，也不能使用明显的网络 URI/UNC 路径。
 
 ### scan_raw_files(source_dir=None)
 
 扫描源文件目录，列出待处理文件。
 
 **参数**：
-- `source_dir` (str, optional): 默认 `WorkspaceConfig.business_root`
+- `source_dir` (str, optional): 默认 `AppSettings.business_root`
 
 **返回**：
 ```json
@@ -206,7 +208,7 @@
     {"path": "...", "size": 1024, "ext": ".pdf", "modified": "2026-06-30"}
   ],
   "count": 5,
-  "source_dir": "E:\\SynologyDrive"
+  "source_dir": "business://incoming"
 }
 ```
 
@@ -434,13 +436,15 @@ provider diagnostics:
 
 准备一次文件整理闭环运行包。该工具会提取源文件结构化字段，写入项目账本并触发业务判断，生成复核队列、归档计划和运行报告，但不会移动源文件。
 
-Runtime paths come from `common.workspace_config`. The production default workspace is `E:\SynologyDrive\_project_manager_workspace`; pass `main.run(..., data_workspace_dir=...)` or construct `DataCleaningTools(workspace_dir=...)` to override it.
+Runtime paths come from `AppSettings`. `AppSettings.runtime_workspace` defaults to the node-local `~/.project_manager`, while `AppSettings.business_root` identifies business input storage. `common.workspace_config` is a compatibility facade for legacy callers only. Pass `main.run(..., data_workspace_dir=...)` or construct `DataCleaningTools(workspace_dir=...)` for an explicit isolated test workspace.
+
+The runtime and projection roots must remain outside the business root and on node-local storage in both local and central deployment modes.
 
 Before extraction, each source file is checked with `probe_readable_file`. A cloud-drive placeholder or sync failure is recorded as a per-file failure instead of raising an unhandled exception:
 
 ```json
 {
-  "file": "E:\\SynologyDrive\\...",
+  "file": "business://incoming/example.pdf",
   "stage": "source_readiness",
   "error": "source_not_local_or_unreadable",
   "blocked_reason": "cloud_placeholder_or_sync_failure"
