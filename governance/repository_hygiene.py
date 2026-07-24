@@ -27,11 +27,11 @@ _WINDOWS_PERSONAL_PATH = re.compile(
     r"\b[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s\"']+(?:[\\/][^\s\"']*)?",
     re.IGNORECASE,
 )
+# Require a root, nested subject, and file so generic installation
+# examples are not misclassified as business-data locations.
 _WINDOWS_BUSINESS_ABSOLUTE_PATH = re.compile(
-# Require a root, nested subject, and file so generic examples such as
-# C:\\Tools\\PageIndex are not misclassified as business-data locations.
     r"(?<![A-Za-z0-9:/])"
-    r"[A-Za-z]:[\\/](?:[^\\/\s\"'`]+[\\/]){2,}[^\\/\s\"'`]+"
+    r"[A-Za-z]:[\\/]+(?:[^\\/\s\"'`]+[\\/]+){2,}[^\\/\s\"'`]+"
 )
 _POSIX_BUSINESS_ABSOLUTE_PATH = re.compile(
     r"(?<![A-Za-z0-9:/])"
@@ -44,7 +44,8 @@ _CREDENTIAL_DSN = re.compile(
     re.IGNORECASE,
 )
 _CREDENTIAL_ASSIGNMENT = re.compile(
-    r"(?:[\"'])?\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|passwd)\b"
+    r"(?:[\"'])?\b(?:[A-Za-z][A-Za-z0-9_-]*[_-])?"
+    r"(?:api[_-]?key|access[_-]?token|client[_-]?secret|password|passwd)\b"
     r"(?:[\"'])?\s*[:=]\s*(?:[rubf]{0,2})?[\"'](?P<secret>[^\"'\r\n]{8,})[\"']",
     re.IGNORECASE,
 )
@@ -60,12 +61,52 @@ _REAL_SAMPLE_HINT = re.compile(
     r"(?:真实样本|real[_ -]?samples?|customer[_ -]?samples?|production[_ -]?samples?)",
     re.IGNORECASE,
 )
-_EMBEDDED_SAMPLE_MANIFEST = re.compile(
-    r"^\s*(?:REAL_?SAMPLES|SAMPLES|SAMPLE_MANIFEST)\s*=\s*[\[\{(]",
+_EMBEDDED_COLLECTION = re.compile(
+    r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?:\s*:[^=\r\n]+)?\s*=\s*[\[\{(]",
     re.MULTILINE,
 )
 _JSON_SAMPLE_LIST = re.compile(r'[\"\']samples[\"\']\s*:\s*\[', re.IGNORECASE)
+_SAMPLE_PATH_FIELD = re.compile(
+    r"\b(?:relative_path|source_file|source_path|filename|file_path)\b",
+    re.IGNORECASE,
+)
+_SAMPLE_EXPECTATION_FIELD = re.compile(
+    r"\b(?:expected_category|expected_document_type|expected_type|category)\b",
+    re.IGNORECASE,
+)
+_SAMPLE_DOCUMENT_ENTRY = re.compile(
+    r"[^\s\"']+\.(?:pdf|docx?|xlsx?|pptx?|png|jpe?g|md|txt|xml|json)",
+    re.IGNORECASE,
+)
+_STRUCTURED_BUSINESS_VALUE = re.compile(
+    r"(?:[\"'](?P<field>customer_name|client_name|project_name|project_id|"
+    r"project_number|sales_owner|contact_name|invoice_number|invoice_id|"
+    r"ticket_number|ticket_id|source_file|source_path)[\"']\s*[:=]\s*"
+    r"[\"'](?P<quoted>[^\"'\r\n]{2,})[\"'])"
+    r"|(?:"
+    r"(?P<label>客户(?:名称)?|项目(?:名称|编号|记录)|销售负责人|联系人|"
+    r"发票(?:号码|号)|票号|来源文件|文件名)\s*[：:]\s*"
+    r"(?P<label_value>(?:(?!\\n)[^\r\n|,，;；\"']){2,})"
+    r")",
+    re.IGNORECASE,
+)
+_SYNTHETIC_BUSINESS_VALUE = re.compile(
+    r"(?:合成|虚构|synthetic|\bSYN[-_]|example\.invalid)",
+    re.IGNORECASE,
+)
+_BUSINESS_CONTENT_PLACEHOLDERS = {
+    "unknown",
+    "none",
+    "n/a",
+    "未知",
+    "待确认",
+    "未提供",
+    "无",
+    "空",
+}
 _SYNTHETIC_PATH_EXEMPTION = "repo-hygiene: allow=synthetic-path"
+_SYNTHETIC_DATA_DECLARATION = "repo-hygiene: data=synthetic"
+_BUSINESS_KB_PATH = re.compile(r"^business_rules/(?:[^/]+/)*kb\.md$")
 _MANAGED_TEXT_SUFFIXES = {
     ".bat",
     ".cfg",
@@ -135,7 +176,7 @@ def _git_environment(project_root: Path) -> Mapping[str, str]:
     if not marker_text.startswith("gitdir:"):
         return environment
     raw_git_dir = marker_text.split(":", 1)[1].strip()
-    wsl_path = re.fullmatch(r"/mnt/([A-Za-z])/(.*)", raw_git_dir)
+    wsl_path = re.fullmatch(r"/mnt/([A-Za-z])/(.*)", raw_git_dir)  # repo-hygiene: allow=synthetic-path
     if os.name == "nt" and wsl_path:
         raw_git_dir = f"{wsl_path.group(1).upper()}:/{wsl_path.group(2)}"
     environment["GIT_DIR"] = raw_git_dir
@@ -258,30 +299,6 @@ def _is_declared_synthetic_fixture(relative_path: str, text: str) -> bool:
     )
 
 
-def _is_placeholder_business_path(value: str) -> bool:
-    normalized = value.replace("\\", "/").lower()
-    return any(
-        marker in normalized
-        for marker in (
-            "${",
-            "<",
-            ">",
-            "...",
-            "/project-a/",
-            "/synthetic/",
-            "/example/",
-            "/tmp/",
-            "/path/",
-            "测试",
-            "(",
-            ")",
-            "[",
-            "]",
-            "*",
-        )
-    )
-
-
 def _contains_business_absolute_path(text: str, synthetic_fixture: bool) -> bool:
     if synthetic_fixture:
         return False
@@ -294,8 +311,6 @@ def _contains_business_absolute_path(text: str, synthetic_fixture: bool) -> bool
         ):
             for match in pattern.finditer(line):
                 value = match.group(0)
-                if _is_placeholder_business_path(value):
-                    continue
                 if _POSIX_PERSONAL_PATH.search(value) or _WINDOWS_PERSONAL_PATH.search(
                     value
                 ):
@@ -340,9 +355,63 @@ def _contains_real_sample_manifest(relative_path: str, text: str) -> bool:
     evidence = f"{relative_path}\n{text}"
     if not _REAL_SAMPLE_HINT.search(evidence):
         return False
-    return bool(
-        _EMBEDDED_SAMPLE_MANIFEST.search(text) or _JSON_SAMPLE_LIST.search(text)
+    has_field_pair = bool(
+        _SAMPLE_PATH_FIELD.search(text) and _SAMPLE_EXPECTATION_FIELD.search(text)
     )
+    if relative_path.casefold().endswith(".json") and _JSON_SAMPLE_LIST.search(text):
+        declared_local_business = bool(
+            re.search(r'["\']fixture_kind["\']\s*:\s*["\']local_business["\']', text)
+        )
+        path_has_real_hint = bool(_REAL_SAMPLE_HINT.search(relative_path))
+        return has_field_pair and (declared_local_business or path_has_real_hint)
+    for collection in _EMBEDDED_COLLECTION.finditer(text):
+        if not _REAL_SAMPLE_HINT.search(collection.group("name")):
+            continue
+        following_block = text[collection.start() : collection.start() + 4000]
+        if (
+            _SAMPLE_PATH_FIELD.search(following_block)
+            and _SAMPLE_EXPECTATION_FIELD.search(following_block)
+        ) or _SAMPLE_DOCUMENT_ENTRY.search(following_block):
+            return True
+    return False
+
+
+def _business_content_category(field: str) -> str:
+    normalized = field.casefold()
+    if "project" in normalized or "项目" in normalized:
+        return "project"
+    if "customer" in normalized or "client" in normalized or "客户" in normalized:
+        return "customer"
+    if any(token in normalized for token in ("owner", "contact", "负责人", "联系人")):
+        return "person"
+    if any(token in normalized for token in ("invoice", "ticket", "发票", "票号")):
+        return "invoice"
+    return "source"
+
+
+def _contains_unsanitized_business_content(relative_path: str, text: str) -> bool:
+    normalized_path = relative_path.replace("\\", "/")
+    if (
+        _BUSINESS_KB_PATH.match(normalized_path)
+        and _SYNTHETIC_DATA_DECLARATION not in text
+    ):
+        return True
+
+    categories = set()
+    for match in _STRUCTURED_BUSINESS_VALUE.finditer(text):
+        value = (match.group("quoted") or match.group("label_value") or "").strip()
+        normalized = value.casefold()
+        if normalized in _BUSINESS_CONTENT_PLACEHOLDERS:
+            continue
+        if _SYNTHETIC_BUSINESS_VALUE.search(value):
+            continue
+        field = (match.group("field") or match.group("label") or "").casefold()
+        if field in {"source_file", "source_path", "来源文件", "文件名"}:
+            filename = Path(value.replace("\\", "/")).name
+            if not re.search(r"\d{4,}", filename) and len(filename) <= 16:
+                continue
+        categories.add(_business_content_category(field))
+    return len(categories) >= 4
 
 
 def validate_repository_hygiene(
@@ -439,6 +508,15 @@ def validate_repository_hygiene(
                     "REPO-REAL-SAMPLE-MANIFEST",
                     normalized,
                     "embedded real-sample manifest is forbidden",
+                )
+            )
+
+        if not synthetic_fixture and _contains_unsanitized_business_content(normalized, text):
+            findings.append(
+                _finding(
+                    "REPO-REAL-BUSINESS-CONTENT",
+                    normalized,
+                    "unsanitized structured business content is forbidden",
                 )
             )
 

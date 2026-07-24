@@ -13,7 +13,7 @@ def _git_ls_files(*pathspecs: str) -> list[str]:
     marker = PROJECT_DIR / ".git"
     if marker.is_file():
         raw_git_dir = marker.read_text(encoding="utf-8").split(":", 1)[1].strip()
-        wsl_path = re.fullmatch(r"/mnt/([A-Za-z])/(.*)", raw_git_dir)
+        wsl_path = re.fullmatch(r"/mnt/([A-Za-z])/(.*)", raw_git_dir)  # repo-hygiene: allow=synthetic-path
         if os.name == "nt" and wsl_path:
             raw_git_dir = f"{wsl_path.group(1).upper()}:/{wsl_path.group(2)}"
         environment["GIT_DIR"] = raw_git_dir

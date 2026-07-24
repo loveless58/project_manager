@@ -220,10 +220,10 @@ AssetCatalog、DocumentIdentityResolver、ContentProfiler、ProcessingPlanner、
 同一逻辑位置可以在不同节点映射为不同物理路径，例如：
 
 ```text
-synology://business/project-a/contracts/
-  -> Windows-01: E:\SynologyDrive\project-a\contracts\
-  -> Mac-01: /Volumes/SynologyDrive/project-a/contracts/
-  -> NAS-Worker: /volume1/business/project-a/contracts/
+business://project-files
+  -> Windows-01: ${WINDOWS_BUSINESS_MOUNT}
+  -> Mac-01: ${MACOS_BUSINESS_MOUNT}
+  -> NAS-Worker: ${NAS_BUSINESS_MOUNT}
 ```
 
 `local_mount_path` 是节点本地配置或受控登记数据，不是文档身份、数据库唯一键或审批主体。数据库和 handoff 传递稳定 ID、逻辑 URI 和内容哈希；只有对应节点上的 DocumentStore 适配器在执行时解析物理路径。

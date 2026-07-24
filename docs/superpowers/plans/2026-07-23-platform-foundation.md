@@ -1,5 +1,14 @@
 # 平台配置与基础接口边界实施计划
 
+## 纠正说明（以当前实现为准）
+
+本文件是历史实施计划。当前 `AppSettings` 契约规定：`business_root` 仅承载业务文档；
+`runtime_workspace`、SQLite 和 `projection_root` 必须位于节点本地目录，默认根为
+`Path.home() / ".project_manager"`，不得放在 `business_root`、同步盘或网络共享下。
+下文所有可复制配置与代码片段均按这一边界修正；实现细节以
+`platform_core.settings.load_app_settings` 和节点本地路径校验器为准。
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 建立跨 Windows/macOS、单机 SQLite 和群晖 PostgreSQL 17 共用的配置与基础端口层，移除默认盘符和 PageIndex 本机路径硬编码，同时保持现有工具通过兼容门面运行。
@@ -17,7 +26,7 @@
 - 配置优先级固定为：显式参数、环境变量、本地配置文件、跨平台默认值。
 - `PostgreSQL 17.19-4` 只作为群晖安装包标识；实际数据库能力以后以 `SHOW server_version_num` 验证主版本 17。
 - 配置文件只保存数据库 DSN 的环境变量名，禁止保存数据库口令、API Key、Cookie、TLS 私钥或节点令牌。
-- SQLite 文件不得放入 SynologyDrive 活跃同步目录或网络共享供多机共同打开。
+- SQLite、WAL/SHM、缓存和投影不得放入业务同步目录或网络共享供多机共同打开。
 - 适配器必须显式注册；禁止根据字符串导入任意 Python 模块。
 - DocumentStore、StructureIndex、ProjectionWriter 和 Repository/UnitOfWork 是端口，不是 Agent。
 - 本计划不得改写 `ProjectLedger` 权威源、创建 SQL Schema、实现任务租约或加入浏览器自动化。
@@ -97,8 +106,8 @@ def test_portable_local_defaults_do_not_contain_windows_drive(monkeypatch, tmp_p
     assert settings.deployment_mode == "local"
     assert settings.database.provider == "sqlite"
     assert settings.business_root == tmp_path / "ProjectManagerData"
-    assert settings.runtime_workspace == tmp_path / "ProjectManagerData" / ".project_manager"
-    assert "E:\\" not in str(settings.business_root)
+    assert settings.runtime_workspace == tmp_path / ".project_manager"
+    assert settings.runtime_workspace.parent != settings.business_root
 
 
 def test_environment_overrides_json_and_defaults(tmp_path):
@@ -199,6 +208,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
+
+from .path_locality import NodeLocalPathError, ensure_node_local_path
 
 
 PathLike = Union[str, os.PathLike]
@@ -317,23 +328,25 @@ def load_app_settings(
     resolved_business_root = _path(
         _pick(business_root, env, "PROJECT_MANAGER_BUSINESS_ROOT", local.get("business_root"), default_root if mode == "local" else None)
     )
-    default_runtime = (
-        resolved_business_root / ".project_manager"
-        if resolved_business_root is not None
-        else Path.home() / ".project_manager"
+    default_runtime = Path.home() / ".project_manager"
+    raw_runtime_workspace = _pick(
+        runtime_workspace, env, "PROJECT_MANAGER_WORKSPACE_DIR",
+        local.get("runtime_workspace"), default_runtime
     )
-    resolved_runtime = _path(
-        _pick(runtime_workspace, env, "PROJECT_MANAGER_WORKSPACE_DIR", local.get("runtime_workspace"), default_runtime)
-    )
+    resolved_runtime = _path(raw_runtime_workspace)
+    assert raw_runtime_workspace is not None
     assert resolved_runtime is not None
 
     default_database = "sqlite" if mode == "local" else "postgresql"
     database_provider = str(
         _pick(None, env, "PROJECT_MANAGER_DATABASE_PROVIDER", local_database.get("provider"), default_database)
     ).lower()
-    sqlite_path = _path(
-        _pick(None, env, "PROJECT_MANAGER_SQLITE_PATH", local_database.get("sqlite_path"), resolved_runtime / "state" / "project_manager.sqlite3" if database_provider == "sqlite" else None)
+    raw_sqlite_path = _pick(
+        None, env, "PROJECT_MANAGER_SQLITE_PATH", local_database.get("sqlite_path"),
+        resolved_runtime / "state" / "project_manager.sqlite3"
+        if database_provider == "sqlite" else None
     )
+    sqlite_path = _path(raw_sqlite_path)
     dsn_env_var = str(
         _pick(None, env, "PROJECT_MANAGER_DATABASE_DSN_ENV", local_database.get("dsn_env_var"), "PROJECT_MANAGER_DATABASE_DSN")
     )
@@ -350,15 +363,43 @@ def load_app_settings(
     projection_writer = str(
         _pick(None, env, "PROJECT_MANAGER_PROJECTION_WRITER", local_providers.get("projection_writer"), "filesystem")
     ).lower()
-    projection_root = _path(
-        _pick(None, env, "PROJECT_MANAGER_PROJECTION_ROOT", local_providers.get("projection_root"), resolved_runtime / "projections")
+    raw_projection_root = _pick(
+        None, env, "PROJECT_MANAGER_PROJECTION_ROOT",
+        local_providers.get("projection_root"), resolved_runtime / "projections"
     )
+    projection_root = _path(raw_projection_root)
+    assert raw_projection_root is not None
     assert projection_root is not None
 
     if mode == "local" and database_provider != "sqlite":
         raise SettingsError("local deployment requires sqlite")
     if mode == "central" and database_provider != "postgresql":
         raise SettingsError("central deployment requires postgresql")
+
+
+    try:
+        resolved_runtime = ensure_node_local_path(
+            field_name="runtime_workspace",
+            raw_value=raw_runtime_workspace,
+            resolved_path=resolved_runtime,
+            business_root=resolved_business_root,
+        )
+        projection_root = ensure_node_local_path(
+            field_name="projection_root",
+            raw_value=raw_projection_root,
+            resolved_path=projection_root,
+            business_root=resolved_business_root,
+        )
+        if database_provider == "sqlite":
+            assert raw_sqlite_path is not None and sqlite_path is not None
+            sqlite_path = ensure_node_local_path(
+                field_name="sqlite_path",
+                raw_value=raw_sqlite_path,
+                resolved_path=sqlite_path,
+                business_root=resolved_business_root,
+            )
+    except NodeLocalPathError as exc:
+        raise SettingsError(str(exc)) from exc
     if structure_index == "pageindex" and pageindex_dir is None:
         raise SettingsError("pageindex_dir is required when structure_index is pageindex")
     if document_store == "local" and resolved_business_root is None:
@@ -479,7 +520,7 @@ def test_defaults_to_portable_home_workspace(self):
                 config = resolve_workspace_config(config_file="")
 
     self.assertEqual(config.business_root, Path(td) / "ProjectManagerData")
-    self.assertEqual(config.runtime_workspace, Path(td) / "ProjectManagerData" / ".project_manager")
+    self.assertEqual(config.runtime_workspace, Path(td) / ".project_manager")
     self.assertEqual(config.project_files_dir, config.business_root / "项目文件")
 ```
 
@@ -1759,7 +1800,7 @@ def test_example_config_matches_portable_foundation_contract():
     assert payload["database"]["provider"] == "sqlite"
     assert payload["providers"]["structure_index"] == "disabled"
     assert "password" not in json.dumps(payload).lower()
-    assert "E:\\" not in json.dumps(payload)
+    assert settings.runtime_workspace.parent != settings.business_root
 
 
 def test_directory_contract_points_to_new_settings_source():
@@ -1768,7 +1809,7 @@ def test_directory_contract_points_to_new_settings_source():
     )
     assert payload["version"] == "3.0.0"
     assert payload["config_source"] == "platform_core.settings.load_app_settings"
-    assert "E:\\SynologyDrive" not in json.dumps(payload)
+    assert settings.runtime_workspace.parent != settings.business_root
 
 
 def test_local_secret_config_is_ignored():
@@ -1795,10 +1836,10 @@ Expected: FAIL with `FileNotFoundError` for `config/project-manager.example.json
 {
   "deployment_mode": "local",
   "business_root": "~/ProjectManagerData",
-  "runtime_workspace": "~/ProjectManagerData/.project_manager",
+  "runtime_workspace": "~/.project_manager",
   "database": {
     "provider": "sqlite",
-    "sqlite_path": "~/ProjectManagerData/.project_manager/state/project_manager.sqlite3",
+    "sqlite_path": "~/.project_manager/state/project_manager.sqlite3",
     "dsn_env_var": "PROJECT_MANAGER_DATABASE_DSN"
   },
   "providers": {
@@ -1806,7 +1847,7 @@ Expected: FAIL with `FileNotFoundError` for `config/project-manager.example.json
     "structure_index": "disabled",
     "pageindex_dir": null,
     "projection_writer": "filesystem",
-    "projection_root": "~/ProjectManagerData/.project_manager/projections"
+    "projection_root": "~/.project_manager/projections"
   }
 }
 ```
@@ -1825,11 +1866,11 @@ README 的配置段必须明确：
 ```markdown
 配置优先级为：显式参数 → `PROJECT_MANAGER_*` 环境变量 → `config/project-manager.local.json` → 跨平台默认值。
 
-Windows、macOS 和群晖挂载路径都通过本地配置提供。仓库不再默认 `E:\SynologyDrive`。如需继续使用该目录，请在本机设置：
+Windows、macOS 和 NAS 挂载路径均由本机配置提供；业务目录与节点本地运行目录必须分别配置：
 
 ```powershell
-$env:PROJECT_MANAGER_BUSINESS_ROOT = "E:\SynologyDrive"
-$env:PROJECT_MANAGER_WORKSPACE_DIR = "E:\SynologyDrive\_project_manager_workspace"
+$env:PROJECT_MANAGER_BUSINESS_ROOT = $env:PROJECT_MANAGER_BUSINESS_MOUNT
+$env:PROJECT_MANAGER_WORKSPACE_DIR = "$HOME\.project_manager"
 ```
 
 群晖中心化配置使用 PostgreSQL 17；本地配置文件只保存 `PROJECT_MANAGER_DATABASE_DSN` 这个环境变量名，实际 DSN 通过运行环境注入。
@@ -1838,7 +1879,7 @@ $env:PROJECT_MANAGER_WORKSPACE_DIR = "E:\SynologyDrive\_project_manager_workspac
 在旧 PRD 标题后增加：
 
 ```markdown
-> 状态：已被 `docs/superpowers/specs/2026-07-23-multi-agent-data-platform-design.md` 的跨平台部署设计取代。本文仅保留历史兼容背景，`E:\SynologyDrive` 不再是代码默认值。
+> 状态：已被跨平台部署设计取代。本文仅保留历史兼容背景，旧机器路径不再是代码默认值。
 ```
 
 - [ ] **Step 5: 更新治理目录契约**
@@ -1855,7 +1896,7 @@ $env:PROJECT_MANAGER_WORKSPACE_DIR = "E:\SynologyDrive\_project_manager_workspac
   "business_root_env": "PROJECT_MANAGER_BUSINESS_ROOT",
   "workspace_dir_env": "PROJECT_MANAGER_WORKSPACE_DIR",
   "compat_base_dir_env": "LOOP_PROJECT_BASE_DIR",
-  "base_dir_default": "${HOME}/ProjectManagerData/.project_manager"
+  "base_dir_default": "${HOME}/.project_manager"
 }
 ```
 
@@ -1927,7 +1968,7 @@ Expected: 除执行前已存在且未纳入计划的用户文件外，工作树�
 
 - `main.run` 使用 `load_app_settings()` 和组合根，现有工具暴露列表无变化；
 - `common.workspace_config` 只是兼容门面，不再拥有独立默认值和配置优先级；
-- 运行代码中不存在 `E:\SynologyDrive` 或固定 PageIndex 安装路径默认值；
+- 运行代码中不存在旧机器绝对路径或固定 PageIndex 安装路径默认值；
 - 本地 DocumentStore 和 ProjectionWriter 的路径穿越测试通过；
 - PageIndex 缺失时返回可识别的 blocked 能力状态；
 - AdapterRegistry 拒绝重复和未知适配器，且不支持动态任意模块加载；

@@ -168,3 +168,33 @@ def test_tool_contract_does_not_claim_to_compare_descriptions():
         rule for rule in payload["validation_rules"] if rule["id"] == "TOOL-003"
     )
     assert "不自动比较 description" in description_rule["check"]
+
+
+def test_bid_files_reference_uses_app_settings_and_node_local_runtime():
+    reference = (PROJECT_DIR / "references" / "bid_files_integration.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "load_app_settings" in reference
+    assert "business_root" in reference
+    assert "runtime_workspace" in reference
+    assert "projection_root" in reference
+    assert "不得等于或位于 `business_root` 下" in reference
+    assert "~/Desktop/" not in reference
+    assert 'expanduser("~/Desktop' not in reference
+
+
+def test_historical_platform_plan_corrects_all_copyable_runtime_defaults():
+    plan = (
+        PROJECT_DIR / "docs" / "superpowers" / "plans"
+        / "2026-07-23-platform-foundation.md"
+    ).read_text(encoding="utf-8")
+
+    assert "## 纠正说明（以当前实现为准）" in plan
+    assert 'default_runtime = Path.home() / ".project_manager"' in plan
+    assert 'resolved_business_root / ".project_manager"' not in plan
+    assert '"runtime_workspace": "~/.project_manager"' in plan
+    assert '"sqlite_path": "~/.project_manager/state/project_manager.sqlite3"' in plan
+    assert '"projection_root": "~/.project_manager/projections"' in plan
+    assert '"base_dir_default": "${HOME}/.project_manager"' in plan
+    assert "ProjectManagerData/.project_manager" not in plan

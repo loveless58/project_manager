@@ -28,11 +28,14 @@ result = run("今天有什么风险项目", planner_mode="rule")
 需要整理文件时，请为本次运行显式传入临时工作区；归档仍需经过 `execute_archive_plan(..., confirmed=True)` 的人工确认门：
 
 ```python
+from platform_core.settings import load_app_settings
+
+settings = load_app_settings()
 result = run(
-    r"请整理文件并归档 C:\path\to\采购公告.docx",
+    "请整理 business://incoming/synthetic 并生成归档计划",
     planner_mode="rule",
-    data_workspace_dir=r"C:\tmp\project_manager_data_workspace",
-    trace_dir=r"C:\tmp\project_manager_traces",
+    data_workspace_dir=str(settings.runtime_workspace / "examples" / "file-organization"),
+    trace_dir=str(settings.runtime_workspace / "traces"),
 )
 ```
 
