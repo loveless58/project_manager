@@ -1,3 +1,12 @@
+"""Consistent SQLite backups for a trusted local operations directory.
+
+`output_path.parent` must be controlled by trusted local operators. Hard-link
+no-overwrite publication protects cooperating processes. Python's standard
+library cannot atomically compare a directory entry's identity and unlink it,
+so same-privilege malicious path replacement is outside this module's
+guarantees.
+"""
+
 import hashlib
 import json
 import os
@@ -59,6 +68,12 @@ def create_sqlite_backup(
     *,
     options: SqliteConnectionOptions = SqliteConnectionOptions(),
 ) -> BackupResult:
+    """Create a verified backup beneath a trusted `output_path.parent`.
+
+    The parent must not permit untrusted processes to rename or replace its
+    entries while publication or compensation is running.
+    """
+
     try:
         return _create_sqlite_backup(
             database_path,
@@ -115,18 +130,24 @@ def _create_sqlite_backup(
     _require_valid_foreign_keys(database_path, options=options)
 
     manifest_path = Path(f"{output_path}.manifest.json")
+    staging_dir: Path | None = None
     backup_temp: Path | None = None
     manifest_temp: Path | None = None
+    staging_identity: tuple[int, int] | None = None
     backup_identity: tuple[int, int] | None = None
     manifest_identity: tuple[int, int] | None = None
 
     try:
-        backup_temp, backup_identity = _create_temp_file(
+        staging_dir, staging_identity = _create_staging_directory(
             output_path.parent,
             output_path.name,
         )
+        backup_temp, backup_identity = _create_temp_file(
+            staging_dir,
+            output_path.name,
+        )
         manifest_temp, manifest_identity = _create_temp_file(
-            output_path.parent,
+            staging_dir,
             manifest_path.name,
         )
         _copy_sqlite_snapshot(database_path, backup_temp, options=options)
@@ -168,29 +189,57 @@ def _create_sqlite_backup(
                 raise BackupError("backup publication cleanup failed")
             raise BackupError("backup temporary file cleanup failed")
 
-        if _path_identity(manifest_temp) != manifest_identity:
-            raise BackupError("backup temporary file ownership changed")
         try:
-            _link_no_overwrite(manifest_temp, manifest_path, manifest_identity)
-        except _PublicationFailure as error:
-            if error.removal_result is _RemovalResult.FAILED:
-                raise BackupError("backup publication cleanup failed") from None
-            backup_compensation = _remove_owned_path(
+            if _path_identity(manifest_temp) != manifest_identity:
+                raise BackupError("backup publication failed")
+            try:
+                _link_no_overwrite(
+                    manifest_temp,
+                    manifest_path,
+                    manifest_identity,
+                )
+            except _PublicationFailure as error:
+                if error.removal_result is _RemovalResult.FAILED:
+                    raise BackupError(
+                        "backup publication cleanup failed"
+                    ) from None
+                raise BackupError("backup publication failed") from None
+
+            manifest_temp_result = _remove_owned_path(
+                manifest_temp,
+                manifest_identity,
+            )
+            if manifest_temp_result in _TEMP_REMOVED:
+                manifest_temp = None
+            else:
+                raise BackupError("backup temporary file cleanup failed")
+
+            staging_result = _remove_owned_directory(
+                staging_dir,
+                staging_identity,
+            )
+            if staging_result in _TEMP_REMOVED:
+                staging_dir = None
+            else:
+                raise BackupError("backup temporary file cleanup failed")
+
+            if (
+                _path_identity(output_path) != backup_identity
+                or _path_identity(manifest_path) != manifest_identity
+            ):
+                raise BackupError("backup publication failed")
+        except (BackupError, OSError) as error:
+            compensation_succeeded = _remove_published_pair(
                 output_path,
                 backup_identity,
+                manifest_path,
+                manifest_identity,
             )
-            if backup_compensation not in _OWNED_FINAL_ABSENT:
+            if not compensation_succeeded:
                 raise BackupError("backup publication cleanup failed") from None
+            if isinstance(error, BackupError):
+                raise
             raise BackupError("backup publication failed") from None
-
-        manifest_temp_result = _remove_owned_path(
-            manifest_temp,
-            manifest_identity,
-        )
-        if manifest_temp_result in _TEMP_REMOVED:
-            manifest_temp = None
-        else:
-            raise BackupError("backup temporary file cleanup failed")
         return BackupResult(output_path, manifest_path, manifest)
     finally:
         if backup_temp is not None and backup_identity is not None:
@@ -200,6 +249,8 @@ def _create_sqlite_backup(
                 manifest_temp,
                 manifest_identity,
             )
+        if staging_dir is not None and staging_identity is not None:
+            _remove_owned_directory(staging_dir, staging_identity)
 
 
 def _copy_sqlite_snapshot(
@@ -241,6 +292,25 @@ def _require_valid_foreign_keys(
         connection.close()
 
 
+def _create_staging_directory(
+    parent: Path,
+    final_name: str,
+) -> tuple[Path, tuple[int, int]]:
+    path = Path(
+        tempfile.mkdtemp(
+            prefix=f".{final_name}.backup-staging.",
+            dir=parent,
+        )
+    )
+    identity = _path_identity(path)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        _remove_owned_directory(path, identity)
+        raise
+    return path, identity
+
+
 def _create_temp_file(
     parent: Path,
     final_name: str,
@@ -251,8 +321,16 @@ def _create_temp_file(
         dir=parent,
     )
     path = Path(name)
-    stat_result = os.fstat(descriptor)
-    identity = (stat_result.st_dev, stat_result.st_ino)
+    try:
+        stat_result = os.fstat(descriptor)
+    except OSError:
+        try:
+            os.close(descriptor)
+        finally:
+            _remove_private_temp_without_identity(path)
+        raise
+
+    identity = _identity_from_stat(stat_result)
     try:
         os.close(descriptor)
     except OSError:
@@ -312,9 +390,12 @@ def _validate_manifest(manifest: BackupManifest) -> None:
         raise ValueError
 
 
-def _path_identity(path: Path) -> tuple[int, int]:
-    stat_result = path.stat()
+def _identity_from_stat(stat_result: os.stat_result) -> tuple[int, int]:
     return (stat_result.st_dev, stat_result.st_ino)
+
+
+def _path_identity(path: Path) -> tuple[int, int]:
+    return _identity_from_stat(path.stat())
 
 
 def _remove_owned_path(
@@ -338,6 +419,56 @@ def _remove_owned_path(
     except OSError:
         return _RemovalResult.FAILED
     return _RemovalResult.REMOVED
+
+
+def _remove_owned_directory(
+    path: Path,
+    identity: tuple[int, int] | None,
+) -> _RemovalResult:
+    if identity is None:
+        return _RemovalResult.FAILED
+    try:
+        current_identity = _path_identity(path)
+    except FileNotFoundError:
+        return _RemovalResult.ABSENT
+    except OSError:
+        return _RemovalResult.FAILED
+    if current_identity != identity:
+        return _RemovalResult.NOT_OWNED
+    try:
+        path.rmdir()
+    except FileNotFoundError:
+        return _RemovalResult.ABSENT
+    except OSError:
+        return _RemovalResult.FAILED
+    return _RemovalResult.REMOVED
+
+
+def _remove_published_pair(
+    backup_path: Path,
+    backup_identity: tuple[int, int],
+    manifest_path: Path,
+    manifest_identity: tuple[int, int],
+) -> bool:
+    manifest_result = _remove_owned_path(
+        manifest_path,
+        manifest_identity,
+    )
+    if manifest_result is _RemovalResult.FAILED:
+        return False
+    backup_result = _remove_owned_path(
+        backup_path,
+        backup_identity,
+    )
+    return backup_result in _OWNED_FINAL_ABSENT
+
+
+def _remove_private_temp_without_identity(path: Path) -> bool:
+    try:
+        path.unlink()
+    except OSError:
+        return False
+    return True
 
 
 def _utc_timestamp() -> str:
