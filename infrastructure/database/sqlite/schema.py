@@ -67,6 +67,28 @@ def read_applied_migrations(
     )
 
 
+def _inspect_schema_connection(
+    connection: sqlite3.Connection,
+    catalog: Sequence[MigrationInfo],
+) -> SchemaStatus:
+    target_version = catalog_target_version(catalog)
+    all_catalog_versions = tuple(item.version for item in catalog)
+    check_database_integrity(connection)
+    if not _metadata_table_exists(connection):
+        return SchemaStatus(
+            state=SchemaState.UNINITIALIZED,
+            current_version=0,
+            target_version=target_version,
+            pending_versions=all_catalog_versions,
+            error_code=None,
+        )
+    if not _metadata_columns_are_valid(connection):
+        return _corrupt_status(0, target_version)
+
+    applied = read_applied_migrations(connection)
+    return _status_from_applied_migrations(applied, catalog)
+
+
 def inspect_schema(
     database_path: Path,
     catalog: Sequence[MigrationInfo],
@@ -91,18 +113,7 @@ def inspect_schema(
             create=False,
         )
         try:
-            check_database_integrity(connection)
-            if not _metadata_table_exists(connection):
-                return SchemaStatus(
-                    state=SchemaState.UNINITIALIZED,
-                    current_version=0,
-                    target_version=target_version,
-                    pending_versions=all_catalog_versions,
-                    error_code=None,
-                )
-            if not _metadata_columns_are_valid(connection):
-                return _corrupt_status(0, target_version)
-            applied = read_applied_migrations(connection)
+            return _inspect_schema_connection(connection, catalog)
         finally:
             connection.close()
     except DatabaseBusyError:
@@ -110,6 +121,12 @@ def inspect_schema(
     except DatabaseIntegrityError:
         return _corrupt_status(0, target_version)
 
+
+def _status_from_applied_migrations(
+    applied: tuple[AppliedMigration, ...],
+    catalog: Sequence[MigrationInfo],
+) -> SchemaStatus:
+    target_version = catalog_target_version(catalog)
     if not _applied_values_are_valid(applied):
         current_version = _highest_integer_version(applied)
         return _corrupt_status(current_version, target_version)

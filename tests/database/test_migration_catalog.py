@@ -88,8 +88,10 @@ def test_catalog_rejects_illegal_filenames(tmp_path, filename):
 def test_catalog_rejects_invalid_utf8(tmp_path):
     (tmp_path / "0001_invalid_encoding.sql").write_bytes(b"\xff")
 
-    with pytest.raises(MigrationCatalogError, match="UTF-8"):
+    with pytest.raises(MigrationCatalogError, match="UTF-8") as raised:
         load_migration_catalog(tmp_path)
+
+    assert raised.value.__cause__ is None
 
 
 def test_catalog_accepts_trigger_body_without_splitting_sql(tmp_path):
@@ -108,7 +110,14 @@ def test_catalog_accepts_trigger_body_without_splitting_sql(tmp_path):
 
 @pytest.mark.parametrize(
     "statement",
-    ["BEGIN;", "COMMIT;", "ROLLBACK;", "SAVEPOINT x;", "RELEASE x;"],
+    [
+        "BEGIN;",
+        "COMMIT;",
+        "END TRANSACTION;",
+        "ROLLBACK;",
+        "SAVEPOINT x;",
+        "RELEASE x;",
+    ],
 )
 def test_catalog_rejects_runner_transaction_escape(tmp_path, statement):
     (tmp_path / "0001_bad_transaction.sql").write_text(statement, encoding="utf-8")

@@ -7,7 +7,7 @@ from .contracts import MigrationCatalogError, MigrationInfo
 
 
 _TRANSACTION_CONTROL = re.compile(
-    r"(?:\A|;)\s*(?:BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE)\b",
+    r"(?:\A|;)\s*(?:BEGIN|COMMIT|END\s+TRANSACTION|ROLLBACK|SAVEPOINT|RELEASE)\b",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -29,8 +29,8 @@ def load_migration_catalog(directory: Path) -> tuple[MigrationInfo, ...]:
         payload = path.read_bytes()
         try:
             sql = payload.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise MigrationCatalogError("migration SQL must be valid UTF-8") from error
+        except UnicodeDecodeError:
+            raise MigrationCatalogError("migration SQL must be valid UTF-8") from None
 
         if _TRANSACTION_CONTROL.search(_mask_sql_literals_and_comments(sql)):
             raise MigrationCatalogError(

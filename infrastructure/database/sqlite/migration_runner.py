@@ -26,9 +26,9 @@ from .connection import (
     open_sqlite_connection,
 )
 from .schema import (
+    _inspect_schema_connection,
     initialize_schema_metadata,
     inspect_schema,
-    read_applied_migrations,
 )
 
 
@@ -38,6 +38,28 @@ _INSERT_APPLIED_MIGRATION_SQL = (
     "VALUES (?, ?, ?, ?, ?)"
 )
 _LOWERCASE_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+class _MigrationTransactionAuthorizer:
+    def __init__(self) -> None:
+        self._runner_begin_seen = False
+
+    def __call__(
+        self,
+        action_code: int,
+        argument_1: str | None,
+        argument_2: str | None,
+        database_name: str | None,
+        trigger_name: str | None,
+    ) -> int:
+        if action_code == sqlite3.SQLITE_TRANSACTION:
+            if argument_1 == "BEGIN" and not self._runner_begin_seen:
+                self._runner_begin_seen = True
+                return sqlite3.SQLITE_OK
+            return sqlite3.SQLITE_DENY
+        if action_code == sqlite3.SQLITE_SAVEPOINT:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +88,7 @@ def apply_pending_migrations(
         Callable[[sqlite3.Connection, MigrationInfo], None] | None
     ) = None,
 ) -> MigrationRunResult:
+    _verify_catalog_payloads(catalog)
     initial_status = inspect_schema(database_path, catalog, options=options)
     _raise_for_unusable_status(initial_status)
     previous_version = initial_status.current_version
@@ -134,15 +157,26 @@ def _apply_one_migration(
 
         started = perf_counter()
         try:
-            connection.executescript("BEGIN IMMEDIATE;\n" + migration_sql)
+            authorizer = _MigrationTransactionAuthorizer()
+            connection.set_authorizer(authorizer)
+            try:
+                connection.executescript("BEGIN IMMEDIATE;\n" + migration_sql)
+            finally:
+                connection.set_authorizer(None)
             execution_ms = max(0, round((perf_counter() - started) * 1000))
 
-            locked_version = _validated_current_version(connection, catalog)
-            if locked_version >= migration.version:
+            locked_status = _inspect_schema_connection(connection, catalog)
+            _raise_for_unusable_status(locked_status)
+            if locked_status.current_version >= migration.version:
                 connection.rollback()
                 return False
-            if locked_version != migration.version - 1:
-                raise DatabaseIntegrityError("database migration history is invalid")
+            if (
+                locked_status.state is not SchemaState.PENDING
+                or locked_status.current_version != migration.version - 1
+            ):
+                raise DatabaseIntegrityError(
+                    "database migration history is invalid"
+                ) from None
 
             if before_record_insert is not None:
                 before_record_insert(connection, migration)
@@ -164,8 +198,9 @@ def _apply_one_migration(
                 connection.rollback()
 
             if isinstance(error, sqlite3.DatabaseError):
-                current_version = _validated_current_version(connection, catalog)
-                if current_version >= migration.version:
+                failure_status = _inspect_schema_connection(connection, catalog)
+                _raise_for_unusable_status(failure_status)
+                if failure_status.current_version >= migration.version:
                     return False
                 try:
                     _raise_mapped_sqlite_error(error)
@@ -181,10 +216,10 @@ def _apply_one_migration(
                     SchemaTooNewError,
                 ),
             ):
-                raise
+                raise error from None
             raise MigrationExecutionError(
                 f"migration {migration.version} failed"
-            ) from error
+            ) from None
     finally:
         connection.close()
 
@@ -192,10 +227,10 @@ def _apply_one_migration(
 def _read_verified_migration_sql(migration: MigrationInfo) -> str:
     try:
         payload = migration.path.read_bytes()
-    except OSError as error:
+    except OSError:
         raise MigrationExecutionError(
             f"migration {migration.version} failed"
-        ) from error
+        ) from None
 
     if hashlib.sha256(payload).hexdigest() != migration.checksum_sha256:
         raise MigrationChecksumError(
@@ -203,46 +238,33 @@ def _read_verified_migration_sql(migration: MigrationInfo) -> str:
         )
     try:
         return payload.decode("utf-8")
-    except UnicodeDecodeError as error:
+    except UnicodeDecodeError:
         raise MigrationChecksumError(
             f"migration {migration.version} checksum mismatch"
-        ) from error
+        ) from None
 
 
-def _validated_current_version(
-    connection: sqlite3.Connection,
-    catalog: Sequence[MigrationInfo],
-) -> int:
-    applied = read_applied_migrations(connection)
-    if tuple(item.version for item in applied) != tuple(range(1, len(applied) + 1)):
-        raise DatabaseIntegrityError("database migration history is invalid")
-
-    catalog_by_version = {item.version: item for item in catalog}
-    for record in applied:
-        expected = catalog_by_version.get(record.version)
-        if expected is None:
-            raise SchemaTooNewError("database schema is newer than migration catalog")
-        if (
-            record.name != expected.name
-            or record.checksum_sha256 != expected.checksum_sha256
-        ):
-            raise MigrationChecksumError("migration checksum mismatch")
-
-    return applied[-1].version if applied else 0
+def _verify_catalog_payloads(catalog: Sequence[MigrationInfo]) -> None:
+    for migration in catalog:
+        _read_verified_migration_sql(migration)
 
 
 def _raise_for_unusable_status(status: SchemaStatus) -> None:
     if status.state in (SchemaState.CURRENT, SchemaState.PENDING):
         return
     if status.state is SchemaState.TAMPERED:
-        raise MigrationChecksumError("migration checksum mismatch")
+        raise MigrationChecksumError("migration checksum mismatch") from None
     if status.state is SchemaState.TOO_NEW:
-        raise SchemaTooNewError("database schema is newer than migration catalog")
+        raise SchemaTooNewError(
+            "database schema is newer than migration catalog"
+        ) from None
     if status.state is SchemaState.INVALID_CATALOG:
-        raise MigrationCatalogError("migration catalog is invalid")
+        raise MigrationCatalogError("migration catalog is invalid") from None
     if status.state is SchemaState.UNINITIALIZED:
-        raise DatabaseIntegrityError("database schema metadata is not initialized")
-    raise DatabaseIntegrityError("database integrity check failed")
+        raise DatabaseIntegrityError(
+            "database schema metadata is not initialized"
+        ) from None
+    raise DatabaseIntegrityError("database integrity check failed") from None
 
 
 def _validate_backup_authorization(
