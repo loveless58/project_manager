@@ -302,7 +302,12 @@ def _create_staging_directory(
             dir=parent,
         )
     )
-    identity = _path_identity(path)
+    try:
+        identity = _path_identity(path)
+    except OSError:
+        _remove_private_empty_directory_without_identity(path)
+        raise
+
     try:
         path.chmod(0o700)
     except OSError:
@@ -466,6 +471,14 @@ def _remove_published_pair(
 def _remove_private_temp_without_identity(path: Path) -> bool:
     try:
         path.unlink()
+    except OSError:
+        return False
+    return True
+
+
+def _remove_private_empty_directory_without_identity(path: Path) -> bool:
+    try:
+        path.rmdir()
     except OSError:
         return False
     return True

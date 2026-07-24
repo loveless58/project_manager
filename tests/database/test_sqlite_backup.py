@@ -979,3 +979,99 @@ def test_backup_documents_trusted_output_directory_boundary() -> None:
     assert "cooperating processes" in module_documentation
     assert "same-privilege malicious path replacement" in module_documentation
     assert "output_path.parent" in api_documentation
+
+
+def test_staging_identity_failure_removes_only_exact_empty_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    database: Path,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    output = output_dir / "backup.sqlite3"
+    real_mkdtemp = backup_module.tempfile.mkdtemp
+    real_rmdir = Path.rmdir
+    created_staging: Path | None = None
+    rmdir_calls: list[Path] = []
+
+    def record_created_staging(*args, **kwargs):
+        nonlocal created_staging
+        created_staging = Path(real_mkdtemp(*args, **kwargs))
+        return str(created_staging)
+
+    def fail_first_staging_identity(path):
+        if path == created_staging:
+            raise OSError("injected staging identity failure")
+        return (path.stat().st_dev, path.stat().st_ino)
+
+    def record_exact_rmdir(path):
+        rmdir_calls.append(path)
+        return real_rmdir(path)
+
+    monkeypatch.setattr(
+        backup_module.tempfile,
+        "mkdtemp",
+        record_created_staging,
+    )
+    monkeypatch.setattr(
+        backup_module,
+        "_path_identity",
+        fail_first_staging_identity,
+    )
+    monkeypatch.setattr(Path, "rmdir", record_exact_rmdir)
+
+    with pytest.raises(BackupError) as raised:
+        create_sqlite_backup(database, output, ())
+
+    assert str(raised.value) == "database backup failed"
+    assert created_staging is not None
+    assert rmdir_calls == [created_staging]
+    assert not created_staging.exists()
+    _assert_no_backup_artifacts(output)
+
+
+def test_staging_identity_failure_preserves_nonempty_replacement_state(
+    monkeypatch: pytest.MonkeyPatch,
+    database: Path,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    output = output_dir / "backup.sqlite3"
+    real_mkdtemp = backup_module.tempfile.mkdtemp
+    created_staging: Path | None = None
+    marker_name = "non-owned-marker.txt"
+
+    def replace_created_staging_with_nonempty_state(*args, **kwargs):
+        nonlocal created_staging
+        created_staging = Path(real_mkdtemp(*args, **kwargs))
+        (created_staging / marker_name).write_text(
+            "preserve",
+            encoding="utf-8",
+        )
+        return str(created_staging)
+
+    def fail_first_staging_identity(path):
+        if path == created_staging:
+            raise OSError("injected staging identity failure")
+        return (path.stat().st_dev, path.stat().st_ino)
+
+    monkeypatch.setattr(
+        backup_module.tempfile,
+        "mkdtemp",
+        replace_created_staging_with_nonempty_state,
+    )
+    monkeypatch.setattr(
+        backup_module,
+        "_path_identity",
+        fail_first_staging_identity,
+    )
+
+    with pytest.raises(BackupError) as raised:
+        create_sqlite_backup(database, output, ())
+
+    assert str(raised.value) == "database backup failed"
+    assert created_staging is not None
+    assert (created_staging / marker_name).read_text(encoding="utf-8") == "preserve"
+    assert not output.exists()
+    assert not _manifest_path(output).exists()
