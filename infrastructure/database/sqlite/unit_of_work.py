@@ -61,43 +61,72 @@ class SqliteUnitOfWork:
             _UowState.ROLLED_BACK,
         )
         rollback_error: BaseException | None = None
-        try:
-            if self._state is _UowState.ACTIVE:
-                try:
-                    self.rollback()
-                except BaseException as error:
-                    rollback_error = error
-        finally:
+        if self._state is _UowState.ACTIVE:
             try:
-                self._connection.close()  # type: ignore[union-attr]
-            finally:
-                self._connection = None
-                self._state = _UowState.CLOSED
+                self._active_connection().rollback()
+            except sqlite3.DatabaseError as error:
+                try:
+                    _raise_mapped_sqlite_error(error)
+                except BaseException as mapped_error:
+                    rollback_error = mapped_error
+            except BaseException as error:
+                rollback_error = error
+            else:
+                self._state = _UowState.ROLLED_BACK
 
-        if rollback_error is not None and exc_type is None:
-            raise rollback_error
+        close_error = self._close_connection()
+        self._state = _UowState.CLOSED
+
+        if exc_type is None:
+            if rollback_error is not None:
+                raise rollback_error
+            if close_error is not None:
+                raise close_error
         return None
 
     @property
     def connection(self) -> sqlite3.Connection:
-        self._require_state(_UowState.ACTIVE)
-        return self._connection  # type: ignore[return-value]
+        return self._active_connection()
 
     def commit(self) -> None:
-        self._require_state(_UowState.ACTIVE)
+        connection = self._active_connection()
         try:
-            self.connection.commit()
+            connection.commit()
         except sqlite3.DatabaseError as error:
             _raise_mapped_sqlite_error(error)
         self._state = _UowState.COMMITTED
+        close_error = self._close_connection()
+        if close_error is not None:
+            raise close_error
 
     def rollback(self) -> None:
-        self._require_state(_UowState.ACTIVE)
+        connection = self._active_connection()
         try:
-            self.connection.rollback()
+            connection.rollback()
         except sqlite3.DatabaseError as error:
             _raise_mapped_sqlite_error(error)
         self._state = _UowState.ROLLED_BACK
+        close_error = self._close_connection()
+        if close_error is not None:
+            raise close_error
+
+    def _active_connection(self) -> sqlite3.Connection:
+        self._require_state(_UowState.ACTIVE)
+        connection = self._connection
+        if connection is None:
+            raise UnitOfWorkStateError("unit of work is not active")
+        return connection
+
+    def _close_connection(self) -> BaseException | None:
+        connection = self._connection
+        self._connection = None
+        if connection is None:
+            return None
+        try:
+            connection.close()
+        except BaseException as error:
+            return error
+        return None
 
     def _require_state(self, *allowed_states: _UowState) -> None:
         if self._state not in allowed_states:
