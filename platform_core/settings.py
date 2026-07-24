@@ -113,6 +113,7 @@ def load_app_settings(
     environ: Optional[Mapping[str, str]] = None,
     business_root: Optional[PathLike] = None,
     runtime_workspace: Optional[PathLike] = None,
+    sqlite_path: Optional[PathLike] = None,
 ) -> AppSettings:
     env = dict(os.environ if environ is None else environ)
     local = _read_config(config_file)
@@ -158,7 +159,7 @@ def load_app_settings(
         )
     ).lower()
     raw_sqlite_path = _pick(
-        None,
+        sqlite_path,
         env,
         "PROJECT_MANAGER_SQLITE_PATH",
         local_database.get("sqlite_path"),

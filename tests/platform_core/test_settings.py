@@ -111,6 +111,39 @@ def test_environment_overrides_json_and_defaults(tmp_path):
     assert settings.runtime_workspace == (tmp_path / "env-runtime").resolve()
 
 
+def test_explicit_sqlite_path_overrides_environment_and_json(tmp_path):
+    config = tmp_path / "project-manager.local.json"
+    config.write_text(
+        json.dumps({"database": {"sqlite_path": str(tmp_path / "json.sqlite3")}}),
+        encoding="utf-8",
+    )
+    from platform_core.settings import load_app_settings
+
+    settings = load_app_settings(
+        config_file=config,
+        environ={"PROJECT_MANAGER_SQLITE_PATH": str(tmp_path / "env.sqlite3")},
+        runtime_workspace=tmp_path / "runtime",
+        business_root=tmp_path / "business",
+        sqlite_path=tmp_path / "explicit.sqlite3",
+    )
+
+    assert settings.database.sqlite_path == (tmp_path / "explicit.sqlite3").resolve()
+
+
+def test_explicit_sqlite_path_uses_existing_locality_validation(tmp_path):
+    from platform_core.settings import SettingsError, load_app_settings
+
+    business_root = tmp_path / "business"
+    with pytest.raises(SettingsError, match="sqlite_path must not be inside business_root"):
+        load_app_settings(
+            config_file="",
+            environ={},
+            business_root=business_root,
+            runtime_workspace=tmp_path / "runtime",
+            sqlite_path=business_root / "state.sqlite3",
+        )
+
+
 def test_central_profile_selects_postgresql_without_reading_secret(tmp_path):
     from platform_core.settings import load_app_settings
 
