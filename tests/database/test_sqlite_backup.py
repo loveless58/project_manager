@@ -330,3 +330,368 @@ def test_injected_second_publication_failure_cleans_owned_files(
     assert str(database) not in str(raised.value)
     assert calls == 2
     _assert_no_backup_artifacts(output)
+
+
+def test_source_foreign_keys_are_checked_before_backup_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "source.sqlite3"
+    initialize_schema_metadata(database)
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            "CREATE TABLE parent (id INTEGER PRIMARY KEY);"
+            "CREATE TABLE child ("
+            "id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL,"
+            "FOREIGN KEY (parent_id) REFERENCES parent(id));"
+            "INSERT INTO child VALUES (1, 999);"
+        )
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    output = output_dir / "backup.sqlite3"
+    original_copy = backup_module._copy_sqlite_snapshot
+    copy_called = False
+
+    def repair_source_then_copy(database_path, destination_path, **kwargs):
+        nonlocal copy_called
+        copy_called = True
+        with sqlite3.connect(database_path) as connection:
+            connection.execute("DELETE FROM child")
+        original_copy(database_path, destination_path, **kwargs)
+
+    monkeypatch.setattr(
+        backup_module,
+        "_copy_sqlite_snapshot",
+        repair_source_then_copy,
+    )
+
+    with pytest.raises(BackupError):
+        create_sqlite_backup(database, output, ())
+
+    assert not copy_called
+    _assert_no_backup_artifacts(output)
+
+
+def test_replaced_backup_is_not_deleted_when_manifest_publication_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    database: Path,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    output = output_dir / "backup.sqlite3"
+    replacement = b"replacement owned elsewhere"
+    real_link = os.link
+    calls = 0
+
+    def replace_after_first_link(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            real_link(source, destination)
+            Path(destination).unlink()
+            Path(destination).write_bytes(replacement)
+            return
+        raise OSError("injected manifest link failure")
+
+    monkeypatch.setattr(backup_module.os, "link", replace_after_first_link)
+
+    with pytest.raises(BackupError):
+        create_sqlite_backup(database, output, ())
+
+    assert output.read_bytes() == replacement
+    assert not _manifest_path(output).exists()
+    assert [path.name for path in output_dir.iterdir()] == ["backup.sqlite3"]
+
+
+def test_link_that_creates_backup_then_raises_is_safely_compensated(
+    monkeypatch: pytest.MonkeyPatch,
+    database: Path,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    output = output_dir / "backup.sqlite3"
+    real_link = os.link
+
+    def link_then_raise(source, destination):
+        real_link(source, destination)
+        raise OSError("injected post-link failure")
+
+    monkeypatch.setattr(backup_module.os, "link", link_then_raise)
+
+    with pytest.raises(BackupError):
+        create_sqlite_backup(database, output, ())
+
+    _assert_no_backup_artifacts(output)
+
+
+def test_first_temp_unlink_failure_is_retried_without_reporting_success(
+    monkeypatch: pytest.MonkeyPatch,
+    database: Path,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    output = output_dir / "backup.sqlite3"
+    real_unlink = Path.unlink
+    temp_unlink_attempts = 0
+
+    def fail_first_backup_temp_unlink(path, *args, **kwargs):
+        nonlocal temp_unlink_attempts
+        if (
+            path.name.startswith(".backup.sqlite3.")
+            and ".manifest.json." not in path.name
+            and path.suffix == ".tmp"
+        ):
+            temp_unlink_attempts += 1
+            if temp_unlink_attempts == 1:
+                raise OSError("injected temp unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_first_backup_temp_unlink)
+
+    with pytest.raises(BackupError, match="temporary file cleanup"):
+        create_sqlite_backup(database, output, ())
+
+    assert temp_unlink_attempts == 2
+    _assert_no_backup_artifacts(output)
+
+
+def test_persistent_temp_unlink_failure_never_reports_success_or_deletes_foreign_file(
+    monkeypatch: pytest.MonkeyPatch,
+    database: Path,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    sentinel = output_dir / "foreign.txt"
+    sentinel.write_text("preserve", encoding="utf-8")
+    output = output_dir / "backup.sqlite3"
+    real_unlink = Path.unlink
+    temp_unlink_attempts = 0
+
+    def fail_backup_temp_unlink(path, *args, **kwargs):
+        nonlocal temp_unlink_attempts
+        if (
+            path.name.startswith(".backup.sqlite3.")
+            and ".manifest.json." not in path.name
+            and path.suffix == ".tmp"
+        ):
+            temp_unlink_attempts += 1
+            raise OSError("persistent temp unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_backup_temp_unlink)
+
+    with pytest.raises(BackupError, match="temporary file cleanup"):
+        create_sqlite_backup(database, output, ())
+
+    assert temp_unlink_attempts >= 2
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+    assert not output.exists()
+    assert not _manifest_path(output).exists()
+    remaining_temps = [
+        path for path in output_dir.iterdir() if path.suffix == ".tmp"
+    ]
+    assert len(remaining_temps) == 1
+
+
+def test_failed_backup_compensation_is_reported_without_deleting_backup(
+    monkeypatch: pytest.MonkeyPatch,
+    database: Path,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    output = output_dir / "backup.sqlite3"
+    real_link = os.link
+    real_unlink = Path.unlink
+    link_calls = 0
+
+    def fail_manifest_link(source, destination):
+        nonlocal link_calls
+        link_calls += 1
+        if link_calls == 2:
+            raise OSError("injected manifest link failure")
+        real_link(source, destination)
+
+    def fail_backup_compensation(path, *args, **kwargs):
+        if path == output:
+            raise OSError("injected compensation failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(backup_module.os, "link", fail_manifest_link)
+    monkeypatch.setattr(Path, "unlink", fail_backup_compensation)
+
+    with pytest.raises(BackupError) as raised:
+        create_sqlite_backup(database, output, ())
+
+    assert str(raised.value) == "backup publication cleanup failed"
+    assert output.is_file()
+    assert not _manifest_path(output).exists()
+    assert all(path.suffix != ".tmp" for path in output_dir.iterdir())
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing_field",
+        "extra_field",
+        "format_version",
+        "schema_version_bool",
+        "target_version_bool",
+        "size_bool",
+        "negative_schema",
+        "negative_target",
+        "negative_size",
+        "short_sha",
+        "uppercase_sha",
+        "invalid_utc",
+        "integrity_not_ok",
+    ],
+)
+def test_load_backup_manifest_enforces_strict_schema_and_types(
+    backup_result,
+    tmp_path: Path,
+    case: str,
+) -> None:
+    payload = json.loads(
+        backup_result.manifest_path.read_text(encoding="utf-8")
+    )
+    if case == "missing_field":
+        payload.pop("sqlite_version")
+    elif case == "extra_field":
+        payload["source_path"] = "forbidden"
+    elif case == "format_version":
+        payload["format_version"] = 2
+    elif case == "schema_version_bool":
+        payload["schema_version"] = True
+    elif case == "target_version_bool":
+        payload["catalog_target_version"] = False
+    elif case == "size_bool":
+        payload["size_bytes"] = True
+    elif case == "negative_schema":
+        payload["schema_version"] = -1
+    elif case == "negative_target":
+        payload["catalog_target_version"] = -1
+    elif case == "negative_size":
+        payload["size_bytes"] = -1
+    elif case == "short_sha":
+        payload["sha256"] = "0" * 63
+    elif case == "uppercase_sha":
+        payload["sha256"] = "A" * 64
+    elif case == "invalid_utc":
+        payload["created_at_utc"] = "2026-07-25T12:00:00+00:00"
+    elif case == "integrity_not_ok":
+        payload["integrity_check"] = "failed"
+
+    manifest_path = tmp_path / f"{case}.manifest.json"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(BackupError, match="manifest is invalid"):
+        load_backup_manifest(manifest_path)
+
+
+def test_mkstemp_close_error_cleans_created_path_and_is_safely_mapped(
+    monkeypatch: pytest.MonkeyPatch,
+    database: Path,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    output = output_dir / "backup.sqlite3"
+    real_close = os.close
+    close_calls = 0
+
+    def close_then_raise(descriptor):
+        nonlocal close_calls
+        close_calls += 1
+        real_close(descriptor)
+        raise OSError("injected close failure")
+
+    monkeypatch.setattr(backup_module.os, "close", close_then_raise)
+
+    with pytest.raises(BackupError) as raised:
+        create_sqlite_backup(database, output, ())
+
+    assert str(raised.value) == "database backup failed"
+    assert close_calls == 1
+    _assert_no_backup_artifacts(output)
+
+
+def test_replaced_temp_is_not_deleted_during_final_cleanup_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    database: Path,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    output = output_dir / "backup.sqlite3"
+    replacement = b"foreign temp replacement"
+    real_unlink = Path.unlink
+    replaced_path: Path | None = None
+
+    def replace_backup_temp_while_unlink_fails(path, *args, **kwargs):
+        nonlocal replaced_path
+        if (
+            replaced_path is None
+            and path.name.startswith(".backup.sqlite3.")
+            and ".manifest.json." not in path.name
+            and path.suffix == ".tmp"
+        ):
+            real_unlink(path, *args, **kwargs)
+            path.write_bytes(replacement)
+            replaced_path = path
+            raise OSError("injected unlink race")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", replace_backup_temp_while_unlink_fails)
+
+    with pytest.raises(BackupError, match="temporary file cleanup"):
+        create_sqlite_backup(database, output, ())
+
+    assert replaced_path is not None
+    assert replaced_path.read_bytes() == replacement
+    assert not output.exists()
+    assert not _manifest_path(output).exists()
+
+
+def test_temp_cleanup_reports_failed_backup_compensation(
+    monkeypatch: pytest.MonkeyPatch,
+    database: Path,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    output = output_dir / "backup.sqlite3"
+    real_unlink = Path.unlink
+    temp_failed = False
+
+    def fail_temp_once_and_backup_compensation(path, *args, **kwargs):
+        nonlocal temp_failed
+        if (
+            not temp_failed
+            and path.name.startswith(".backup.sqlite3.")
+            and ".manifest.json." not in path.name
+            and path.suffix == ".tmp"
+        ):
+            temp_failed = True
+            raise OSError("injected temp cleanup failure")
+        if path == output:
+            raise OSError("injected backup compensation failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        Path,
+        "unlink",
+        fail_temp_once_and_backup_compensation,
+    )
+
+    with pytest.raises(BackupError) as raised:
+        create_sqlite_backup(database, output, ())
+
+    assert str(raised.value) == "backup publication cleanup failed"
+    assert output.is_file()
+    assert not _manifest_path(output).exists()
+    assert all(path.suffix != ".tmp" for path in output_dir.iterdir())

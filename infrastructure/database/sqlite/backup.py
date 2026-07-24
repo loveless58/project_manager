@@ -7,6 +7,7 @@ import tempfile
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 
 from ..contracts import (
@@ -23,6 +24,25 @@ from .schema import inspect_schema
 _HASH_CHUNK_SIZE = 1024 * 1024
 _LOWERCASE_SHA256 = re.compile(r"[0-9a-f]{64}")
 _MANIFEST_KEYS = frozenset(BackupManifest.__dataclass_fields__)
+
+
+class _RemovalResult(Enum):
+    REMOVED = "removed"
+    ABSENT = "absent"
+    NOT_OWNED = "not_owned"
+    FAILED = "failed"
+
+
+class _PublicationFailure(Exception):
+    def __init__(self, removal_result: _RemovalResult) -> None:
+        super().__init__()
+        self.removal_result = removal_result
+
+
+_TEMP_REMOVED = frozenset({_RemovalResult.REMOVED, _RemovalResult.ABSENT})
+_OWNED_FINAL_ABSENT = frozenset(
+    {*_TEMP_REMOVED, _RemovalResult.NOT_OWNED}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,16 +112,23 @@ def _create_sqlite_backup(
 ) -> BackupResult:
     source_status = inspect_schema(database_path, catalog, options=options)
     _require_backup_eligible(source_status.state)
+    _require_valid_foreign_keys(database_path, options=options)
 
     manifest_path = Path(f"{output_path}.manifest.json")
     backup_temp: Path | None = None
     manifest_temp: Path | None = None
-    backup_published = False
     backup_identity: tuple[int, int] | None = None
+    manifest_identity: tuple[int, int] | None = None
 
     try:
-        backup_temp = _create_temp_file(output_path.parent, output_path.name)
-        manifest_temp = _create_temp_file(output_path.parent, manifest_path.name)
+        backup_temp, backup_identity = _create_temp_file(
+            output_path.parent,
+            output_path.name,
+        )
+        manifest_temp, manifest_identity = _create_temp_file(
+            output_path.parent,
+            manifest_path.name,
+        )
         _copy_sqlite_snapshot(database_path, backup_temp, options=options)
 
         snapshot_status = inspect_schema(backup_temp, catalog, options=options)
@@ -120,32 +147,59 @@ def _create_sqlite_backup(
         )
         _write_manifest(manifest_temp, manifest)
 
-        os.link(backup_temp, output_path)
-        backup_published = True
-        backup_stat = output_path.stat()
-        backup_identity = (backup_stat.st_dev, backup_stat.st_ino)
-        _remove_owned_path(backup_temp)
-        backup_temp = None
-
+        if _path_identity(backup_temp) != backup_identity:
+            raise BackupError("backup temporary file ownership changed")
         try:
-            os.link(manifest_temp, manifest_path)
-        except OSError:
-            if backup_published and backup_identity is not None:
-                _remove_published_path(output_path, backup_identity)
+            _link_no_overwrite(backup_temp, output_path, backup_identity)
+        except _PublicationFailure as error:
+            if error.removal_result is _RemovalResult.FAILED:
+                raise BackupError("backup publication cleanup failed") from None
             raise BackupError("backup publication failed") from None
 
-        _remove_owned_path(manifest_temp)
-        manifest_temp = None
+        backup_temp_result = _remove_owned_path(backup_temp, backup_identity)
+        if backup_temp_result in _TEMP_REMOVED:
+            backup_temp = None
+        else:
+            backup_compensation = _remove_owned_path(
+                output_path,
+                backup_identity,
+            )
+            if backup_compensation not in _OWNED_FINAL_ABSENT:
+                raise BackupError("backup publication cleanup failed")
+            raise BackupError("backup temporary file cleanup failed")
+
+        if _path_identity(manifest_temp) != manifest_identity:
+            raise BackupError("backup temporary file ownership changed")
+        try:
+            _link_no_overwrite(manifest_temp, manifest_path, manifest_identity)
+        except _PublicationFailure as error:
+            if error.removal_result is _RemovalResult.FAILED:
+                raise BackupError("backup publication cleanup failed") from None
+            backup_compensation = _remove_owned_path(
+                output_path,
+                backup_identity,
+            )
+            if backup_compensation not in _OWNED_FINAL_ABSENT:
+                raise BackupError("backup publication cleanup failed") from None
+            raise BackupError("backup publication failed") from None
+
+        manifest_temp_result = _remove_owned_path(
+            manifest_temp,
+            manifest_identity,
+        )
+        if manifest_temp_result in _TEMP_REMOVED:
+            manifest_temp = None
+        else:
+            raise BackupError("backup temporary file cleanup failed")
         return BackupResult(output_path, manifest_path, manifest)
-    except BackupError:
-        raise
-    except OSError:
-        if backup_published and backup_identity is not None:
-            _remove_published_path(output_path, backup_identity)
-        raise BackupError("backup publication failed") from None
     finally:
-        _remove_owned_path(backup_temp)
-        _remove_owned_path(manifest_temp)
+        if backup_temp is not None and backup_identity is not None:
+            _remove_owned_path(backup_temp, backup_identity)
+        if manifest_temp is not None and manifest_identity is not None:
+            _remove_owned_path(
+                manifest_temp,
+                manifest_identity,
+            )
 
 
 def _copy_sqlite_snapshot(
@@ -187,14 +241,36 @@ def _require_valid_foreign_keys(
         connection.close()
 
 
-def _create_temp_file(parent: Path, final_name: str) -> Path:
+def _create_temp_file(
+    parent: Path,
+    final_name: str,
+) -> tuple[Path, tuple[int, int]]:
     descriptor, name = tempfile.mkstemp(
         prefix=f".{final_name}.",
         suffix=".tmp",
         dir=parent,
     )
-    os.close(descriptor)
-    return Path(name)
+    path = Path(name)
+    stat_result = os.fstat(descriptor)
+    identity = (stat_result.st_dev, stat_result.st_ino)
+    try:
+        os.close(descriptor)
+    except OSError:
+        _remove_owned_path(path, identity)
+        raise
+    return path, identity
+
+
+def _link_no_overwrite(
+    source: Path,
+    destination: Path,
+    identity: tuple[int, int],
+) -> None:
+    try:
+        os.link(source, destination)
+    except OSError:
+        removal_result = _remove_owned_path(destination, identity)
+        raise _PublicationFailure(removal_result) from None
 
 
 def _write_manifest(path: Path, manifest: BackupManifest) -> None:
@@ -236,22 +312,32 @@ def _validate_manifest(manifest: BackupManifest) -> None:
         raise ValueError
 
 
-def _remove_published_path(path: Path, identity: tuple[int, int]) -> None:
-    try:
-        current = path.stat()
-        if (current.st_dev, current.st_ino) == identity:
-            path.unlink()
-    except OSError:
-        pass
+def _path_identity(path: Path) -> tuple[int, int]:
+    stat_result = path.stat()
+    return (stat_result.st_dev, stat_result.st_ino)
 
 
-def _remove_owned_path(path: Path | None) -> None:
-    if path is None:
-        return
+def _remove_owned_path(
+    path: Path,
+    identity: tuple[int, int] | None,
+) -> _RemovalResult:
+    if identity is None:
+        return _RemovalResult.FAILED
     try:
-        path.unlink(missing_ok=True)
+        current_identity = _path_identity(path)
+    except FileNotFoundError:
+        return _RemovalResult.ABSENT
     except OSError:
-        pass
+        return _RemovalResult.FAILED
+    if current_identity != identity:
+        return _RemovalResult.NOT_OWNED
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return _RemovalResult.ABSENT
+    except OSError:
+        return _RemovalResult.FAILED
+    return _RemovalResult.REMOVED
 
 
 def _utc_timestamp() -> str:
