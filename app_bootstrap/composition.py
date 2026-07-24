@@ -70,7 +70,10 @@ def build_default_registry() -> AdapterRegistry:
     registry.register(
         AdapterKind.STRUCTURE_INDEX,
         "pageindex",
-        lambda settings: PageIndexStructureIndex(settings.providers.pageindex_dir),
+        lambda settings: PageIndexStructureIndex(
+            settings.providers.pageindex_dir,
+            workspace_root=settings.runtime_workspace / "pageindex",
+        ),
     )
     registry.register(
         AdapterKind.PROJECTION_WRITER,

@@ -142,10 +142,12 @@ def test_structure_index_never_forwards_provider_error_text(tmp_path):
     )
 
     class FailingClient:
+        provider_version = "failing-provider-v1"
+
         def check_environment(self):
             raise PageIndexError(provider_error)
 
-        def index_pdf(self, source_path):
+        def index_pdf(self, source_path, **kwargs):
             return {
                 "status": "failed",
                 "error_code": "PAGEINDEX.EXECUTION.FAILED",
@@ -216,14 +218,22 @@ def test_invalid_pageindex_result_schema_is_stable_sanitized_and_maps_to_provide
     source_path = tmp_path / "Documents" / "private.pdf"
     source_path.parent.mkdir()
     source_path.touch()
-    result_path = Path(client.pageindex_dir) / "results" / "private_structure.json"
-    result_path.parent.mkdir()
-    result_path.write_text(json.dumps(payload), encoding="utf-8")
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda command, **kwargs: subprocess.CompletedProcess(command, 0, "", ""),
-    )
+
+    def run(command, **kwargs):
+        if command[-1] == "--version":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        flag = "--pdf_path" if "--pdf_path" in command else "--md_path"
+        staged_source = Path(command[command.index(flag) + 1])
+        result_path = (
+            Path(kwargs["cwd"])
+            / "results"
+            / f"{staged_source.stem}_structure.json"
+        )
+        result_path.parent.mkdir(parents=True)
+        result_path.write_text(json.dumps(payload), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
 
     raw = client.index_pdf(str(source_path))
     adapter = PageIndexStructureIndex(client.pageindex_dir)

@@ -6,11 +6,14 @@ stable, sanitized failures at its public boundary.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shutil
 from collections.abc import Mapping
 import subprocess
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -26,6 +29,10 @@ _ERROR_MESSAGES = {
         "Markdown file must use a .md or .markdown extension."
     ),
     "PAGEINDEX.INPUT.MARKDOWN_NOT_FOUND": "Markdown file not found.",
+    "PAGEINDEX.INPUT.READ_FAILED": "PageIndex input could not be staged.",
+    "PAGEINDEX.INPUT.HASH_MISMATCH": (
+        "PageIndex input does not match the requested content hash."
+    ),
     "PAGEINDEX.RUNTIME.PYTHON_UNAVAILABLE": (
         "PageIndex Python interpreter is unavailable."
     ),
@@ -50,9 +57,39 @@ _ERROR_MESSAGES = {
     "PAGEINDEX.RESULT.INVALID_SCHEMA": (
         "PageIndex structure result has an invalid schema."
     ),
+    "PAGEINDEX.RESULT.PERSIST_FAILED": (
+        "PageIndex structure result could not be persisted."
+    ),
     "PAGEINDEX.CONTENT.PDF_NOT_FOUND": "PDF file not found.",
     "PAGEINDEX.CONTENT.READ_FAILED": "PDF content could not be read.",
 }
+
+
+def build_operation_identity(
+    document_version_id: str,
+    content_hash: str,
+    provider_version: str,
+) -> str:
+    """Build a deterministic, opaque identity for one index artifact."""
+    payload = json.dumps(
+        {
+            "content_hash": str(content_hash),
+            "document_version_id": str(document_version_id),
+            "provider_version": str(provider_version),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+class _OperationFailure(Exception):
+    """Internal control-flow error containing only a stable public code."""
+
+    def __init__(self, error_code: str) -> None:
+        super().__init__(error_code)
+        self.error_code = error_code
 
 
 class PageIndexError(Exception):
@@ -76,6 +113,7 @@ class PageIndexClient:
         self,
         pageindex_dir: Optional[str] = None,
         timeout_seconds: int = 600,
+        workspace_root: Optional[str] = None,
     ) -> None:
         if not pageindex_dir:
             code = "PAGEINDEX.CONFIG.MISSING"
@@ -88,6 +126,21 @@ class PageIndexClient:
         )
         self.cli_script = os.path.join(self.pageindex_dir, "run_pageindex.py")
         self.timeout_seconds = timeout_seconds
+        default_workspace = (
+            Path(tempfile.gettempdir()) / "project-manager" / "pageindex"
+        )
+        self.workspace_root = str(
+            Path(workspace_root or default_workspace).expanduser().resolve()
+        )
+
+    @property
+    def provider_version(self) -> str:
+        """Return a local CLI fingerprint without starting the provider."""
+        try:
+            digest = self._sha256_file(Path(self.cli_script))
+        except OSError:
+            digest = "unavailable"
+        return f"pageindex-cli-v1:{digest}"
 
     def check_environment(self) -> None:
         """Validate that the external PageIndex runtime can start safely."""
@@ -129,14 +182,13 @@ class PageIndexClient:
         if_thinning: str = "no",
         thinning_threshold: int = 5000,
         summary_token_threshold: int = 200,
+        operation_id: Optional[str] = None,
+        document_version_id: str = "",
+        expected_content_hash: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Index a PDF through the external PageIndex CLI."""
         if not os.path.isfile(pdf_path):
             return self._failed("PAGEINDEX.INPUT.PDF_NOT_FOUND")
-        environment_failure = self._environment_failure()
-        if environment_failure is not None:
-            return environment_failure
-
         command = [self.python_bin, self.cli_script, "--pdf_path", pdf_path]
         options = {
             "model": model,
@@ -152,18 +204,28 @@ class PageIndexClient:
             "summary_token_threshold": summary_token_threshold,
         }
         self._append_options(command, options)
-        return self._run_index(command, pdf_path)
+        return self._run_index(
+            command,
+            pdf_path,
+            operation_id=operation_id,
+            document_version_id=document_version_id,
+            expected_content_hash=expected_content_hash,
+        )
 
-    def index_md(self, md_path: str, **kwargs: Any) -> Dict[str, Any]:
+    def index_md(
+        self,
+        md_path: str,
+        *,
+        operation_id: Optional[str] = None,
+        document_version_id: str = "",
+        expected_content_hash: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
         """Index a Markdown document through the external PageIndex CLI."""
         if not md_path.lower().endswith((".md", ".markdown")):
             return self._failed("PAGEINDEX.INPUT.MARKDOWN_EXTENSION")
         if not os.path.isfile(md_path):
             return self._failed("PAGEINDEX.INPUT.MARKDOWN_NOT_FOUND")
-        environment_failure = self._environment_failure()
-        if environment_failure is not None:
-            return environment_failure
-
         command = [self.python_bin, self.cli_script, "--md_path", md_path]
         supported = {
             "if_add_node_id",
@@ -178,7 +240,13 @@ class PageIndexClient:
         self._append_options(
             command, {key: value for key, value in kwargs.items() if key in supported}
         )
-        return self._run_index(command, md_path)
+        return self._run_index(
+            command,
+            md_path,
+            operation_id=operation_id,
+            document_version_id=document_version_id,
+            expected_content_hash=expected_content_hash,
+        )
 
     def _environment_failure(self) -> Optional[Dict[str, Any]]:
         try:
@@ -211,62 +279,246 @@ class PageIndexClient:
             "elapsed_seconds": elapsed_seconds,
         }
 
-    def _run_index(self, command: List[str], source_path: str) -> Dict[str, Any]:
+    def _run_index(
+        self,
+        command: List[str],
+        source_path: str,
+        *,
+        operation_id: Optional[str],
+        document_version_id: str,
+        expected_content_hash: Optional[str],
+    ) -> Dict[str, Any]:
         start = time.time()
+        attempt_dir: Optional[Path] = None
         try:
-            process = subprocess.run(
-                command,
-                cwd=self.pageindex_dir,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-            )
-        except subprocess.TimeoutExpired:
-            return self._failed(
-                "PAGEINDEX.EXECUTION.TIMEOUT",
-                round(time.time() - start, 2),
-            )
-        except (OSError, UnicodeError):
-            return self._failed(
-                "PAGEINDEX.EXECUTION.START_FAILED",
-                round(time.time() - start, 2),
-            )
+            try:
+                (
+                    attempt_dir,
+                    staged_source,
+                    source_sha256,
+                    resolved_operation_id,
+                ) = self._stage_operation(
+                    source_path=Path(source_path),
+                    operation_id=operation_id,
+                    document_version_id=document_version_id,
+                    expected_content_hash=expected_content_hash,
+                )
+            except _OperationFailure as exc:
+                return self._failed(
+                    exc.error_code,
+                    round(time.time() - start, 2),
+                )
 
-        elapsed = round(time.time() - start, 2)
-        if process.returncode != 0:
-            return self._failed("PAGEINDEX.EXECUTION.FAILED", elapsed)
+            environment_failure = self._environment_failure()
+            if environment_failure is not None:
+                return environment_failure
 
-        source_name = os.path.splitext(os.path.basename(source_path))[0]
-        structure_json_path = os.path.join(
-            self.pageindex_dir, "results", f"{source_name}_structure.json"
+            staged_command = list(command)
+            for input_flag in ("--pdf_path", "--md_path"):
+                if input_flag in staged_command:
+                    staged_command[staged_command.index(input_flag) + 1] = str(
+                        staged_source
+                    )
+                    break
+
+            try:
+                process = subprocess.run(
+                    staged_command,
+                    cwd=str(attempt_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_seconds,
+                )
+            except subprocess.TimeoutExpired:
+                return self._failed(
+                    "PAGEINDEX.EXECUTION.TIMEOUT",
+                    round(time.time() - start, 2),
+                )
+            except (OSError, UnicodeError):
+                return self._failed(
+                    "PAGEINDEX.EXECUTION.START_FAILED",
+                    round(time.time() - start, 2),
+                )
+
+            elapsed = round(time.time() - start, 2)
+            if process.returncode != 0:
+                return self._failed("PAGEINDEX.EXECUTION.FAILED", elapsed)
+
+            structure_path = (
+                attempt_dir
+                / "results"
+                / f"{staged_source.stem}_structure.json"
+            )
+            if not structure_path.is_file():
+                return self._failed("PAGEINDEX.RESULT.MISSING", elapsed)
+            try:
+                with open(structure_path, "r", encoding="utf-8") as source:
+                    data = json.load(source)
+            except UnicodeError:
+                return self._failed("PAGEINDEX.RESULT.DECODE_FAILED", elapsed)
+            except OSError:
+                return self._failed("PAGEINDEX.RESULT.READ_FAILED", elapsed)
+            except json.JSONDecodeError:
+                return self._failed("PAGEINDEX.RESULT.INVALID_JSON", elapsed)
+
+            if not self._has_valid_result_schema(data):
+                return self._failed("PAGEINDEX.RESULT.INVALID_SCHEMA", elapsed)
+
+            content_hash = expected_content_hash or source_sha256
+            try:
+                artifact_path = self._persist_artifact(
+                    operation_id=resolved_operation_id,
+                    document_version_id=document_version_id,
+                    content_hash=content_hash,
+                    source_sha256=source_sha256,
+                    doc_name=os.path.basename(source_path),
+                    structure=data.get("structure", []),
+                )
+            except _OperationFailure as exc:
+                return self._failed(exc.error_code, elapsed)
+
+            return {
+                "status": "success",
+                "engine": "pageindex",
+                "doc_name": os.path.basename(source_path),
+                "doc_id": resolved_operation_id,
+                "operation_id": resolved_operation_id,
+                "provider_version": self.provider_version,
+                "content_hash": content_hash,
+                "source_sha256": source_sha256,
+                "structure": data.get("structure", []),
+                "structure_json_path": artifact_path,
+                "elapsed_seconds": elapsed,
+            }
+        finally:
+            if attempt_dir is not None:
+                shutil.rmtree(attempt_dir, ignore_errors=True)
+
+    def _stage_operation(
+        self,
+        *,
+        source_path: Path,
+        operation_id: Optional[str],
+        document_version_id: str,
+        expected_content_hash: Optional[str],
+    ) -> tuple[Path, Path, str, str]:
+        attempt_dir = (
+            Path(self.workspace_root)
+            / "staging"
+            / uuid.uuid4().hex[:12]
         )
-        if not os.path.isfile(structure_json_path):
-            return self._failed("PAGEINDEX.RESULT.MISSING", elapsed)
         try:
-            with open(structure_json_path, "r", encoding="utf-8") as source:
-                data = json.load(source)
-        except UnicodeError:
-            return self._failed("PAGEINDEX.RESULT.DECODE_FAILED", elapsed)
-        except OSError:
-            return self._failed("PAGEINDEX.RESULT.READ_FAILED", elapsed)
-        except json.JSONDecodeError:
-            return self._failed("PAGEINDEX.RESULT.INVALID_JSON", elapsed)
+            attempt_dir.mkdir(parents=True, exist_ok=False)
+            staged_source = attempt_dir / f"input{source_path.suffix.lower()}"
+            shutil.copyfile(source_path, staged_source)
+            source_sha256 = self._sha256_file(staged_source)
+            normalized_expected = self._normalized_sha256(expected_content_hash)
+            if (
+                normalized_expected is not None
+                and normalized_expected != source_sha256
+            ):
+                raise _OperationFailure("PAGEINDEX.INPUT.HASH_MISMATCH")
 
-        if not self._has_valid_result_schema(data):
-            return self._failed("PAGEINDEX.RESULT.INVALID_SCHEMA", elapsed)
+            resolved_operation_id = self._normalized_operation_id(
+                operation_id,
+                document_version_id=document_version_id,
+                source_sha256=source_sha256,
+            )
+            return (
+                attempt_dir,
+                staged_source,
+                source_sha256,
+                resolved_operation_id,
+            )
+        except _OperationFailure:
+            shutil.rmtree(attempt_dir, ignore_errors=True)
+            raise
+        except (OSError, UnicodeError):
+            shutil.rmtree(attempt_dir, ignore_errors=True)
+            raise _OperationFailure("PAGEINDEX.INPUT.READ_FAILED") from None
 
-        doc_name = data.get("doc_name")
-        if doc_name is None:
-            doc_name = source_name
-        return {
-            "status": "success",
-            "engine": "pageindex",
+    def _normalized_operation_id(
+        self,
+        operation_id: Optional[str],
+        *,
+        document_version_id: str,
+        source_sha256: str,
+    ) -> str:
+        raw = str(operation_id or "").strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", raw):
+            return raw
+        if raw:
+            return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return build_operation_identity(
+            document_version_id or "standalone",
+            source_sha256,
+            self.provider_version,
+        )
+
+    @staticmethod
+    def _normalized_sha256(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        if normalized.startswith("sha256:"):
+            normalized = normalized.split(":", 1)[1]
+        if re.fullmatch(r"[0-9a-f]{64}", normalized):
+            return normalized
+        return None
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    def _persist_artifact(
+        self,
+        *,
+        operation_id: str,
+        document_version_id: str,
+        content_hash: str,
+        source_sha256: str,
+        doc_name: str,
+        structure: List[Any],
+    ) -> str:
+        artifact_root = Path(self.workspace_root) / "artifacts"
+        target = artifact_root / f"{operation_id}.json"
+        temporary = artifact_root / f".{operation_id}.{uuid.uuid4().hex}.tmp"
+        envelope = {
+            "schema_version": "pageindex_artifact.v1",
+            "operation_id": operation_id,
+            "document_version_id": document_version_id,
+            "content_hash": content_hash,
+            "source_sha256": source_sha256,
+            "provider": "pageindex",
+            "provider_version": self.provider_version,
             "doc_name": doc_name,
-            "doc_id": str(uuid.uuid4()),
-            "structure": data.get("structure", []),
-            "structure_json_path": structure_json_path,
-            "elapsed_seconds": elapsed,
+            "structure": structure,
         }
+        try:
+            artifact_root.mkdir(parents=True, exist_ok=True)
+            with temporary.open("x", encoding="utf-8") as destination:
+                json.dump(
+                    envelope,
+                    destination,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                destination.flush()
+                os.fsync(destination.fileno())
+            os.replace(temporary, target)
+        except (OSError, TypeError, ValueError):
+            raise _OperationFailure("PAGEINDEX.RESULT.PERSIST_FAILED") from None
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return str(target)
 
     @classmethod
     def _has_valid_result_schema(cls, data: Any) -> bool:

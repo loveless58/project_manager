@@ -41,11 +41,12 @@ def _client() -> PageIndexClient:
 
 
 def _client_with_runtime_files(tmp_path: Path) -> PageIndexClient:
-    python_bin = tmp_path / ".venv" / "Scripts" / "python.exe"
+    client = PageIndexClient(pageindex_dir=str(tmp_path))
+    python_bin = Path(client.python_bin)
     python_bin.parent.mkdir(parents=True)
     python_bin.touch()
-    (tmp_path / "run_pageindex.py").touch()
-    return PageIndexClient(pageindex_dir=str(tmp_path))
+    Path(client.cli_script).touch()
+    return client
 
 
 def validate_slow_test_configuration(environ=None):
@@ -118,8 +119,10 @@ class TestEnvironment(unittest.TestCase):
 
 def test_check_environment_rejects_runtime_that_cannot_start(tmp_path, monkeypatch):
     client = _client_with_runtime_files(tmp_path)
+    calls = []
 
     def cannot_start(*args, **kwargs):
+        calls.append((args, kwargs))
         raise OSError("broken executable")
 
     monkeypatch.setattr(subprocess, "run", cannot_start)
@@ -129,14 +132,17 @@ def test_check_environment_rejects_runtime_that_cannot_start(tmp_path, monkeypat
 
     assert str(error.value) == "PageIndex runtime probe could not be started."
     assert str(tmp_path) not in str(error.value)
+    assert len(calls) == 1
 
 
 def test_index_pdf_returns_stable_failure_when_runtime_cannot_start(tmp_path, monkeypatch):
     client = _client_with_runtime_files(tmp_path)
     source_path = tmp_path / "source.pdf"
     source_path.touch()
+    calls = []
 
     def run(command, **kwargs):
+        calls.append(command)
         if command[-1] == "--version":
             return subprocess.CompletedProcess(command, 0, "Python 3.12", "")
         raise OSError("broken executable")
@@ -148,6 +154,7 @@ def test_index_pdf_returns_stable_failure_when_runtime_cannot_start(tmp_path, mo
     assert result["status"] == "failed"
     assert result["error"] == "PageIndex execution could not be started."
     assert str(tmp_path) not in result["error"]
+    assert len(calls) == 2
 
 
 class TestIndexInputValidation(unittest.TestCase):

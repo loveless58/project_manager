@@ -24,6 +24,12 @@ def _runtime_client(tmp_path: Path, *, corrupt_interpreter: bool = False) -> Pag
     return client
 
 
+def _cli_result_path(command, cwd: str) -> Path:
+    flag = "--pdf_path" if "--pdf_path" in command else "--md_path"
+    staged_source = Path(command[command.index(flag) + 1])
+    return Path(cwd) / "results" / f"{staged_source.stem}_structure.json"
+
+
 @pytest.mark.parametrize(
     ("outcome", "expected"),
     [
@@ -91,16 +97,20 @@ def test_index_pdf_normalizes_structure_file_open_error(tmp_path, monkeypatch):
     client = _runtime_client(tmp_path)
     source_path = tmp_path / "source.pdf"
     source_path.touch()
-    structure_path = tmp_path / "results" / "source_structure.json"
-    structure_path.parent.mkdir()
-    structure_path.write_text("{}", encoding="utf-8")
+    generated_paths = []
     original_open = builtins.open
 
     def run(command, **kwargs):
+        if command[-1] == "--version":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        structure_path = _cli_result_path(command, kwargs["cwd"])
+        structure_path.parent.mkdir(parents=True)
+        structure_path.write_text("{}", encoding="utf-8")
+        generated_paths.append(structure_path)
         return subprocess.CompletedProcess(command, 0, "", "")
 
     def failing_open(path, *args, **kwargs):
-        if Path(path) == structure_path:
+        if Path(path) in generated_paths:
             raise OSError("access denied")
         return original_open(path, *args, **kwargs)
 
@@ -117,11 +127,13 @@ def test_index_pdf_normalizes_invalid_utf8_structure_file(tmp_path, monkeypatch)
     client = _runtime_client(tmp_path)
     source_path = tmp_path / "source.pdf"
     source_path.touch()
-    structure_path = tmp_path / "results" / "source_structure.json"
-    structure_path.parent.mkdir()
-    structure_path.write_bytes(bytes([255]))
 
     def run(command, **kwargs):
+        if command[-1] == "--version":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        structure_path = _cli_result_path(command, kwargs["cwd"])
+        structure_path.parent.mkdir(parents=True)
+        structure_path.write_bytes(bytes([255]))
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", run)
