@@ -53,4 +53,3 @@ def _raise_mapped_sqlite_error(error: sqlite3.DatabaseError) -> NoReturn:
 
 
 __all__ = ["SqliteConnectionOptions", "open_sqlite_connection"]
-

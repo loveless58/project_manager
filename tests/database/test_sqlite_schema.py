@@ -86,6 +86,27 @@ def test_read_applied_migrations_returns_rows_in_version_order(tmp_path):
     )
 
 
+def test_read_applied_migrations_supports_plain_sqlite_connection(tmp_path):
+    database = tmp_path / "state.sqlite3"
+    initialize_schema_metadata(database)
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "INSERT INTO _schema_migrations "
+        "(version, name, checksum_sha256, applied_at_utc, execution_ms) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (1, "first", "aaa", "2026-07-24T00:00:00Z", 7),
+    )
+    connection.commit()
+    try:
+        applied = read_applied_migrations(connection)
+    finally:
+        connection.close()
+
+    assert applied == (
+        AppliedMigration(1, "first", "aaa", "2026-07-24T00:00:00Z", 7),
+    )
+
+
 def test_missing_database_is_uninitialized_without_creating_file(tmp_path):
     database = tmp_path / "missing.sqlite3"
     catalog = _fixture_catalog()
@@ -277,4 +298,3 @@ def test_integrity_check_maps_corrupt_sqlite_error_to_safe_exception():
         check_database_integrity(_FailingIntegrityConnection())  # type: ignore[arg-type]
 
     assert str(raised.value) == "database integrity check failed"
-

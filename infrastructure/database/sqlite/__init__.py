@@ -14,4 +14,3 @@ __all__ = [
     "open_sqlite_connection",
     "read_applied_migrations",
 ]
-

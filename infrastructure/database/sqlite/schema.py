@@ -62,13 +62,7 @@ def read_applied_migrations(
         _raise_mapped_sqlite_error(error)
 
     return tuple(
-        AppliedMigration(
-            version=row["version"],
-            name=row["name"],
-            checksum_sha256=row["checksum_sha256"],
-            applied_at_utc=row["applied_at_utc"],
-            execution_ms=row["execution_ms"],
-        )
+        AppliedMigration(*row)
         for row in rows
     )
 
@@ -231,4 +225,3 @@ __all__ = [
     "inspect_schema",
     "read_applied_migrations",
 ]
-
