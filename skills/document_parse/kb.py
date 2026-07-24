@@ -1,30 +1,40 @@
-"""document_parse 知识库(KB),基于 PageIndex + 文件名前缀双信号。
+"""document_parse 知识库(KB),基于可配置 StructureIndex + 文件名前缀双信号。
 
 设计:
 1. KB 文档(business_rules/document_parse/kb.md)按章节分类
-2. PageIndex KB 索引(一次性,~3s):把 kb.md → structure.json
+2. StructureIndex KB 索引:把 kb.md 转换为可查询的层级结构
 3. Query 时三信号评分:
    a. 文件名前缀(强信号): "合同"/"承诺函"/"授权委托"/"报名" 等 → +30
    b. KB 章节匹配(node 数): 多 node → +20, 单 node → +10
    c. 正文关键词(弱信号): +5
 4. 取最高分类别,分数 ≥30 → high, ≥15 → medium, <15 → low
-5. Cache:kb_cache.json(key=md_path + mtime)
+5. Cache:运行时工作区(key=内容哈希 + provider + provider version)
 
 详见 skills/document_parse/SKILL.md §Three-Layer Fallback。
 """
 
+import hashlib
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+import re
+import shutil
+import uuid
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
-from integrations.pageindex.pageindex_client import PageIndexClient
+from platform_core.models import StructureIndexRequest
+from platform_core.ports import StructureIndex
+from platform_core.settings import AppSettings
+from skills.document_parse.providers import resolve_document_parse_runtime
 
 
+PathLike = Union[str, os.PathLike]
 _KB_DIR = os.path.dirname(os.path.abspath(__file__))
 KB_DOC_PATH = os.path.abspath(
     os.path.join(_KB_DIR, "..", "..", "business_rules", "document_parse", "kb.md")
 )
-KB_CACHE_PATH = os.path.join(_KB_DIR, "kb_cache.json")
+_CACHE_SCHEMA_VERSION = "document_parse_kb_cache.v3"
+_DIAGNOSTIC_COMPONENT = "document_parse.knowledge_base"
 
 
 # 类别 → 触发关键词(用于 KB 节点查找 + 正文二次确认 + 文件名前缀)
@@ -87,22 +97,95 @@ NEGATIVE_FILENAME_SIGNALS: List[str] = [
 ]
 
 
-def _cache_key(md_path: str) -> str:
-    """cache key = abs path + mtime(nanosecond 浮点)+ size。
+class KnowledgeBaseUnavailable(RuntimeError):
+    """Stable, redacted failure used by the KB fallback boundary."""
 
-    用 mtime 浮点(保留小数,实际是微秒精度)+ 文件大小作为双重检测。
-    防止: 1 秒内多次修改 .md 时 mtime 整数化撞 key(原 :.0f 漏洞)。
-    """
-    st = os.stat(md_path)
-    return f"{os.path.abspath(md_path)}:m={st.st_mtime:.6f}:s={st.st_size}"
+    def __init__(self, error_code: str, provider: str, message: str) -> None:
+        self.error_code = error_code
+        self.provider = _safe_provider_name(provider)
+        self.public_message = message
+        super().__init__(message)
+
+    def diagnostic(self) -> Dict[str, str]:
+        return {
+            "component": _DIAGNOSTIC_COMPONENT,
+            "status": "degraded",
+            "error_code": self.error_code,
+            "provider": self.provider,
+            "message": self.public_message,
+        }
+
+
+def _safe_provider_name(value: Any) -> str:
+    normalized = str(value or "unknown").strip().lower()
+    if re.fullmatch(r"[a-z0-9_.-]{1,64}", normalized):
+        return normalized
+    return "unknown"
+
+
+def _normalize_provider_version(value: Any) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _provider_identity(structure_index: StructureIndex) -> Tuple[str, str]:
+    provider = _safe_provider_name(getattr(structure_index, "name", "unknown"))
+    if provider == "disabled":
+        return provider, "disabled"
+
+    try:
+        provider_version = _normalize_provider_version(
+            getattr(structure_index, "provider_version", "")
+        )
+    except Exception:
+        provider_version = ""
+    if not provider_version:
+        try:
+            provider_version = _normalize_provider_version(
+                structure_index.probe().provider_version
+            )
+        except Exception:
+            provider_version = ""
+    if not provider_version:
+        raise KnowledgeBaseUnavailable(
+            "DOCUMENT_PARSE.KB.PROVIDER_IDENTITY_UNAVAILABLE",
+            provider,
+            "Knowledge-base provider identity is unavailable.",
+        )
+    return provider, provider_version
+
+
+def _cache_key(
+    *,
+    document_version_id: str,
+    content_hash: str,
+    provider: str,
+    provider_version: str,
+) -> str:
+    serialized = json.dumps(
+        {
+            "cache_schema": _CACHE_SCHEMA_VERSION,
+            "content_hash": content_hash,
+            "document_version_id": document_version_id,
+            "provider": provider,
+            "provider_version": provider_version,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
 
 
 def _is_valid_structure(structure: Any) -> bool:
-    """cache 完整性校验。
-
-    检测: PageIndex 输出 schema 变了,或者 structure 损坏,
-    返回 False 触发强制 reindex。
-    """
+    """Return whether a cached result contains the hierarchy consumed below."""
     if not isinstance(structure, dict):
         return False
     if structure.get("status") != "success":
@@ -110,71 +193,254 @@ def _is_valid_structure(structure: Any) -> bool:
     nodes = structure.get("structure", [])
     if not nodes:
         return False
-    # 至少要有一个顶层节点 + 它有子节点
     top = nodes[0]
-    if not isinstance(top, dict):
-        return False
-    if not top.get("nodes"):
-        return False
-    return True
+    return isinstance(top, dict) and bool(top.get("nodes"))
 
 
-def _load_cache() -> Dict[str, Any]:
-    if not os.path.exists(KB_CACHE_PATH):
-        return {}
+def _cache_entries_dir(cache_path: Path) -> Path:
+    return cache_path.with_name(f"{cache_path.name}.entries")
+
+
+def _cache_entry_path(cache_path: Path, key: str) -> Path:
+    return _cache_entries_dir(cache_path) / f"{key}.json"
+
+
+def _load_cache_entry(cache_path: Path, key: str) -> Optional[Dict[str, Any]]:
+    if not cache_path.is_file():
+        return None
     try:
-        with open(KB_CACHE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+        with cache_path.open("r", encoding="utf-8") as source:
+            payload = json.load(source)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema_version") != _CACHE_SCHEMA_VERSION:
+        return None
+    if payload.get("layout") != "per-key-v1":
+        return None
+
+    entry_path = _cache_entry_path(cache_path, key)
+    try:
+        with entry_path.open("r", encoding="utf-8") as source:
+            entry = json.load(source)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(entry, dict) or entry.get("cache_key") != key:
+        return None
+    result = entry.get("result")
+    return result if isinstance(result, dict) else None
 
 
-def _save_cache(cache: Dict[str, Any]) -> None:
-    with open(KB_CACHE_PATH, "w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
+def _write_json_atomic(
+    target: Path,
+    payload: Dict[str, Any],
+    *,
+    provider: str,
+) -> None:
+    temporary = target.with_name(f".{uuid.uuid4().hex}.tmp")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with temporary.open("x", encoding="utf-8") as destination:
+            json.dump(
+                payload,
+                destination,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.replace(temporary, target)
+    except (OSError, TypeError, ValueError):
+        raise KnowledgeBaseUnavailable(
+            "DOCUMENT_PARSE.KB.CACHE_WRITE_FAILED",
+            provider,
+            "Knowledge-base cache could not be updated.",
+        ) from None
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
-def get_kb_structure(force_reindex: bool = False) -> Dict[str, Any]:
-    """获取 KB PageIndex structure,带 cache。
+def _save_cache_entry(
+    cache_path: Path,
+    key: str,
+    result: Dict[str, Any],
+    *,
+    provider: str,
+) -> None:
+    _write_json_atomic(
+        _cache_entry_path(cache_path, key),
+        {
+            "schema_version": _CACHE_SCHEMA_VERSION,
+            "cache_key": key,
+            "result": result,
+        },
+        provider=provider,
+    )
+    _write_json_atomic(
+        cache_path,
+        {
+            "schema_version": _CACHE_SCHEMA_VERSION,
+            "layout": "per-key-v1",
+        },
+        provider=provider,
+    )
 
-    第一次跑会调 PageIndex index_md(GPUStack LLM, ~3s),
-    后续 cache 命中瞬时返回。
 
-    Cache 失效条件(三选一):
-    1. mtime + size 变化(.md 被改)
-    2. force_reindex=True
-    3. cache structure 校验失败(损坏 / schema 不匹配)
-    """
-    if not os.path.exists(KB_DOC_PATH):
-        raise FileNotFoundError(f"KB 文档不存在: {KB_DOC_PATH}")
+def get_kb_structure(
+    force_reindex: bool = False,
+    *,
+    app_settings: Optional[AppSettings] = None,
+    config_file: Optional[PathLike] = None,
+    environ: Optional[Mapping[str, str]] = None,
+    structure_index: Optional[StructureIndex] = None,
+    cache_path: Optional[PathLike] = None,
+) -> Dict[str, Any]:
+    """Get the KB hierarchy through the configured StructureIndex provider."""
+    runtime = resolve_document_parse_runtime(
+        app_settings=app_settings,
+        config_file=config_file,
+        environ=environ,
+        structure_index=structure_index,
+        cache_path=cache_path,
+    )
+    provider, provider_version = _provider_identity(runtime.structure_index)
+    if provider == "disabled":
+        raise KnowledgeBaseUnavailable(
+            "DOCUMENT_PARSE.KB.STRUCTURE_INDEX_DISABLED",
+            provider,
+            "Knowledge-base structure indexing is disabled.",
+        )
 
-    cache = _load_cache()
-    key = _cache_key(KB_DOC_PATH)
+    kb_path = Path(KB_DOC_PATH)
+    try:
+        content_hash = _sha256_file(kb_path)
+    except OSError:
+        raise KnowledgeBaseUnavailable(
+            "DOCUMENT_PARSE.KB.DOCUMENT_UNAVAILABLE",
+            provider,
+            "Knowledge-base document is unavailable.",
+        ) from None
 
-    if not force_reindex and key in cache:
-        cached = cache[key]
+    document_version_id = f"document-parse-kb:{content_hash}"
+    key = _cache_key(
+        document_version_id=document_version_id,
+        content_hash=content_hash,
+        provider=provider,
+        provider_version=provider_version,
+    )
+    if not force_reindex:
+        cached = _load_cache_entry(runtime.cache_path, key)
         if _is_valid_structure(cached):
             return cached
-        # cache 损坏 → 删 key,fall through 到下面的 PageIndexClient reindex 逻辑
-        del cache[key]
 
-    pageindex_dir = os.environ.get("PROJECT_MANAGER_PAGEINDEX_DIR")
-    if not pageindex_dir:
-        raise RuntimeError("PROJECT_MANAGER_PAGEINDEX_DIR is required to index the knowledge base")
-    client = PageIndexClient(pageindex_dir)
-    result = client.index_md(KB_DOC_PATH)
+    try:
+        indexed = runtime.structure_index.index(
+            StructureIndexRequest(
+                document_version_id=document_version_id,
+                content_hash=content_hash,
+                source_path=str(kb_path),
+                media_type="text/markdown",
+            )
+        )
+    except Exception:
+        raise KnowledgeBaseUnavailable(
+            "DOCUMENT_PARSE.KB.PROVIDER_UNAVAILABLE",
+            provider,
+            "Knowledge-base structure index is unavailable.",
+        ) from None
 
-    if result.get("status") != "success":
-        raise RuntimeError(f"KB PageIndex index 失败: {result.get('error')}")
+    if indexed.status == "blocked":
+        raise KnowledgeBaseUnavailable(
+            "DOCUMENT_PARSE.KB.PROVIDER_UNAVAILABLE",
+            indexed.provider or provider,
+            "Knowledge-base structure index is unavailable.",
+        )
+    if indexed.status != "success":
+        raise KnowledgeBaseUnavailable(
+            "DOCUMENT_PARSE.KB.INDEX_FAILED",
+            indexed.provider or provider,
+            "Knowledge-base structure indexing failed.",
+        )
 
-    cache[key] = result
-    _save_cache(cache)
+    try:
+        current_provider, current_provider_version = _provider_identity(
+            runtime.structure_index
+        )
+    except KnowledgeBaseUnavailable:
+        raise KnowledgeBaseUnavailable(
+            "DOCUMENT_PARSE.KB.PROVIDER_IDENTITY_CHANGED",
+            provider,
+            "Knowledge-base provider identity changed during indexing.",
+        ) from None
+    if (current_provider, current_provider_version) != (
+        provider,
+        provider_version,
+    ):
+        raise KnowledgeBaseUnavailable(
+            "DOCUMENT_PARSE.KB.PROVIDER_IDENTITY_CHANGED",
+            provider,
+            "Knowledge-base provider identity changed during indexing.",
+        )
+
+    result = {
+        "status": "success",
+        "engine": _safe_provider_name(indexed.provider or provider),
+        "doc_name": kb_path.name,
+        "doc_id": indexed.external_ref,
+        "structure": list(indexed.structure),
+        "structure_json_path": indexed.external_ref,
+        "elapsed_seconds": 0.0,
+    }
+    if not _is_valid_structure(result):
+        raise KnowledgeBaseUnavailable(
+            "DOCUMENT_PARSE.KB.INVALID_STRUCTURE",
+            indexed.provider or provider,
+            "Knowledge-base structure index returned an invalid hierarchy.",
+        )
+
+    _save_cache_entry(runtime.cache_path, key, result, provider=provider)
     return result
 
 
 def _get_filename(path: str) -> str:
     """basename 不含扩展名。"""
     return os.path.splitext(os.path.basename(path))[0]
+
+
+def _find_nodes_by_title(
+    index_result: Dict[str, Any],
+    keyword: str,
+) -> List[Dict[str, Any]]:
+    """Traverse a StructureIndex result without depending on a concrete adapter."""
+    pattern = re.compile(keyword, re.IGNORECASE)
+    matches: List[Dict[str, Any]] = []
+
+    def traverse(nodes: Any) -> None:
+        if not isinstance(nodes, (list, tuple)):
+            return
+        for node in nodes:
+            if not isinstance(node, Mapping):
+                continue
+            title = str(node.get("title", "") or "")
+            if pattern.search(title):
+                matches.append(
+                    {
+                        "title": node.get("title"),
+                        "node_id": node.get("node_id"),
+                        "start_index": node.get("start_index"),
+                        "end_index": node.get("end_index"),
+                        "summary": node.get("summary"),
+                    }
+                )
+            traverse(node.get("nodes"))
+
+    traverse(index_result.get("structure", []))
+    return matches
 
 
 def _score_category(
@@ -223,15 +489,37 @@ def query_kb(
     raw_data: Dict[str, Any],
     source_path: str = "",
     force_reindex: bool = False,
+    *,
+    app_settings: Optional[AppSettings] = None,
+    config_file: Optional[PathLike] = None,
+    environ: Optional[Mapping[str, str]] = None,
+    structure_index: Optional[StructureIndex] = None,
+    cache_path: Optional[PathLike] = None,
+    diagnostics: Optional[List[Dict[str, str]]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """基于 raw_data + 文件名查 KB。
-
-    Returns:
-        business_judgement dict,或 None(KB 匹配不上,降级到 hard_code / LLM)。
-    """
+    """Query the KB, returning None when the fallback chain should continue."""
     try:
-        kb_structure = get_kb_structure(force_reindex=force_reindex)
+        kb_structure = get_kb_structure(
+            force_reindex=force_reindex,
+            app_settings=app_settings,
+            config_file=config_file,
+            environ=environ,
+            structure_index=structure_index,
+            cache_path=cache_path,
+        )
+    except KnowledgeBaseUnavailable as exc:
+        if diagnostics is not None:
+            diagnostics.append(exc.diagnostic())
+        return None
     except Exception:
+        if diagnostics is not None:
+            diagnostics.append(
+                KnowledgeBaseUnavailable(
+                    "DOCUMENT_PARSE.KB.UNEXPECTED",
+                    getattr(structure_index, "name", "unknown"),
+                    "Knowledge-base lookup is unavailable.",
+                ).diagnostic()
+            )
         return None
 
     text = raw_data.get("raw_text", "") or ""
@@ -244,7 +532,7 @@ def query_kb(
         matched = []
         seen = set()
         for nk in triggers["node_keywords"]:
-            for n in PageIndexClient.find_nodes_by_title(kb_structure, nk):
+            for n in _find_nodes_by_title(kb_structure, nk):
                 nid = n.get("node_id")
                 if nid not in seen:
                     seen.add(nid)
@@ -276,7 +564,25 @@ def query_kb(
     }
 
 
-def clear_cache() -> None:
-    """清 KB cache(下次 query 重新 index)。"""
-    if os.path.exists(KB_CACHE_PATH):
-        os.unlink(KB_CACHE_PATH)
+def clear_cache(
+    *,
+    app_settings: Optional[AppSettings] = None,
+    config_file: Optional[PathLike] = None,
+    environ: Optional[Mapping[str, str]] = None,
+    structure_index: Optional[StructureIndex] = None,
+    cache_path: Optional[PathLike] = None,
+) -> None:
+    """Remove only the configured document-parse runtime cache artifacts."""
+    if cache_path is not None:
+        resolved_cache_path = Path(cache_path).expanduser().resolve()
+    else:
+        runtime = resolve_document_parse_runtime(
+            app_settings=app_settings,
+            config_file=config_file,
+            environ=environ,
+            structure_index=structure_index,
+            cache_path=None,
+        )
+        resolved_cache_path = runtime.cache_path
+    resolved_cache_path.unlink(missing_ok=True)
+    shutil.rmtree(_cache_entries_dir(resolved_cache_path), ignore_errors=True)

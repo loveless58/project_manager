@@ -7,6 +7,7 @@ import pytest
 from integrations.pageindex.pageindex_client import PageIndexClient, PageIndexError
 from platform_core.models import StructureIndexRequest
 
+EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 SENSITIVE_ENDPOINT = "http://192." + "168.50.4:9990/v1"
 
@@ -160,7 +161,7 @@ def test_structure_index_never_forwards_provider_error_text(tmp_path):
     )
     request = StructureIndexRequest(
         "dv-1",
-        "hash-1",
+        EMPTY_SHA256,
         "/Users/" + "alice/secret.pdf",
         "application/pdf",
     )
@@ -185,7 +186,7 @@ def test_real_missing_pageindex_runtime_is_blocked_by_adapter_for_probe_and_inde
     source_path.touch()
     adapter = PageIndexStructureIndex(tmp_path / "missing-pageindex-runtime")
     request = StructureIndexRequest(
-        "dv-1", "hash-1", str(source_path), "application/pdf"
+        "dv-1", EMPTY_SHA256, str(source_path), "application/pdf"
     )
 
     probe = adapter.probe()
@@ -238,7 +239,7 @@ def test_invalid_pageindex_result_schema_is_stable_sanitized_and_maps_to_provide
     raw = client.index_pdf(str(source_path))
     adapter = PageIndexStructureIndex(client.pageindex_dir)
     mapped = adapter.index(
-        StructureIndexRequest("dv-1", "hash-1", str(source_path), "application/pdf")
+        StructureIndexRequest("dv-1", EMPTY_SHA256, str(source_path), "application/pdf")
     )
 
     assert raw["status"] == "failed"

@@ -105,6 +105,21 @@
       ]
     },
     "knowledge_base_used": {"type": "boolean"},
+    "diagnostics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["component", "status", "error_code", "provider", "message"],
+        "properties": {
+          "component": {"type": "string", "minLength": 1},
+          "status": {"enum": ["degraded"]},
+          "error_code": {"type": "string", "minLength": 1},
+          "provider": {"type": "string", "minLength": 1},
+          "message": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
     "elapsed_seconds": {"type": "number", "minimum": 0}
   },
   "additionalProperties": false

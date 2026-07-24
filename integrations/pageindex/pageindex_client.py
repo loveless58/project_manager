@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -30,8 +31,23 @@ _ERROR_MESSAGES = {
     ),
     "PAGEINDEX.INPUT.MARKDOWN_NOT_FOUND": "Markdown file not found.",
     "PAGEINDEX.INPUT.READ_FAILED": "PageIndex input could not be staged.",
+    "PAGEINDEX.INPUT.HASH_INVALID": (
+        "PageIndex content hash must be a SHA-256 digest."
+    ),
     "PAGEINDEX.INPUT.HASH_MISMATCH": (
         "PageIndex input does not match the requested content hash."
+    ),
+    "PAGEINDEX.INPUT.IDENTITY_MISMATCH": (
+        "PageIndex operation identity does not match the staged input."
+    ),
+    "PAGEINDEX.RUNTIME.WORKSPACE_PATH_TOO_LONG": (
+        "PageIndex runtime workspace path is too long."
+    ),
+    "PAGEINDEX.RUNTIME.VERSION_CHANGED": (
+        "PageIndex provider changed during the indexing operation."
+    ),
+    "PAGEINDEX.RUNTIME.VERSION_UNAVAILABLE": (
+        "PageIndex provider version is unavailable."
     ),
     "PAGEINDEX.RUNTIME.PYTHON_UNAVAILABLE": (
         "PageIndex Python interpreter is unavailable."
@@ -82,6 +98,18 @@ def build_operation_identity(
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def normalize_content_hash(value: Optional[str]) -> Optional[str]:
+    """Return a canonical SHA-256 digest, or None for an invalid value."""
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized.startswith("sha256:"):
+        normalized = normalized.split(":", 1)[1]
+    if re.fullmatch(r"[0-9a-f]{64}", normalized):
+        return normalized
+    return None
 
 
 class _OperationFailure(Exception):
@@ -135,12 +163,67 @@ class PageIndexClient:
 
     @property
     def provider_version(self) -> str:
-        """Return a local CLI fingerprint without starting the provider."""
+        """Return a manifest fingerprint for provider code and configuration."""
         try:
-            digest = self._sha256_file(Path(self.cli_script))
-        except OSError:
-            digest = "unavailable"
-        return f"pageindex-cli-v1:{digest}"
+            digest = self._provider_manifest_digest()
+        except (OSError, UnicodeError):
+            return ""
+        return f"pageindex-provider-v2:{digest}"
+
+    def _provider_manifest_digest(self) -> str:
+        root = Path(self.pageindex_dir)
+        if not root.is_dir():
+            raise OSError("provider root is unavailable")
+        excluded_directories = {
+            ".git",
+            ".venv",
+            "__pycache__",
+            "artifacts",
+            "results",
+            "staging",
+        }
+        included_suffixes = {
+            ".json",
+            ".lock",
+            ".py",
+            ".toml",
+            ".yaml",
+            ".yml",
+        }
+        included_names = {
+            "requirements.txt",
+        }
+        candidates: List[Path] = []
+        for current_root, directory_names, file_names in os.walk(root):
+            directory_names[:] = sorted(
+                name
+                for name in directory_names
+                if name.lower() not in excluded_directories
+            )
+            directory = Path(current_root)
+            for file_name in sorted(file_names):
+                path = directory / file_name
+                if (
+                    path.suffix.lower() in included_suffixes
+                    or file_name.lower() in included_names
+                ):
+                    candidates.append(path)
+        if not candidates:
+            raise OSError("provider manifest is empty")
+
+        digest = hashlib.sha256(b"pageindex-provider-manifest-v2\0")
+        for path in sorted(
+            candidates,
+            key=lambda candidate: candidate.relative_to(root).as_posix(),
+        ):
+            relative_path = path.relative_to(root).as_posix().encode("utf-8")
+            digest.update(relative_path)
+            digest.update(b"\0")
+            with path.open("rb") as source:
+                for block in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(block)
+            digest.update(b"\0")
+        return digest.hexdigest()
 
     def check_environment(self) -> None:
         """Validate that the external PageIndex runtime can start safely."""
@@ -185,6 +268,7 @@ class PageIndexClient:
         operation_id: Optional[str] = None,
         document_version_id: str = "",
         expected_content_hash: Optional[str] = None,
+        expected_provider_version: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Index a PDF through the external PageIndex CLI."""
         if not os.path.isfile(pdf_path):
@@ -210,6 +294,7 @@ class PageIndexClient:
             operation_id=operation_id,
             document_version_id=document_version_id,
             expected_content_hash=expected_content_hash,
+            expected_provider_version=expected_provider_version,
         )
 
     def index_md(
@@ -219,6 +304,7 @@ class PageIndexClient:
         operation_id: Optional[str] = None,
         document_version_id: str = "",
         expected_content_hash: Optional[str] = None,
+        expected_provider_version: Optional[str] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Index a Markdown document through the external PageIndex CLI."""
@@ -246,6 +332,7 @@ class PageIndexClient:
             operation_id=operation_id,
             document_version_id=document_version_id,
             expected_content_hash=expected_content_hash,
+            expected_provider_version=expected_provider_version,
         )
 
     def _environment_failure(self) -> Optional[Dict[str, Any]]:
@@ -287,9 +374,23 @@ class PageIndexClient:
         operation_id: Optional[str],
         document_version_id: str,
         expected_content_hash: Optional[str],
+        expected_provider_version: Optional[str],
     ) -> Dict[str, Any]:
         start = time.time()
         attempt_dir: Optional[Path] = None
+        pinned_provider_version = self.provider_version
+        if not pinned_provider_version:
+            return self._failed("PAGEINDEX.RUNTIME.VERSION_UNAVAILABLE")
+        if (
+            expected_provider_version is not None
+            and str(expected_provider_version).strip() != pinned_provider_version
+        ):
+            return self._failed("PAGEINDEX.RUNTIME.VERSION_CHANGED")
+        canonical_document_version_id = (
+            str(document_version_id).strip() or "standalone"
+        )
+        staged_suffix = ".pdf" if "--pdf_path" in command else ".md"
+
         try:
             try:
                 (
@@ -299,9 +400,11 @@ class PageIndexClient:
                     resolved_operation_id,
                 ) = self._stage_operation(
                     source_path=Path(source_path),
+                    staged_suffix=staged_suffix,
                     operation_id=operation_id,
-                    document_version_id=document_version_id,
+                    document_version_id=canonical_document_version_id,
                     expected_content_hash=expected_content_hash,
+                    provider_version=pinned_provider_version,
                 )
             except _OperationFailure as exc:
                 return self._failed(
@@ -312,6 +415,17 @@ class PageIndexClient:
             environment_failure = self._environment_failure()
             if environment_failure is not None:
                 return environment_failure
+            current_provider_version = self.provider_version
+            if not current_provider_version:
+                return self._failed(
+                    "PAGEINDEX.RUNTIME.VERSION_UNAVAILABLE",
+                    round(time.time() - start, 2),
+                )
+            if current_provider_version != pinned_provider_version:
+                return self._failed(
+                    "PAGEINDEX.RUNTIME.VERSION_CHANGED",
+                    round(time.time() - start, 2),
+                )
 
             staged_command = list(command)
             for input_flag in ("--pdf_path", "--md_path"):
@@ -341,6 +455,14 @@ class PageIndexClient:
                 )
 
             elapsed = round(time.time() - start, 2)
+            current_provider_version = self.provider_version
+            if not current_provider_version:
+                return self._failed(
+                    "PAGEINDEX.RUNTIME.VERSION_UNAVAILABLE",
+                    elapsed,
+                )
+            if current_provider_version != pinned_provider_version:
+                return self._failed("PAGEINDEX.RUNTIME.VERSION_CHANGED", elapsed)
             if process.returncode != 0:
                 return self._failed("PAGEINDEX.EXECUTION.FAILED", elapsed)
 
@@ -364,32 +486,37 @@ class PageIndexClient:
             if not self._has_valid_result_schema(data):
                 return self._failed("PAGEINDEX.RESULT.INVALID_SCHEMA", elapsed)
 
-            content_hash = expected_content_hash or source_sha256
             try:
-                artifact_path = self._persist_artifact(
+                artifact_path, source_artifact_path = self._persist_artifact(
                     operation_id=resolved_operation_id,
-                    document_version_id=document_version_id,
-                    content_hash=content_hash,
+                    document_version_id=canonical_document_version_id,
+                    content_hash=source_sha256,
                     source_sha256=source_sha256,
+                    provider_version=pinned_provider_version,
                     doc_name=os.path.basename(source_path),
+                    staged_source=staged_source,
                     structure=data.get("structure", []),
                 )
             except _OperationFailure as exc:
                 return self._failed(exc.error_code, elapsed)
 
-            return {
+            result = {
                 "status": "success",
                 "engine": "pageindex",
                 "doc_name": os.path.basename(source_path),
                 "doc_id": resolved_operation_id,
                 "operation_id": resolved_operation_id,
-                "provider_version": self.provider_version,
-                "content_hash": content_hash,
+                "provider_version": pinned_provider_version,
+                "content_hash": source_sha256,
                 "source_sha256": source_sha256,
                 "structure": data.get("structure", []),
                 "structure_json_path": artifact_path,
                 "elapsed_seconds": elapsed,
             }
+            if source_artifact_path:
+                result["source_artifact_path"] = source_artifact_path
+                result["source_artifact_name"] = Path(source_artifact_path).name
+            return result
         finally:
             if attempt_dir is not None:
                 shutil.rmtree(attempt_dir, ignore_errors=True)
@@ -398,37 +525,61 @@ class PageIndexClient:
         self,
         *,
         source_path: Path,
+        staged_suffix: str,
         operation_id: Optional[str],
         document_version_id: str,
         expected_content_hash: Optional[str],
+        provider_version: str,
     ) -> tuple[Path, Path, str, str]:
         attempt_dir = (
             Path(self.workspace_root)
             / "staging"
             / uuid.uuid4().hex[:12]
         )
+        staged_source = attempt_dir / f"input{staged_suffix}"
+        predicted_result = (
+            attempt_dir
+            / "results"
+            / f"{staged_source.stem}_structure.json"
+        )
+        if self._windows_path_too_long(predicted_result):
+            raise _OperationFailure(
+                "PAGEINDEX.RUNTIME.WORKSPACE_PATH_TOO_LONG"
+            )
         try:
             attempt_dir.mkdir(parents=True, exist_ok=False)
-            staged_source = attempt_dir / f"input{source_path.suffix.lower()}"
             shutil.copyfile(source_path, staged_source)
             source_sha256 = self._sha256_file(staged_source)
-            normalized_expected = self._normalized_sha256(expected_content_hash)
+            normalized_expected = normalize_content_hash(expected_content_hash)
+            if (
+                expected_content_hash is not None
+                and normalized_expected is None
+            ):
+                raise _OperationFailure("PAGEINDEX.INPUT.HASH_INVALID")
             if (
                 normalized_expected is not None
                 and normalized_expected != source_sha256
             ):
                 raise _OperationFailure("PAGEINDEX.INPUT.HASH_MISMATCH")
 
-            resolved_operation_id = self._normalized_operation_id(
-                operation_id,
-                document_version_id=document_version_id,
-                source_sha256=source_sha256,
+            authoritative_operation_id = build_operation_identity(
+                document_version_id,
+                source_sha256,
+                provider_version,
             )
+            supplied_operation_id = str(operation_id or "").strip().lower()
+            if (
+                supplied_operation_id
+                and supplied_operation_id != authoritative_operation_id
+            ):
+                raise _OperationFailure(
+                    "PAGEINDEX.INPUT.IDENTITY_MISMATCH"
+                )
             return (
                 attempt_dir,
                 staged_source,
                 source_sha256,
-                resolved_operation_id,
+                authoritative_operation_id,
             )
         except _OperationFailure:
             shutil.rmtree(attempt_dir, ignore_errors=True)
@@ -437,34 +588,9 @@ class PageIndexClient:
             shutil.rmtree(attempt_dir, ignore_errors=True)
             raise _OperationFailure("PAGEINDEX.INPUT.READ_FAILED") from None
 
-    def _normalized_operation_id(
-        self,
-        operation_id: Optional[str],
-        *,
-        document_version_id: str,
-        source_sha256: str,
-    ) -> str:
-        raw = str(operation_id or "").strip().lower()
-        if re.fullmatch(r"[0-9a-f]{64}", raw):
-            return raw
-        if raw:
-            return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        return build_operation_identity(
-            document_version_id or "standalone",
-            source_sha256,
-            self.provider_version,
-        )
-
     @staticmethod
-    def _normalized_sha256(value: Optional[str]) -> Optional[str]:
-        if value is None:
-            return None
-        normalized = str(value).strip().lower()
-        if normalized.startswith("sha256:"):
-            normalized = normalized.split(":", 1)[1]
-        if re.fullmatch(r"[0-9a-f]{64}", normalized):
-            return normalized
-        return None
+    def _windows_path_too_long(path: Path) -> bool:
+        return os.name == "nt" and len(os.path.abspath(str(path))) >= 240
 
     @staticmethod
     def _sha256_file(path: Path) -> str:
@@ -481,25 +607,56 @@ class PageIndexClient:
         document_version_id: str,
         content_hash: str,
         source_sha256: str,
+        provider_version: str,
         doc_name: str,
+        staged_source: Path,
         structure: List[Any],
-    ) -> str:
+    ) -> tuple[str, str]:
         artifact_root = Path(self.workspace_root) / "artifacts"
         target = artifact_root / f"{operation_id}.json"
-        temporary = artifact_root / f".{operation_id}.{uuid.uuid4().hex}.tmp"
+        temporary = artifact_root / f".{uuid.uuid4().hex}.json.tmp"
+        source_target: Optional[Path] = None
+        source_temporary: Optional[Path] = None
+        published_source_identity: Optional[tuple[int, int, int, int]] = None
+        if staged_source.suffix.lower() == ".pdf":
+            source_publication_id = uuid.uuid4().hex
+            source_target = artifact_root / f"source-{source_publication_id}.pdf"
+            source_temporary = (
+                artifact_root / f".source-{source_publication_id}.pdf.tmp"
+            )
+        paths_to_check = [target, temporary]
+        if source_target is not None and source_temporary is not None:
+            paths_to_check.extend([source_target, source_temporary])
+        if any(self._windows_path_too_long(path) for path in paths_to_check):
+            raise _OperationFailure("PAGEINDEX.RESULT.PERSIST_FAILED")
+
         envelope = {
-            "schema_version": "pageindex_artifact.v1",
+            "schema_version": "pageindex_artifact.v2",
             "operation_id": operation_id,
             "document_version_id": document_version_id,
             "content_hash": content_hash,
             "source_sha256": source_sha256,
             "provider": "pageindex",
-            "provider_version": self.provider_version,
+            "provider_version": provider_version,
             "doc_name": doc_name,
+            "source_artifact_name": (
+                source_target.name if source_target is not None else None
+            ),
             "structure": structure,
         }
         try:
             artifact_root.mkdir(parents=True, exist_ok=True)
+            if source_target is not None and source_temporary is not None:
+                with staged_source.open("rb") as source:
+                    with source_temporary.open("xb") as destination:
+                        shutil.copyfileobj(source, destination)
+                        destination.flush()
+                        os.fsync(destination.fileno())
+                published_source_identity = self._file_identity(
+                    source_temporary
+                )
+                os.replace(source_temporary, source_target)
+
             with temporary.open("x", encoding="utf-8") as destination:
                 json.dump(
                     envelope,
@@ -512,13 +669,130 @@ class PageIndexClient:
                 os.fsync(destination.fileno())
             os.replace(temporary, target)
         except (OSError, TypeError, ValueError):
+            if (
+                source_target is not None
+                and published_source_identity is not None
+                and not self._artifact_references_source(
+                    target, source_target.name
+                )
+                and self._file_identity(source_target)
+                == published_source_identity
+            ):
+                try:
+                    source_target.unlink()
+                except OSError:
+                    pass
             raise _OperationFailure("PAGEINDEX.RESULT.PERSIST_FAILED") from None
         finally:
+            for temporary_path in (temporary, source_temporary):
+                if temporary_path is None:
+                    continue
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        return (
+            str(target),
+            str(source_target) if source_target is not None else "",
+        )
+
+    @staticmethod
+    def _file_identity(path: Path) -> Optional[tuple[int, int, int, int]]:
+        """Return a replacement-sensitive identity for owned artifact cleanup."""
+        try:
+            stat_result = path.stat()
+        except OSError:
+            return None
+        return (
+            int(stat_result.st_dev),
+            int(stat_result.st_ino),
+            int(stat_result.st_size),
+            int(stat_result.st_ctime_ns),
+        )
+
+    @staticmethod
+    def _artifact_references_source(
+        artifact_path: Path,
+        source_artifact_name: str,
+    ) -> bool:
+        """Return whether the current JSON commit marker owns a snapshot."""
+        try:
+            with artifact_path.open("r", encoding="utf-8") as source:
+                payload = json.load(source)
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+        ):
+            return False
+        return isinstance(payload, Mapping) and (
+            payload.get("source_artifact_name") == source_artifact_name
+        )
+
+    def collect_orphaned_source_artifacts(
+        self,
+        *,
+        min_age_seconds: Optional[float] = None,
+    ) -> int:
+        """Collect old unreferenced snapshots at an explicit maintenance boundary.
+
+        Indexing never invokes this collector synchronously.  The default grace
+        period is longer than an indexing request, so an in-flight attempt's
+        unique snapshot is not eligible.  Only managed ``source-<uuid>.pdf``
+        files absent from every current JSON commit marker may be removed.
+        """
+        grace_seconds = (
+            max(float(self.timeout_seconds) * 2.0, 3600.0)
+            if min_age_seconds is None
+            else float(min_age_seconds)
+        )
+        if grace_seconds < 0 or not math.isfinite(grace_seconds):
+            raise ValueError("min_age_seconds must be a finite non-negative value")
+
+        artifact_root = Path(self.workspace_root) / "artifacts"
+        if not artifact_root.is_dir():
+            return 0
+        cutoff = time.time() - grace_seconds
+        removed = 0
+        for candidate in artifact_root.glob("source-*.pdf"):
+            if not re.fullmatch(r"source-[0-9a-f]{32}\.pdf", candidate.name):
+                continue
             try:
-                temporary.unlink(missing_ok=True)
+                if candidate.stat().st_mtime > cutoff:
+                    continue
             except OSError:
-                pass
-        return str(target)
+                continue
+            if self._source_artifact_is_referenced(
+                artifact_root,
+                candidate.name,
+            ):
+                continue
+            candidate_identity = self._file_identity(candidate)
+            if candidate_identity is None:
+                continue
+            if self._file_identity(candidate) != candidate_identity:
+                continue
+            if self._source_artifact_is_referenced(
+                artifact_root,
+                candidate.name,
+            ):
+                continue
+            try:
+                candidate.unlink()
+            except OSError:
+                continue
+            removed += 1
+        return removed
+
+    def _source_artifact_is_referenced(
+        self,
+        artifact_root: Path,
+        source_artifact_name: str,
+    ) -> bool:
+        return any(
+            self._artifact_references_source(path, source_artifact_name)
+            for path in artifact_root.glob("*.json")
+        )
 
     @classmethod
     def _has_valid_result_schema(cls, data: Any) -> bool:
@@ -560,13 +834,41 @@ class PageIndexClient:
     def get_page_content_from_index(
         self, index_result: Dict[str, Any], pages: str
     ) -> List[Dict[str, Any]]:
+        source_artifact_path = index_result.get("source_artifact_path")
+        if (
+            isinstance(source_artifact_path, str)
+            and os.path.isfile(source_artifact_path)
+        ):
+            return self.get_page_content(source_artifact_path, pages)
+
+        source_artifact_name = index_result.get("source_artifact_name")
         structure_json_path = index_result["structure_json_path"]
-        pdf_path = structure_json_path.replace("_structure.json", ".pdf")
-        if not os.path.isfile(pdf_path):
-            pdf_path = os.path.join(
-                os.path.dirname(structure_json_path), f"{index_result['doc_name']}.pdf"
+        if (
+            isinstance(source_artifact_name, str)
+            and Path(source_artifact_name).name == source_artifact_name
+        ):
+            named_source_artifact = str(
+                Path(structure_json_path).parent / source_artifact_name
             )
-        return self.get_page_content(pdf_path, pages)
+            if os.path.isfile(named_source_artifact):
+                return self.get_page_content(named_source_artifact, pages)
+
+        content_addressed_pdf = str(
+            Path(structure_json_path).with_suffix(".pdf")
+        )
+        if os.path.isfile(content_addressed_pdf):
+            return self.get_page_content(content_addressed_pdf, pages)
+
+        legacy_pdf_path = structure_json_path.replace(
+            "_structure.json",
+            ".pdf",
+        )
+        if not os.path.isfile(legacy_pdf_path):
+            legacy_pdf_path = os.path.join(
+                os.path.dirname(structure_json_path),
+                f"{index_result['doc_name']}.pdf",
+            )
+        return self.get_page_content(legacy_pdf_path, pages)
 
     @staticmethod
     def find_nodes_by_title(

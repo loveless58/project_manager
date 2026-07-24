@@ -12,8 +12,10 @@
 import os
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
+from platform_core.ports import StructureIndex
+from platform_core.settings import AppSettings
 from skills.document_parse.router import (
     route,
     build_default_executors,
@@ -30,6 +32,13 @@ def parse(
     run_id: Optional[str] = None,
     knowledge_base=None,  # 后续 Step 5 接 business_rules/document_parse/*.md
     llm_extractor=None,  # 后续接 common.llm_adapter
+    *,
+    app_settings: Optional[AppSettings] = None,
+    config_file: Any = None,
+    environ: Optional[Mapping[str, str]] = None,
+    structure_index: Optional[StructureIndex] = None,
+    kb_cache_path: Any = None,
+    include_diagnostics: bool = False,
 ) -> Dict[str, Any]:
     """主入口。
 
@@ -39,12 +48,21 @@ def parse(
         run_id: 可选,自动生成 UUID
         knowledge_base: 知识库(后续接 business_rules/document_parse/*.md)
         llm_extractor: LLM fallback(后续接 common.llm_adapter)
+        app_settings: 已解析的统一应用配置；未提供完整显式依赖时使用。
+        config_file: settings JSON 路径，仅在需要加载配置时读取。
+        environ: settings 环境变量映射，仅在需要加载配置时读取。
+        structure_index: 显式注入的 StructureIndex；与 kb_cache_path 同时
+            提供时完全绕过 settings 加载。
+        kb_cache_path: 显式注入的节点本地 KB cache 路径。
+        include_diagnostics: 是否附加脱敏的降级诊断。默认 False，确保
+            document_parse.v1 的既有顶层返回形状不新增字段。
 
     Returns:
         document_parse.v1
     """
     start = time.time()
     rid = run_id or f"run-{uuid.uuid4()}"
+    diagnostics: List[Dict[str, str]] = []
     is_url = bool(source) and source.startswith(("http://", "https://"))
 
     # Step 1: 路由
@@ -61,6 +79,7 @@ def parse(
             reason="parse_error",
             error=str(e),
             impl_status="implemented",
+            include_diagnostics=include_diagnostics,
         )
 
     source_type = "url" if file_type == "url" else "file"
@@ -83,6 +102,7 @@ def parse(
             reason="executor_not_implemented" if impl_status == "stub" else "parse_error",
             error=executor_result.get("error"),
             impl_status=impl_status,
+            include_diagnostics=include_diagnostics,
         )
 
     # Step 4: 应用业务规则(3-layer fallback)
@@ -91,6 +111,12 @@ def parse(
         source_path=source,
         knowledge_base=knowledge_base,
         llm_extractor=llm_extractor,
+        app_settings=app_settings,
+        config_file=config_file,
+        environ=environ,
+        structure_index=structure_index,
+        kb_cache_path=kb_cache_path,
+        diagnostics=diagnostics,
     )
 
     # Step 5: 组装 document_parse.v1
@@ -117,6 +143,8 @@ def parse(
         "knowledge_base_used": business_judgement["rule_source"] == "knowledge_base",
         "elapsed_seconds": round(elapsed, 3),
     }
+    if include_diagnostics:
+        result["diagnostics"] = diagnostics
 
     # Step 6: schema 校验
     is_valid, errors = validate(result)
@@ -134,6 +162,13 @@ def _apply_business_rules(
     source_path: str = "",
     knowledge_base=None,
     llm_extractor=None,
+    *,
+    app_settings: Optional[AppSettings] = None,
+    config_file: Any = None,
+    environ: Optional[Mapping[str, str]] = None,
+    structure_index: Optional[StructureIndex] = None,
+    kb_cache_path: Any = None,
+    diagnostics: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """3-layer fallback: 知识库(L1) → 硬编码(L2) → LLM(L3)。
 
@@ -141,11 +176,20 @@ def _apply_business_rules(
     L2: _hardcoded_classify(MVP 占位,KB 不可用时降级)
     L3: llm_extractor(GPUStack LLM,可选,KB + hard_code 都不高时降级)
     """
-    # L1: KB 匹配(默认本地 PageIndex KB)
+    # L1: KB 匹配(使用统一配置选择的 StructureIndex provider)
     try:
         if knowledge_base is None:
             from skills.document_parse.kb import query_kb as default_kb
-            kb_result = default_kb(raw_data, source_path=source_path)
+            kb_result = default_kb(
+                raw_data,
+                source_path=source_path,
+                app_settings=app_settings,
+                config_file=config_file,
+                environ=environ,
+                structure_index=structure_index,
+                cache_path=kb_cache_path,
+                diagnostics=diagnostics,
+            )
         elif callable(knowledge_base):
             # 兼容旧的 callable 接口(单参数 raw_data)
             kb_result = knowledge_base(raw_data)
@@ -156,7 +200,16 @@ def _apply_business_rules(
         if kb_result is not None and kb_result.get("confidence") in ("high", "medium"):
             return kb_result
     except Exception:
-        pass  # KB 失败,降级 L2
+        if diagnostics is not None:
+            diagnostics.append(
+                {
+                    "component": "document_parse.knowledge_base",
+                    "status": "degraded",
+                    "error_code": "DOCUMENT_PARSE.KB.UNEXPECTED",
+                    "provider": "custom" if knowledge_base is not None else "unknown",
+                    "message": "Knowledge-base lookup is unavailable.",
+                }
+            )
 
     # L2: 硬编码 fallback
     judgement = _hardcoded_classify(raw_data)
@@ -212,10 +265,11 @@ def _build_blocked_result(
     reason: str,
     error: Optional[str],
     impl_status: str,
+    include_diagnostics: bool = False,
 ) -> Dict[str, Any]:
     """构造 blocked 结果(确保 schema 有效)。"""
     warnings = [error] if error else []
-    return {
+    result = {
         "schema_version": SCHEMA_VERSION,
         "run_id": rid,
         "status": "blocked",
@@ -248,3 +302,6 @@ def _build_blocked_result(
         "knowledge_base_used": False,
         "elapsed_seconds": round(elapsed, 3),
     }
+    if include_diagnostics:
+        result["diagnostics"] = []
+    return result

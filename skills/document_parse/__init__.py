@@ -5,7 +5,7 @@
 - validate(result) → (is_valid, errors)
 - validate_or_raise(result)
 - make_llm_extractor() — GPUStack LLM fallback 构造器
-- query_kb() — PageIndex KB 查询
+- query_kb() — 配置驱动的 StructureIndex KB 查询
 """
 
 from skills.document_parse.parse import parse
