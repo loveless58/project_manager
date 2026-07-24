@@ -17,6 +17,7 @@ from .contracts import (
     UnitOfWorkStateError,
     UnsupportedDatabaseProviderError,
 )
+from .migration_catalog import catalog_target_version, load_migration_catalog
 
 __all__ = [
     "AppliedMigration",
@@ -36,4 +37,6 @@ __all__ = [
     "SchemaTooNewError",
     "UnitOfWorkStateError",
     "UnsupportedDatabaseProviderError",
+    "catalog_target_version",
+    "load_migration_catalog",
 ]

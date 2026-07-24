@@ -62,10 +62,54 @@ Settings 会拒绝位于业务根内部的 SQLite 文件和明显的 UNC/network
 
 可从 [config/project-manager.example.json](config/project-manager.example.json) 复制配置样例并改名为 `config/project-manager.local.json`。样例只保存 `PROJECT_MANAGER_DATABASE_DSN` 这个环境变量名，不保存实际 DSN、口令、令牌或私钥；实际 DSN 由节点的运行环境注入。
 
+## SQLite 数据库运维
+
+SQLite 数据库内核已经提供显式状态检查、完整性检查、forward-only migration、一致性备份和候选库恢复。普通 `main.run()` 不会导入数据库内核，也不会在启动时自动迁移；正式 `migrations/sqlite/` 当前没有业务 migration，目标版本为 `0`。第一个实际业务 Repository 接入后才会加入对应业务表和局部门禁。
+
+运维入口是独立 CLI。显式 `--database` 路径优先于环境变量、本地配置和默认值；以下路径只是环境中立示例，实际路径由每个执行节点配置：
+
+```text
+python -m infrastructure.database.cli --database runtime/state.sqlite3 --json status
+python -m infrastructure.database.cli --database runtime/state.sqlite3 --json check
+python -m infrastructure.database.cli --database runtime/state.sqlite3 --json migrate --backup-dir runtime/backups
+python -m infrastructure.database.cli --database runtime/state.sqlite3 --json backup --output runtime/backups/state.sqlite3
+python -m infrastructure.database.cli --database runtime/state.sqlite3 --json verify-restore --backup runtime/backups/state.sqlite3 --manifest runtime/backups/state.sqlite3.manifest.json --target runtime/restore-candidates/state.sqlite3
+```
+
+`--json` 输出稳定的结构化 JSON，包含 `schema_version`、`command`、`status`、`error_code` 和 `details`，并隐藏数据库绝对路径、SQL、DSN、底层异常和其他敏感内容。CLI 使用以下固定退出码：
+
+| 退出码 | 含义 |
+|---:|---|
+| `0` | 操作成功，或 schema 已是 `current`。 |
+| `2` | 需要显式运维动作，例如存在待执行 migration 或数据库尚未初始化。 |
+| `3` | 配置、provider、catalog、校验和或 schema 版本不兼容。 |
+| `4` | 数据库忙或锁等待超时，可以在排除并发写入后重试。 |
+| `5` | 备份、恢复、迁移或其他数据库操作失败。 |
+
+运维边界如下：
+
+- `status` 与 `check` 都会读取 schema 状态并执行数据库完整性验证；`check` 用于表达运维检查意图，两者都不执行 migration。
+- `migrate` 只向前执行。存在待执行项时，迁移前必须先创建并验证一致性备份；任何调用底层 `apply_pending_migrations()` 的代码也必须提供匹配当前版本和目标版本的已验证备份清单。
+- `before_record_insert` 只是 `apply_pending_migrations()` 的关键字测试故障注入参数，用于证明 migration SQL 与迁移记录原子回滚；它不是单独导出的生产 API。
+- 备份使用 SQLite Backup API，而不是直接复制活跃数据库文件。备份清单记录 SHA-256 和字节大小，并同时记录 schema 版本、catalog 目标版本、SQLite 版本和完整性结果。
+- 备份和恢复都不覆盖已存在的目标路径。目标文件、对应 `.manifest.json` 或恢复候选库已存在时，操作会失败，不会静默替换。
+- 恢复会先核对清单、SHA-256、字节大小、SQLite 完整性、外键和 schema，再通过 SQLite Backup API 物化新库。恢复只创建候选数据库，不会修改配置或替换活跃库；验证完成后必须由运维人员显式切换，并保留回退方案。
+
+SQLite 的运行边界是“节点本地”，而不是“仓库所在机器”：
+
+- Windows 或 macOS 单机节点使用自己本机的非同步 SQLite 文件。
+- 备份目录和恢复目标父目录必须是当前节点本机受信任目录，仅允许受信任的本地运维进程修改目录项；不要使用 Synology Drive、NAS、网络挂载、同步盘或不受信任的共享临时目录。
+- 异地执行节点只能操作该节点自己的本地 SQLite，不能把远端共享文件当成活跃 SQLite，也不能用文件同步模拟多节点数据库并发。
+- 示例中的 `runtime/state.sqlite3`、`runtime/backups` 和 `runtime/restore-candidates` 是逻辑示例，不是仓库常量或规定的物理归档位置。
+
+PostgreSQL 是后续 provider；当前只预留 central 配置形状，尚未实现 PostgreSQL 连接、迁移、备份或 Repository。选择 `deployment_mode=central` / `provider=postgresql` 时会明确返回不支持，central 模式不会回退到 SQLite。未来异地执行应通过控制平面 API 与中心 PostgreSQL 协作，而不是让执行节点直接打开同一个 SQLite 文件。
+
+数据库实现不依赖固定的 SynologyDrive、PageIndex、OCR、`document_parse` 或归档物理路径。它们继续作为节点侧存储、结构索引和解析适配器，通过稳定标识与权威业务状态协作；数据库内核不根据盘符、文件名或某一种解析策略建立强耦合。
+
 ## 当前阶段已实现
 
 - 跨平台 `platform_core.settings.load_app_settings()`：统一显式参数、环境变量、本地配置与默认值的优先级；业务根、运行工作区和物理归档位置不写死。
-- 本地 SQLite 的配置形状与路径规则：`deployment_mode=local` 必须选择 `sqlite`；当前阶段尚未实现 SQLite Repository、迁移或 Unit of Work。
+- 本地 SQLite 数据库内核：显式不可变 migration catalog、schema 状态、每事务独立连接的 Unit of Work、一致性备份、候选库恢复和独立运维 CLI；生产 catalog 当前为版本 `0`，尚未接入业务 Repository 或业务表。
 - PostgreSQL provider 与 `PROJECT_MANAGER_DATABASE_DSN` 环境变量名的配置预留：`deployment_mode=central` 仅验证选择 `postgresql`，是新的 Settings 入口，不是 legacy workspace 兼容入口。
 - 显式适配器组合：`local` / `disabled` DocumentStore、`filesystem` ProjectionWriter、`pageindex` / `disabled` StructureIndex；没有动态任意模块加载。
 - 目录和工具治理：目录路径随当前节点 Settings 解析，工具契约逐项验证名称、参数形状和必填参数。
@@ -91,7 +135,7 @@ main.run(goal)
 
 PostgreSQL Repository、连接/连接池、迁移、Unit of Work、权威 SQL 状态持久化、控制平面 API、异地执行节点的注册、领取和提交协议均尚未实现。因此当前版本不能据此部署生产 central 环境。
 
-目标架构中，Windows/macOS 单机将使用本地 SQLite；群晖 PostgreSQL 17 将成为中心化配置的权威数据库。两种部署均以同一领域契约演进，但当前仓库尚未提供这些数据库基础设施实现。
+当前仓库已经提供本地 SQLite 数据库内核，但尚未提供生产业务 Repository；群晖 PostgreSQL 17 及其中心化控制平面仍属于后续实现。
 
 ## 数据、能力与可替换边界
 
@@ -150,7 +194,7 @@ PageIndex、OCR、真实业务样本和外部服务集成测试不是普通快�
 | `PROJECT_MANAGER_BUSINESS_ROOT` | 否 | 当前节点可访问的业务根目录；可以是同步业务目录。 |
 | `PROJECT_MANAGER_WORKSPACE_DIR` | 否 | 当前节点的本机非同步运行工作区。 |
 | `PROJECT_MANAGER_DATABASE_PROVIDER` | 否 | `sqlite` 或 `postgresql`，必须与部署模式匹配。 |
-| `PROJECT_MANAGER_SQLITE_PATH` | 否 | 单机 SQLite 文件位置；必须位于节点本机、业务根以外。当前尚无 SQLite Repository 实现。 |
+| `PROJECT_MANAGER_SQLITE_PATH` | 否 | 单机 SQLite 文件位置；必须位于节点本机、业务根以外。SQLite 内核已实现，业务 Repository 尚未接入。 |
 | `PROJECT_MANAGER_DATABASE_DSN_ENV` | 否 | 保存实际 DSN 的环境变量名称，默认 `PROJECT_MANAGER_DATABASE_DSN`。 |
 | `PROJECT_MANAGER_DATABASE_DSN` | Phase 2+ central | 未来 PostgreSQL 连接实现读取的 DSN；不写入配置文件。 |
 | `PROJECT_MANAGER_DOCUMENT_STORE` | 否 | `local` 或 `disabled`。 |
