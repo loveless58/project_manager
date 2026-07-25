@@ -140,12 +140,20 @@ def test_pdf_with_unreadable_physical_page_count_fails_closed(
     client = _runtime_client(tmp_path)
     source = tmp_path / "corrupt.pdf"
     source.write_bytes(b"%PDF-1.7\ncorrupt")
-    _install_result_runner(monkeypatch, [_node(start_index=1, end_index=1)])
+    runner_called = False
+
+    def must_not_run(command, **kwargs):
+        nonlocal runner_called
+        runner_called = True
+        raise AssertionError("invalid PDF must fail before the external runner")
+
+    monkeypatch.setattr(subprocess, "run", must_not_run)
 
     result = client.index_pdf(str(source))
 
     assert result["status"] == "failed"
-    assert result["error_code"] == "PAGEINDEX.RESULT.INVALID_SCHEMA"
+    assert result["error_code"] == "PAGEINDEX.INPUT.INVALID_PDF"
+    assert runner_called is False
     assert not (Path(client.workspace_root) / "artifacts").exists()
 
 

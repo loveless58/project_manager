@@ -9,6 +9,14 @@ from platform_core.models import StructureIndexRequest
 
 EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
+
+@pytest.fixture(autouse=True)
+def _explicit_pdf_page_count_adapter(monkeypatch):
+    """Keep error-contract doubles independent of the physical PDF parser."""
+    monkeypatch.setattr(
+        PageIndexClient, "_pdf_page_count", staticmethod(lambda path: 1)
+    )
+
 SENSITIVE_ENDPOINT = "http://192." + "168.50.4:9990/v1"
 
 

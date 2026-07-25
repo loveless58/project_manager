@@ -238,15 +238,47 @@ def _load_cache_entry(cache_path: Path, key: str) -> Optional[Dict[str, Any]]:
     return result if isinstance(result, dict) else None
 
 
+def _unique_json_object(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    value: Dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON object key")
+        value[key] = item
+    return value
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError("non-standard JSON constant")
+
+
+def _strict_json_equal(left: Any, right: Any) -> bool:
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _strict_json_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _strict_json_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return bool(left == right)
+
+
 def _json_file_matches(target: Path, payload: Dict[str, Any]) -> bool:
     """Confirm that a concurrent publisher already achieved our exact state."""
 
     try:
         with target.open("r", encoding="utf-8") as source:
-            existing = json.load(source)
-    except (OSError, UnicodeError, json.JSONDecodeError):
+            existing = json.load(
+                source,
+                object_pairs_hook=_unique_json_object,
+                parse_constant=_reject_json_constant,
+            )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
         return False
-    return existing == payload
+    return _strict_json_equal(existing, payload)
 
 
 def _write_json_atomic(

@@ -21,6 +21,14 @@ from integrations.pageindex.structure_index import PageIndexStructureIndex
 from platform_core.models import StructureIndexRequest
 
 
+@pytest.fixture(autouse=True)
+def _explicit_pdf_page_count_adapter(monkeypatch):
+    """Keep identity doubles independent of the physical PDF parser."""
+    monkeypatch.setattr(
+        PageIndexClient, "_pdf_page_count", staticmethod(lambda path: 1)
+    )
+
+
 def _install_fake_runtime(pageindex_dir: Path) -> PageIndexClient:
     client = PageIndexClient(
         str(pageindex_dir),
@@ -500,7 +508,6 @@ def test_concurrent_same_operation_failure_cannot_delete_committed_snapshot(
     content_hash = _content_hash(source)
     monkeypatch.setattr(subprocess, "run", _fake_cli_runner())
     real_link = os.link
-    json_barrier = threading.Barrier(2)
     order_lock = threading.Lock()
     json_publishers = []
     published_pdf_by_thread = {}
@@ -519,7 +526,6 @@ def test_concurrent_same_operation_failure_cannot_delete_committed_snapshot(
             with order_lock:
                 json_publish_order = len(json_publishers)
                 json_publishers.append(thread_id)
-            json_barrier.wait(timeout=5)
             if json_publish_order == 0:
                 raise OSError("injected first-attempt JSON failure")
             real_link(source_path, target_path, *args, **kwargs)

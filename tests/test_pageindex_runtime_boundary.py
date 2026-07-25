@@ -10,6 +10,14 @@ import pytest
 from integrations.pageindex.pageindex_client import PageIndexClient, PageIndexError
 
 
+@pytest.fixture(autouse=True)
+def _explicit_pdf_page_count_adapter(monkeypatch):
+    """Keep process-boundary doubles independent of the physical PDF parser."""
+    monkeypatch.setattr(
+        PageIndexClient, "_pdf_page_count", staticmethod(lambda path: 1)
+    )
+
+
 def _runtime_client(tmp_path: Path, *, corrupt_interpreter: bool = False) -> PageIndexClient:
     client = PageIndexClient(pageindex_dir=str(tmp_path))
     python_bin = Path(client.python_bin)

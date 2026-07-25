@@ -10,7 +10,17 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
 from integrations.pageindex.pageindex_client import PageIndexClient
+
+
+@pytest.fixture(autouse=True)
+def _explicit_pdf_page_count_adapter(monkeypatch):
+    """Keep domain doubles independent of the physical PDF parser."""
+    monkeypatch.setattr(
+        PageIndexClient, "_pdf_page_count", staticmethod(lambda path: 1)
+    )
 
 
 def _install_pageindex_runtime(

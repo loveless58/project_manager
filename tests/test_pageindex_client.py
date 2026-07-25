@@ -22,6 +22,14 @@ sys.path.insert(0, str(INTEGRATIONS_DIR.parent))
 from pageindex.pageindex_client import PageIndexClient, PageIndexError
 
 
+@pytest.fixture(autouse=True)
+def _explicit_pdf_page_count_adapter(monkeypatch):
+    """Keep external-boundary doubles independent of the physical PDF parser."""
+    monkeypatch.setattr(
+        PageIndexClient, "_pdf_page_count", staticmethod(lambda path: 1)
+    )
+
+
 SLOW_TESTS_ENABLED = os.environ.get("PAGEINDEX_RUN_SLOW_TESTS", "0") == "1"
 SLOW_TEST_PATH_TYPES = {
     "PAGEINDEX_TEST_DIR": "directory",

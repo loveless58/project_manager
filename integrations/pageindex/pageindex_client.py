@@ -15,10 +15,55 @@ import shutil
 from collections.abc import Mapping
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
+
+
+_ARTIFACT_THREAD_LOCKS_GUARD = threading.Lock()
+_ARTIFACT_THREAD_LOCKS: Dict[str, threading.RLock] = {}
+
+
+def _artifact_thread_lock(lock_path: Path) -> threading.RLock:
+    key = os.path.normcase(str(lock_path.resolve()))
+    with _ARTIFACT_THREAD_LOCKS_GUARD:
+        return _ARTIFACT_THREAD_LOCKS.setdefault(key, threading.RLock())
+
+
+@contextmanager
+def _exclusive_artifact_lock(artifact_root: Path) -> Iterator[None]:
+    """Serialize publication and collection across threads and processes."""
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    lock_path = artifact_root / ".pageindex-artifacts.lock"
+    thread_lock = _artifact_thread_lock(lock_path)
+    with thread_lock:
+        with lock_path.open("a+b") as lock_file:
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+                os.fsync(lock_file.fileno())
+            lock_file.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 _ERROR_MESSAGES = {
@@ -26,6 +71,7 @@ _ERROR_MESSAGES = {
         "pageindex_dir must be configured explicitly through AppSettings"
     ),
     "PAGEINDEX.INPUT.PDF_NOT_FOUND": "PDF file not found.",
+    "PAGEINDEX.INPUT.INVALID_PDF": "PDF file is invalid or has no readable pages.",
     "PAGEINDEX.INPUT.MARKDOWN_EXTENSION": (
         "Markdown file must use a .md or .markdown extension."
     ),
@@ -412,6 +458,15 @@ class PageIndexClient:
                     round(time.time() - start, 2),
                 )
 
+            max_position: Optional[int] = None
+            if staged_suffix == ".pdf":
+                max_position = self._pdf_page_count(staged_source)
+                if max_position is None or max_position <= 0:
+                    return self._failed(
+                        "PAGEINDEX.INPUT.INVALID_PDF",
+                        round(time.time() - start, 2),
+                    )
+
             try:
                 committed = self._load_committed_artifact(
                     operation_id=resolved_operation_id,
@@ -511,11 +566,6 @@ class PageIndexClient:
             except json.JSONDecodeError:
                 return self._failed("PAGEINDEX.RESULT.INVALID_JSON", elapsed)
 
-            max_position = (
-                self._pdf_page_count(staged_source)
-                if staged_suffix == ".pdf"
-                else None
-            )
             if not self._has_valid_result_schema(data, max_position=max_position):
                 return self._failed("PAGEINDEX.RESULT.INVALID_SCHEMA", elapsed)
 
@@ -672,17 +722,49 @@ class PageIndexClient:
                 with path.open("rb") as source:
                     page_count = len(PyPDF2.PdfReader(source).pages)
             except Exception:
-                try:
-                    with path.open("rb") as source:
-                        header = source.read(5)
-                except OSError:
-                    return 0
-                # Preserve legacy non-PDF test doubles, but fail closed for
-                # real PDF syntax whose physical page count is unreadable.
-                return 0 if header == b"%PDF-" else None
+                return 0
         return page_count if page_count > 0 else 0
 
     def _persist_artifact(
+        self,
+        *,
+        operation_id: str,
+        document_version_id: str,
+        content_hash: str,
+        source_sha256: str,
+        provider_version: str,
+        doc_name: str,
+        staged_source: Path,
+        structure: List[Any],
+    ) -> tuple[str, Mapping[str, Any]]:
+        artifact_root = Path(self.workspace_root) / "artifacts"
+        try:
+            with _exclusive_artifact_lock(artifact_root):
+                artifact_path, _ = self._persist_artifact_locked(
+                    operation_id=operation_id,
+                    document_version_id=document_version_id,
+                    content_hash=content_hash,
+                    source_sha256=source_sha256,
+                    provider_version=provider_version,
+                    doc_name=doc_name,
+                    staged_source=staged_source,
+                    structure=structure,
+                )
+                committed = self._load_committed_artifact(
+                    operation_id=operation_id,
+                    document_version_id=document_version_id,
+                    content_hash=content_hash,
+                    source_sha256=source_sha256,
+                    provider_version=provider_version,
+                    is_pdf=staged_source.suffix.lower() == ".pdf",
+                )
+                if committed is None:
+                    raise _OperationFailure("PAGEINDEX.RESULT.PERSIST_FAILED")
+                return artifact_path, committed
+        except OSError:
+            raise _OperationFailure("PAGEINDEX.RESULT.PERSIST_FAILED") from None
+
+    def _persist_artifact_locked(
         self,
         *,
         operation_id: str,
@@ -823,6 +905,8 @@ class PageIndexClient:
             except OSError:
                 raise _OperationFailure("PAGEINDEX.RESULT.PERSIST_FAILED") from None
             max_position = self._pdf_page_count(source_target)
+            if max_position is None or max_position <= 0:
+                raise _OperationFailure("PAGEINDEX.RESULT.PERSIST_FAILED")
         if not self._has_valid_nodes(
             payload["structure"],
             max_position=max_position,
@@ -886,7 +970,22 @@ class PageIndexClient:
         artifact_root = Path(self.workspace_root) / "artifacts"
         if not artifact_root.is_dir():
             return 0
-        cutoff = time.time() - grace_seconds
+        try:
+            with _exclusive_artifact_lock(artifact_root):
+                return self._collect_orphaned_source_artifacts_locked(
+                    artifact_root=artifact_root,
+                    cutoff=time.time() - grace_seconds,
+                )
+        except OSError:
+            return 0
+
+    def _collect_orphaned_source_artifacts_locked(
+        self,
+        *,
+        artifact_root: Path,
+        cutoff: float,
+    ) -> int:
+        """Collect owned snapshots while the root-wide artifact lock is held."""
         removed = 0
         for candidate in artifact_root.glob("source-*.pdf"):
             if not re.fullmatch(
