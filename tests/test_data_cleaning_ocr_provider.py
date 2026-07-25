@@ -283,7 +283,7 @@ class TestDataCleaningOcrProvider(unittest.TestCase):
             self.assertEqual(extracted["fields"]["bid_code"], "ABC12345")
             self.assertEqual(extracted["fields"]["amount"], 800.0)
 
-    def test_internal_project_markdown_builds_ready_archive_action(self):
+    def test_internal_project_markdown_requires_review_before_archive_action(self):
         from tools.data_cleaning_tools import DataCleaningTools
 
         with tempfile.TemporaryDirectory() as td:
@@ -295,9 +295,9 @@ class TestDataCleaningOcrProvider(unittest.TestCase):
 
             self.assertEqual(result["status"], "success")
             self.assertEqual(result["archive_actions"][0]["status"], "needs_review")
-            self.assertEqual(result["archive_actions"][0]["project_name"], "project_manager")
+            self.assertEqual(result["archive_actions"][0]["project_name"], "待确认")
             self.assertEqual(result["archive_actions"][0]["document_type"], "项目治理文档")
-            self.assertIn("pm_internal_archive_pending_redesign", result["archive_actions"][0]["blockers"])
+            self.assertIn("classification_requires_review", result["archive_actions"][0]["blockers"])
             self.assertIsNone(result["archive_actions"][0]["target_dir"])
             self.assertIsNone(result["archive_actions"][0]["target_path"])
 

@@ -25,6 +25,24 @@ def evaluate_archive_decision(
     )
 
 
+    if classification["requires_review"]:
+        errors = classification.get("validation_errors", [])
+        blockers = ["classification_requires_review", *errors]
+        return {
+            "schema_version": "archive_decision.v1",
+            "subject_type": "review_pending",
+            "subject_name": "待确认",
+            "archive_phase": None,
+            "document_type": classification["document_type"],
+            "confidence": classification["confidence"],
+            "classification": classification,
+            "target_dir": None,
+            "target_path": None,
+            "blockers": blockers,
+            "human_review_required": True,
+            "reasons": ["classification_requires_review"],
+        }
+
     if classification["business_domain"] == "internal_project":
         # TODO: PM 内部文档归档 phase 待重新设计 (2026-07-15)
         # 原"项目归档"作为业务状态删除后，这里临时返回未决标记，
@@ -42,24 +60,6 @@ def evaluate_archive_decision(
             "blockers": ["pm_internal_archive_pending_redesign"],
             "human_review_required": True,
             "reasons": ["pm_internal_archive_needs_redesign"],
-        }
-
-    if classification["requires_review"]:
-        errors = classification.get("validation_errors", [])
-        blockers = ["classification_requires_review", *errors]
-        return {
-            "schema_version": "archive_decision.v1",
-            "subject_type": "review_pending",
-            "subject_name": "待确认",
-            "archive_phase": None,
-            "document_type": classification["document_type"],
-            "confidence": classification["confidence"],
-            "classification": classification,
-            "target_dir": None,
-            "target_path": None,
-            "blockers": blockers,
-            "human_review_required": True,
-            "reasons": ["classification_requires_review"],
         }
 
 

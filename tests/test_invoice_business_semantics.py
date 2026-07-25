@@ -201,3 +201,32 @@ def test_malformed_classification_cannot_create_archive_target(
     assert decision["target_path"] is None
     assert decision["human_review_required"] is True
     assert expected_error in decision["blockers"]
+def test_invalid_internal_project_classification_is_review_pending():
+    from business_rules.archive_decision import evaluate_archive_decision
+
+    decision = evaluate_archive_decision(
+        source_file="SYN-internal.md",
+        extracted={
+            "filename": "SYN-internal.md",
+            "document_type": "项目治理文档",
+            "fields": {},
+            "classification": {
+                "document_type": "项目治理文档",
+                "business_domain": "internal_project",
+                "project_phase": None,
+                "archive_phase": None,
+                "confidence": True,
+                "evidence": [],
+                "requires_review": "",
+            },
+        },
+        business_judgement={},
+        project_files_dir="/tmp/SYN-project-files",
+    )
+
+    assert decision["subject_type"] == "review_pending"
+    assert decision["target_path"] is None
+    assert decision["human_review_required"] is True
+    assert "invalid_document_classification" in decision["blockers"]
+    assert "invalid_classification_confidence" in decision["blockers"]
+    assert "invalid_requires_review" in decision["blockers"]

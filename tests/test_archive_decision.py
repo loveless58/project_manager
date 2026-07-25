@@ -26,7 +26,7 @@ class TestArchiveDecision(unittest.TestCase):
                         "archive_phase": None,
                         "confidence": 0.98,
                         "evidence": ["filename:PRD-project-manager-ocr.md", "text:project_manager"],
-                        "requires_review": True,
+                        "requires_review": False,
                     },
                     "extracted_text": "# PRD\nproject_manager OCR design",
                     "fields": {},
