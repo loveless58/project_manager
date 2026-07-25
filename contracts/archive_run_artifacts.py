@@ -56,6 +56,31 @@ _ACTION_KEYS = {
     "business_judgement", "archive_decision", "proposed_name", "target_dir",
     "target_path", "blockers", "archive_intent_ref", "archive_intent",
 }
+_NATIVE_PARSE_SCHEMA_VERSION = "document.extract.v1"
+_NATIVE_PARSE_ROOT_KEYS = {
+    "schema_version", "status", "file", "filename", "file_type",
+    "document_type", "classification", "paragraph_count", "table_count",
+    "table_row_count", "sheet_count", "text_length", "extracted_text",
+    "fields", "extract_method", "is_scanned", "ocr", "engine_candidates",
+    "needs_human_review",
+}
+_NATIVE_PARSE_REQUIRED_KEYS = {
+    "schema_version", "document_type", "extracted_text", "fields",
+}
+_NATIVE_FIELD_KEYS = {
+    "invoice_number", "invoice_date", "untaxed_amount", "tax_amount",
+    "total_amount", "project_code", "project_name", "budget", "deadline",
+    "customer", "customer_name", "bid_status", "contract_status",
+    "registration_status", "sales_owner", "lifecycle_stage",
+    "closed_reason_type", "payer", "payee", "payment_date",
+    "payment_amount", "payment_summary", "registration_deadline",
+    "bid_deadline", "bid_open_time", "amount", "amount_label",
+    "supplier_name", "document_type", "document_date", "quoted_amount",
+    "service_rate", "penalty_rate", "bid_fee", "bid_code",
+    "business_reference_no", "contract_date", "bid_announcement_date",
+    "contract_code", "contract_name", "date", "buyer_name", "buyer_tax_id",
+    "seller_name", "seller_tax_id",
+}
 
 
 class ArchiveRunArtifactError(ValueError):
@@ -114,8 +139,11 @@ def validate_json_tree(value: object, *, inspect_sensitive: bool = True) -> None
                 inspect_sensitive and _contains_sensitive(item)
             ):
                 raise ArchiveRunArtifactError("unsafe string")
-        elif item is None or type(item) in (bool, int):
+        elif item is None or type(item) is bool:
             continue
+        elif type(item) is int:
+            if abs(item) > MAX_INTEGER_ABS:
+                raise ArchiveRunArtifactError("JSON integer exceeds range")
         elif type(item) is float:
             if not math.isfinite(item):
                 raise ArchiveRunArtifactError("non-finite number")
@@ -316,24 +344,39 @@ def validate_review_queue(payload: dict[str, Any], run_id: str) -> None:
 def normalize_native_parse_output(value: object) -> dict[str, Any]:
     if type(value) is not dict:
         raise ArchiveRunArtifactError("native parse root")
-    if "schema_version" in value and value.get("schema_version") != "document.extract.v1":
+    if not _NATIVE_PARSE_REQUIRED_KEYS <= set(value) or set(value) - _NATIVE_PARSE_ROOT_KEYS:
+        raise ArchiveRunArtifactError("native parse fields")
+    if value.get("schema_version") != _NATIVE_PARSE_SCHEMA_VERSION:
         raise ArchiveRunArtifactError("native parse version")
-    document_type = value.get("document_type") or "other"
-    fields = value.get("fields") or {}
+    if value.get("status", "success") != "success":
+        raise ArchiveRunArtifactError("native parse status")
+    document_type = value.get("document_type")
+    fields = value.get("fields")
     classification = value.get("classification")
-    extracted_text = value.get("extracted_text", value.get("text", ""))
-    boundary = {
-        "document_type": document_type,
-        "fields": fields,
-        "classification": classification,
-        "extracted_text": extracted_text,
-    }
-    validate_json_tree(boundary)
-    _serialized_bytes(boundary)
+    extracted_text = value.get("extracted_text")
     if not _bounded_text(document_type, 128):
         raise ArchiveRunArtifactError("native document type")
     if type(fields) is not dict or type(extracted_text) is not str:
         raise ArchiveRunArtifactError("native parse types")
+    for key in ("file", "filename", "file_type", "extract_method"):
+        if key in value and type(value[key]) is not str:
+            raise ArchiveRunArtifactError("native parse metadata text")
+    for key in ("paragraph_count", "table_count", "table_row_count", "sheet_count", "text_length"):
+        if key in value and (
+            type(value[key]) is not int or not 0 <= value[key] <= MAX_INTEGER_ABS
+        ):
+            raise ArchiveRunArtifactError("native parse metadata integer")
+    for key in ("is_scanned", "needs_human_review"):
+        if key in value and type(value[key]) is not bool:
+            raise ArchiveRunArtifactError("native parse metadata boolean")
+    if "ocr" in value and type(value["ocr"]) is not dict:
+        raise ArchiveRunArtifactError("native parse OCR diagnostics")
+    if "engine_candidates" in value and type(value["engine_candidates"]) is not list:
+        raise ArchiveRunArtifactError("native parse engine diagnostics")
+    safe_root = dict(value)
+    safe_root.pop("file", None)
+    validate_json_tree(safe_root)
+    _serialized_bytes(value)
     candidate_fields = _scalar_candidate_fields(fields)
     return {
         "document_type": document_type,
@@ -372,41 +415,24 @@ def validate_extracted_document_artifact(
 
 
 def _scalar_candidate_fields(fields: dict[str, Any]) -> dict[str, Any]:
-    direct = {
-        "invoice_number", "invoice_date", "amount", "tax_amount", "total_amount",
-        "buyer_name", "buyer_tax_id", "seller_name", "seller_tax_id",
-        "project_code", "project_name", "contract_code", "contract_name", "date",
-    }
+    if set(fields) - _NATIVE_FIELD_KEYS:
+        raise ArchiveRunArtifactError("native candidate field names")
     result: dict[str, Any] = {}
     for key, item in fields.items():
-        if key in direct:
-            if item is None:
-                continue
-            if type(item) is str:
-                if not _bounded_text(item, MAX_SCALAR_BYTES):
-                    raise ArchiveRunArtifactError("candidate scalar")
-                result[key] = item
-            elif type(item) in (int, float):
-                if type(item) is float and not math.isfinite(item):
-                    raise ArchiveRunArtifactError("candidate number")
-                if abs(item) > 10**15:
-                    raise ArchiveRunArtifactError("candidate number range")
-                result[key] = item
-            else:
-                raise ArchiveRunArtifactError("candidate scalar type")
-        elif key in {"buyer", "seller"}:
-            if item is None:
-                continue
-            if type(item) is not dict or set(item) - {"name", "tax_id"}:
-                raise ArchiveRunArtifactError("candidate party")
-            for nested_key, nested_value in item.items():
-                if not _bounded_text(nested_value, MAX_SCALAR_BYTES):
-                    raise ArchiveRunArtifactError("candidate party scalar")
-                result[f"{key}_{nested_key}"] = nested_value
-        elif key == "line_items":
-            if type(item) is not list:
-                raise ArchiveRunArtifactError("line items")
-            # Detail rows are intentionally excluded from the persisted/interpreter summary.
+        if item is None:
+            continue
+        if type(item) is str:
+            if not _bounded_text(item, MAX_SCALAR_BYTES):
+                raise ArchiveRunArtifactError("candidate scalar")
+            result[key] = item
+        elif type(item) in (int, float):
+            if type(item) is float and not math.isfinite(item):
+                raise ArchiveRunArtifactError("candidate number")
+            if abs(item) > 10**15:
+                raise ArchiveRunArtifactError("candidate number range")
+            result[key] = item
+        else:
+            raise ArchiveRunArtifactError("candidate scalar type")
     return result
 
 

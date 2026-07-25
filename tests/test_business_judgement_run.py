@@ -520,6 +520,59 @@ def test_malicious_native_parse_is_rejected_before_extracted_artifact_persistenc
 
 
 @pytest.mark.parametrize(
+    "malformed_kind",
+    [
+        "list_root", "null_root", "unknown_root", "missing_version",
+        "wrong_version", "unknown_field", "line_items", "nested_field",
+    ],
+)
+def test_native_parse_contract_rejects_unrecognized_structure_before_any_downstream_effect(
+    tmp_path: Path, malformed_kind: str,
+) -> None:
+    tools, source, retrieval, _ = _configured_tools(
+        tmp_path, interpretation=CountingInterpretation(),
+    )
+    parser_result: dict[str, object] = {
+        "schema_version": "document.extract.v1",
+        "document_type": "合同",
+        "classification": None,
+        "fields": {"contract_code": CONTRACT_CODE},
+        "extracted_text": "合同",
+    }
+    fields = parser_result["fields"]
+    assert isinstance(fields, dict)
+    parser_output: object = parser_result
+    if malformed_kind == "list_root":
+        parser_output = []
+    elif malformed_kind == "null_root":
+        parser_output = None
+    elif malformed_kind == "unknown_root":
+        parser_result["parser_debug"] = "not-contract-data"
+    elif malformed_kind == "missing_version":
+        parser_result.pop("schema_version")
+    elif malformed_kind == "wrong_version":
+        parser_result["schema_version"] = "document.extract.v0"
+    elif malformed_kind == "unknown_field":
+        fields["unsupported_native_field"] = "not-contract-data"
+    elif malformed_kind == "line_items":
+        fields["line_items"] = [{"item_name": "not-contract-data"}]
+    else:
+        fields["buyer"] = {"name": "not-contract-data"}
+
+    with patch.object(tools, "extract_document", return_value=parser_output):
+        result = tools.prepare_file_organization_run([str(source)])
+
+    run_dir = Path(result["artifacts"]["run_dir"])
+    assert result["status"] == "failed"
+    assert result["failures"][0]["blocked_reason"] == "DOCUMENT_PARSE.SCHEMA_INVALID"
+    assert result["structured_outputs"] == []
+    assert not list((run_dir / "extracted").glob("*_extracted.json"))
+    assert result["candidate_interpretations"] == []
+    assert result["archive_intents"] == []
+    assert retrieval.calls == 0
+
+
+@pytest.mark.parametrize(
     ("candidate_ids", "binding_options", "expected_status"),
     [
         (("source",), {}, "unresolved"),

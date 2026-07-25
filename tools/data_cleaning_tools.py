@@ -1627,7 +1627,9 @@ class DataCleaningTools:
                 archive_actions.append(self._review_only_archive_action(run_id, source_ref, [code]))
                 trace.append({"stage": "source_snapshot", "source_ref": ref_payload, "status": "blocked", "blocked_reason": code})
                 continue
-            if "error" in extracted or extracted.get("status") == "blocked":
+            if type(extracted) is dict and (
+                "error" in extracted or extracted.get("status") == "blocked"
+            ):
                 code = str(extracted.get("blocked_reason") or "DOCUMENT_PARSE.FAILED")
                 failures.append({"source_ref": ref_payload, "stage": "native_parse", "status": "blocked", "blocked_reason": code})
                 archive_actions.append(self._review_only_archive_action(run_id, source_ref, [code]))
@@ -2806,11 +2808,13 @@ class DataCleaningTools:
             actions = plan["actions"]
             audit_path = os.path.join(run_dir, "audit_review.json")
             review_queue_path = os.path.join(run_dir, "review_queue.json")
-            audit_review = self._load_json_file(audit_path) if os.path.exists(audit_path) else {}
-            review_queue = self._load_json_file(review_queue_path) if os.path.exists(review_queue_path) else {}
-            if audit_review:
+            audit_exists = os.path.exists(audit_path)
+            review_queue_exists = os.path.exists(review_queue_path)
+            audit_review = self._load_json_file(audit_path) if audit_exists else {}
+            review_queue = self._load_json_file(review_queue_path) if review_queue_exists else {}
+            if audit_exists:
                 validate_audit_review(audit_review, run_id)
-            if review_queue:
+            if review_queue_exists:
                 validate_review_queue(review_queue, run_id)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             blocker = "artifact_run_id_mismatch" if "run identity" in str(exc) else "archive_plan_invalid"
