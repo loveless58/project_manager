@@ -1,5 +1,7 @@
 import os
 
+import pytest
+
 
 def test_invoice_item_is_not_business_project(tmp_path):
     """Changing invoice item parsing to generic project extraction must fail this test."""
@@ -130,3 +132,72 @@ def test_invoice_split_label_rows_do_not_cross_field_boundaries():
     assert fields["invoice_date"] == "2026-07-25"
     assert fields["buyer"] == {"name": "合成甲方有限公司", "tax_id": "SYN-BUY-002"}
     assert fields["seller"] == {"name": "合成乙方有限公司", "tax_id": "SYN-SELL-002"}
+def test_invoice_inline_labels_stop_at_next_known_label():
+    from business_rules.invoice_fields import extract_invoice_fields
+
+    fields = extract_invoice_fields("购买方名称：合成甲方 销售方名称：合成乙方")
+
+    assert fields["buyer"] == {"name": "合成甲方"}
+    assert fields["seller"] == {"name": "合成乙方"}
+
+
+def test_invoice_bare_label_does_not_consume_next_label_row():
+    from business_rules.invoice_fields import extract_invoice_fields
+
+    fields = extract_invoice_fields("发票号码\n开票日期：2026-07-25")
+
+    assert "invoice_number" not in fields
+    assert fields["invoice_date"] == "2026-07-25"
+
+
+def test_invoice_pipe_rows_preserve_internal_empty_cells():
+    from business_rules.invoice_fields import extract_invoice_fields
+
+    fields = extract_invoice_fields(
+        "| 项目名称 | 规格型号 | 金额 |\n"
+        "| 技术服务 | | 100.00 |"
+    )
+
+    assert fields["line_items"] == [{"item_name": "技术服务"}]
+
+
+@pytest.mark.parametrize(
+    ("requires_review", "confidence", "expected_error"),
+    [
+        ("", 0.9, "invalid_requires_review"),
+        (0, 0.9, "invalid_requires_review"),
+        ([], 0.9, "invalid_requires_review"),
+        (None, 0.9, "invalid_requires_review"),
+        (False, True, "invalid_classification_confidence"),
+        (False, False, "invalid_classification_confidence"),
+    ],
+)
+def test_malformed_classification_cannot_create_archive_target(
+    requires_review, confidence, expected_error
+):
+    from business_rules.archive_decision import evaluate_archive_decision
+
+    decision = evaluate_archive_decision(
+        source_file="SYN-source.md",
+        extracted={
+            "filename": "SYN-source.md",
+            "document_type": "项目记录",
+            "fields": {"project_name": "合成项目"},
+            "classification": {
+                "document_type": "项目记录",
+                "business_domain": "bid_project",
+                "project_phase": "项目执行",
+                "archive_phase": "项目执行",
+                "confidence": confidence,
+                "evidence": [],
+                "requires_review": requires_review,
+            },
+        },
+        business_judgement={},
+        project_files_dir="/tmp/SYN-project-files",
+    )
+
+    assert decision["subject_type"] == "review_pending"
+    assert decision["target_path"] is None
+    assert decision["human_review_required"] is True
+    assert expected_error in decision["blockers"]

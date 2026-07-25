@@ -152,11 +152,16 @@ def _validated_document_classification(value: Any, fallback_document_type: str) 
     if archive_phase is not None and (not isinstance(archive_phase, str) or archive_phase not in _ARCHIVE_PHASES):
         errors.append("invalid_archive_phase")
         archive_phase = None
-    try:
-        confidence = float(payload.get("confidence", 0.0))
-    except (TypeError, ValueError):
+    raw_confidence = payload.get("confidence", 0.0)
+    if isinstance(raw_confidence, bool):
         confidence = 0.0
         errors.append("invalid_classification_confidence")
+    else:
+        try:
+            confidence = float(raw_confidence)
+        except (TypeError, ValueError):
+            confidence = 0.0
+            errors.append("invalid_classification_confidence")
     if not isfinite(confidence):
         confidence = 0.0
         errors.append("invalid_classification_confidence")
@@ -167,7 +172,13 @@ def _validated_document_classification(value: Any, fallback_document_type: str) 
     if not isinstance(evidence, list) or not all(isinstance(item, str) for item in evidence):
         evidence = []
         errors.append("invalid_classification_evidence")
-    result = {"document_type": document_type, "business_domain": business_domain, "project_phase": project_phase, "archive_phase": archive_phase, "confidence": confidence, "evidence": evidence, "requires_review": bool(payload.get("requires_review", False)) or bool(errors)}
+    raw_requires_review = payload.get("requires_review")
+    if type(raw_requires_review) is not bool:
+        errors.append("invalid_requires_review")
+        requires_review = True
+    else:
+        requires_review = raw_requires_review
+    result = {"document_type": document_type, "business_domain": business_domain, "project_phase": project_phase, "archive_phase": archive_phase, "confidence": confidence, "evidence": evidence, "requires_review": requires_review or bool(errors)}
     if errors:
         errors.insert(0, "invalid_document_classification")
         result["validation_errors"] = errors

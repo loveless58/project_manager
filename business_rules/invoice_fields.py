@@ -109,29 +109,94 @@ def _invoice_rows(text: str) -> List[List[str]]:
         line = raw_line.strip()
         if not line:
             continue
-        cells = [cell.strip() for cell in line.split("|") if cell.strip()]
         if "|" not in line:
-            cells = [line]
+            rows.append([line])
+            continue
+        cells = [cell.strip() for cell in line.split("|")]
+        if line.startswith("|"):
+            cells = cells[1:]
+        if line.endswith("|"):
+            cells = cells[:-1]
         rows.append(cells)
     return rows
+
+
+_ALL_INVOICE_LABELS = (
+    "价税合计（小写）", "价税合计(小写)", "合计金额（小写）", "合计金额(小写)",
+    "购买方统一社会信用代码", "购买方纳税人识别号", "收票方统一社会信用代码", "收票方纳税人识别号",
+    "销售方统一社会信用代码", "销售方纳税人识别号", "购买方名称", "收票方名称", "销售方名称",
+    "购买方税号", "收票方税号", "销售方税号", "不含税金额", "合计金额",
+    "发票号码", "开票日期", "发票日期", "发票号", "项目名称", "规格型号", "价税合计", "税额", "金额",
+)
+_INVOICE_LABEL_PATTERN = re.compile(
+    "|".join(re.escape(label) for label in sorted(_ALL_INVOICE_LABELS, key=len, reverse=True))
+)
 
 
 def _label_value(rows: List[List[str]], labels: tuple[str, ...]) -> str:
     for row_index, row in enumerate(rows):
         for cell_index, cell in enumerate(row):
-            for label in labels:
-                if not cell.startswith(label):
-                    continue
-                suffix = cell[len(label):].strip()
-                if suffix.startswith((":", "：")):
-                    return suffix[1:].strip()
-                if suffix:
-                    continue
-                if cell_index + 1 < len(row):
-                    return row[cell_index + 1].strip()
-                if row_index + 1 < len(rows) and rows[row_index + 1]:
-                    return rows[row_index + 1][0].strip()
+            for segment in _inline_label_segments(cell):
+                for label in labels:
+                    if not segment.startswith(label):
+                        continue
+                    suffix = segment[len(label):].strip()
+                    if suffix.startswith((":", "：")):
+                        value = _truncate_at_next_label(suffix[1:].strip())
+                    elif suffix:
+                        continue
+                    elif cell_index + 1 < len(row):
+                        value = row[cell_index + 1].strip()
+                    elif row_index + 1 < len(rows) and rows[row_index + 1]:
+                        value = rows[row_index + 1][0].strip()
+                    else:
+                        value = ""
+                    if _valid_label_value(label, value):
+                        return value
     return ""
+
+
+def _inline_label_segments(cell: str) -> List[str]:
+    matches = list(_INVOICE_LABEL_PATTERN.finditer(cell))
+    if not matches:
+        return [cell]
+    return [
+        cell[match.start():matches[index + 1].start() if index + 1 < len(matches) else len(cell)]
+        for index, match in enumerate(matches)
+    ]
+
+
+def _truncate_at_next_label(value: str) -> str:
+    boundaries = [
+        match.start()
+        for known_label in _ALL_INVOICE_LABELS
+        for match in (re.search(re.escape(known_label), value),)
+        if match and match.start() > 0
+    ]
+    return value[:min(boundaries)].strip() if boundaries else value.strip()
+
+
+def _valid_label_value(label: str, value: str) -> bool:
+    normalized = value.strip()
+    if not normalized or _looks_like_invoice_label_or_table_row(normalized):
+        return False
+    if label in {"发票号码", "发票号"}:
+        return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{2,}", normalized))
+    if label in {"开票日期", "发票日期"}:
+        return bool(_normalize_date(normalized))
+    return True
+
+
+def _looks_like_invoice_label_or_table_row(value: str) -> bool:
+    compact = value.strip()
+    if compact.startswith(_ALL_INVOICE_LABELS):
+        return True
+    normalized = re.sub(r"\s+", "", compact)
+    return (
+        "项目名称" in normalized
+        or "规格型号" in normalized
+        or normalized.startswith(("合计", "价税", "税额"))
+    )
 
 
 def _party_from_rows(rows: List[List[str]], roles: tuple[str, ...]) -> Dict[str, str]:
@@ -165,17 +230,19 @@ def _line_items_from_rows(rows: List[List[str]]) -> List[Dict[str, str]]:
             continue
         item_index = header.index("项目名称")
         specification_index = header.index("规格型号") if "规格型号" in header else None
+        header_width = len(header)
         items: List[Dict[str, str]] = []
         for raw_row in rows[header_index + 1:]:
             cells = _expanded_cells(raw_row)
             if not cells or _separator_row(cells):
                 continue
-            if any(marker in cells[0] for marker in ("合计", "价税", "税额")):
+            if _total_row(cells):
                 break
-            if item_index >= len(cells) or cells[item_index] in {"项目名称", "名称"}:
+            cells = (cells + [""] * header_width)[:header_width]
+            if cells[item_index] in {"", "项目名称", "名称"}:
                 continue
             item = {"item_name": cells[item_index]}
-            if specification_index is not None and specification_index < len(cells) and cells[specification_index]:
+            if specification_index is not None and cells[specification_index]:
                 item["specification"] = cells[specification_index]
             items.append(item)
         return items
@@ -187,4 +254,9 @@ def _expanded_cells(cells: List[str]) -> List[str]:
 
 
 def _separator_row(cells: List[str]) -> bool:
-    return bool(cells) and all(re.fullmatch(r"[-:： ]+", cell) for cell in cells)
+    return bool(cells) and all(not cell or re.fullmatch(r"[-:： ]+", cell) for cell in cells)
+
+
+def _total_row(cells: List[str]) -> bool:
+    normalized = " ".join(cell.strip() for cell in cells if cell.strip())
+    return normalized.startswith(("合计", "价税", "税额"))

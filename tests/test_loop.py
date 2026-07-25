@@ -1469,7 +1469,7 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertEqual(result["failures"], [])
             self.assertFalse((Path(tools.project_files_dir) / project_name / "数字资产" / "project_ledger.json").exists())
 
-    def test_known_phase_pdf_gets_archive_plan_without_blocking_on_ocr(self):
+    def test_known_phase_pdf_without_classification_is_safely_blocked_for_review(self):
         import os
         import tempfile
         from pathlib import Path
