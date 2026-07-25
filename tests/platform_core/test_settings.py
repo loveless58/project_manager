@@ -359,3 +359,28 @@ def test_runtime_workspace_cannot_be_inside_an_explicit_storage_binding(tmp_path
             business_root=tmp_path / "legacy",
             runtime_workspace=source_root / "runtime",
         )
+
+def test_duplicate_storage_binding_id_is_rejected_while_loading_settings(tmp_path):
+    from platform_core.settings import SettingsError, load_app_settings
+
+    config_file = tmp_path / "project-manager.local.json"
+    binding = {
+        "binding_id": "source",
+        "provider": "local",
+        "node_id": "node-a",
+        "logical_root": "business://source/",
+        "physical_root": str(tmp_path / "source"),
+        "roles": ["source"],
+        "readable": True,
+        "writable": False,
+    }
+    config_file.write_text(
+        json.dumps({"storage_bindings": [binding, dict(binding)]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        SettingsError,
+        match=r"storage_bindings\[1\].binding_id duplicates storage_bindings\[0\].binding_id",
+    ):
+        load_app_settings(config_file=config_file, environ={})

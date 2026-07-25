@@ -215,6 +215,7 @@ def _load_storage_bindings(raw_bindings: Any) -> tuple[StorageBinding, ...]:
         raise SettingsError("storage_bindings must be a list")
 
     bindings: list[StorageBinding] = []
+    binding_id_locations: dict[str, int] = {}
     for index, raw_binding in enumerate(raw_bindings):
         field_prefix = f"storage_bindings[{index}]"
         if not isinstance(raw_binding, dict):
@@ -238,6 +239,13 @@ def _load_storage_bindings(raw_bindings: Any) -> tuple[StorageBinding, ...]:
             string_values[field_name] = value
 
         raw_roles = raw_binding["roles"]
+        binding_id = string_values["binding_id"]
+        first_index = binding_id_locations.get(binding_id)
+        if first_index is not None:
+            raise SettingsError(
+                f"{field_prefix}.binding_id duplicates storage_bindings[{first_index}].binding_id"
+            )
+        binding_id_locations[binding_id] = index
         if (
             not isinstance(raw_roles, list)
             or not all(isinstance(role, str) and role.strip() for role in raw_roles)

@@ -40,10 +40,10 @@ class RuntimeAdapters:
     """The concrete port implementations selected for one application runtime."""
 
     document_store: DocumentStore
-    storage_binding_registry: StorageBindingRegistry
-    document_store_router: DocumentStoreRouter
     structure_index: StructureIndex
     projection_writer: ProjectionWriter
+    storage_binding_registry: Optional[StorageBindingRegistry] = None
+    document_store_router: Optional[DocumentStoreRouter] = None
 
     def summary(self) -> dict[str, str]:
         return {
@@ -97,9 +97,9 @@ def build_runtime_adapters(
     stores_by_binding = {
         binding.binding_id: LocalDocumentStore(binding.physical_root)
         for binding in storage_binding_registry.bindings
-        if binding.enabled and binding.provider == "local"
+        if binding.enabled and binding.readable and binding.provider == "local"
     }
-    document_store_router = DocumentStoreRouter(stores_by_binding)
+    document_store_router = DocumentStoreRouter(storage_binding_registry, stores_by_binding)
     return RuntimeAdapters(
         document_store=selected.build(
             AdapterKind.DOCUMENT_STORE,

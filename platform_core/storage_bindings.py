@@ -36,8 +36,16 @@ class StorageBinding:
     def __post_init__(self) -> None:
         if not isinstance(self.binding_id, str) or not self.binding_id.strip():
             raise StorageBindingError("binding_id must be a non-empty string")
+        if self.binding_id != self.binding_id.strip():
+            raise StorageBindingError(
+                "binding_id must not contain leading or trailing whitespace"
+            )
         if not isinstance(self.provider, str) or not self.provider.strip():
             raise StorageBindingError("provider must be a non-empty string")
+        if self.provider != self.provider.strip():
+            raise StorageBindingError(
+                "provider must not contain leading or trailing whitespace"
+            )
         if not isinstance(self.node_id, str) or not self.node_id.strip():
             raise StorageBindingError("node_id must be a non-empty string")
         if not isinstance(self.logical_root, str) or not self.logical_root.endswith("/"):
@@ -73,7 +81,7 @@ class StorageBindingRegistry:
         candidate = Path(path).expanduser().resolve()
         matches: list[tuple[StorageBinding, Path]] = []
         for binding in self.bindings:
-            if not binding.enabled:
+            if not binding.enabled or not binding.readable:
                 continue
             try:
                 relative_path = candidate.relative_to(binding.physical_root)
@@ -84,7 +92,7 @@ class StorageBindingRegistry:
 
         if not matches:
             raise StorageBindingNotFoundError(
-                "path is not contained by an enabled storage binding"
+                "path is not contained by an enabled and readable storage binding"
             )
         if len(matches) > 1:
             raise AmbiguousStorageBindingError(

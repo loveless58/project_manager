@@ -83,3 +83,70 @@ def test_runtime_exposes_binding_registry_and_router(tmp_path):
     assert set(adapters.document_store_router.stores_by_binding) == {
         "legacy-business-root"
     }
+
+def test_runtime_adapters_preserve_legacy_three_argument_construction() -> None:
+    from app_bootstrap.composition import RuntimeAdapters
+
+    document_store = object()
+    structure_index = object()
+    projection_writer = object()
+
+    adapters = RuntimeAdapters(document_store, structure_index, projection_writer)
+
+    assert adapters.document_store is document_store
+    assert adapters.structure_index is structure_index
+    assert adapters.projection_writer is projection_writer
+    assert adapters.storage_binding_registry is None
+    assert adapters.document_store_router is None
+
+
+def test_runtime_adapters_preserve_legacy_keyword_construction() -> None:
+    from app_bootstrap.composition import RuntimeAdapters
+
+    document_store = object()
+    structure_index = object()
+    projection_writer = object()
+
+    adapters = RuntimeAdapters(
+        document_store=document_store,
+        structure_index=structure_index,
+        projection_writer=projection_writer,
+    )
+
+    assert adapters.document_store is document_store
+    assert adapters.structure_index is structure_index
+    assert adapters.projection_writer is projection_writer
+
+def test_runtime_does_not_create_a_router_store_for_unreadable_binding(tmp_path):
+    from app_bootstrap.composition import build_runtime_adapters
+    from platform_core.storage_bindings import StorageBinding
+
+    settings = load_app_settings(
+        config_file="",
+        environ={
+            "PROJECT_MANAGER_BUSINESS_ROOT": str(tmp_path / "business"),
+            "PROJECT_MANAGER_WORKSPACE_DIR": str(tmp_path / "runtime"),
+        },
+    )
+    unreadable = StorageBinding(
+        "source",
+        "local",
+        "node",
+        "business://source/",
+        tmp_path / "source",
+        ("source",),
+        False,
+        False,
+    )
+    settings = settings.__class__(
+        deployment_mode=settings.deployment_mode,
+        business_root=settings.business_root,
+        storage_bindings=(unreadable,),
+        runtime_workspace=settings.runtime_workspace,
+        database=settings.database,
+        providers=settings.providers,
+    )
+
+    adapters = build_runtime_adapters(settings)
+
+    assert adapters.document_store_router.stores_by_binding == {}
