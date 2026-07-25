@@ -157,6 +157,40 @@ def test_pdf_with_unreadable_physical_page_count_fails_closed(
     assert not (Path(client.workspace_root) / "artifacts").exists()
 
 
+def test_password_encrypted_pdf_fails_before_external_runner(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client = _runtime_client(tmp_path)
+    source = tmp_path / "encrypted.pdf"
+    document = fitz.open()
+    try:
+        document.new_page(width=72, height=72)
+        document.save(
+            source,
+            encryption=fitz.PDF_ENCRYPT_AES_256,
+            owner_pw="synthetic-owner",
+            user_pw="synthetic-user",
+        )
+    finally:
+        document.close()
+    runner_called = False
+
+    def must_not_run(command, **kwargs):
+        nonlocal runner_called
+        runner_called = True
+        raise AssertionError("encrypted PDF must fail before the external runner")
+
+    monkeypatch.setattr(subprocess, "run", must_not_run)
+
+    result = client.index_pdf(str(source))
+
+    assert result["status"] == "failed"
+    assert result["error_code"] == "PAGEINDEX.INPUT.INVALID_PDF"
+    assert runner_called is False
+    assert not (Path(client.workspace_root) / "artifacts").exists()
+
+
 def test_markdown_positions_use_their_own_unbounded_positive_range(
     tmp_path: Path,
     monkeypatch,

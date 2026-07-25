@@ -712,6 +712,8 @@ class PageIndexClient:
 
             document = fitz.open(path)
             try:
+                if bool(document.needs_pass):
+                    return 0
                 page_count = int(document.page_count)
             finally:
                 document.close()
@@ -720,7 +722,10 @@ class PageIndexClient:
                 import PyPDF2
 
                 with path.open("rb") as source:
-                    page_count = len(PyPDF2.PdfReader(source).pages)
+                    reader = PyPDF2.PdfReader(source)
+                    if bool(reader.is_encrypted):
+                        return 0
+                    page_count = len(reader.pages)
             except Exception:
                 return 0
         return page_count if page_count > 0 else 0
