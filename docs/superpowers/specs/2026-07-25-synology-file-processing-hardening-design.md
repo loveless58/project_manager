@@ -544,16 +544,20 @@ run artifact，不移动文件。
 ## 15. 实施顺序
 
 1. 多 StorageBinding、路径解耦、DocumentStore 路由与正式构造入口；
-2. 统一 OCR Port、Registry、选择策略与 EasyOCR 默认禁用；
-3. PaddleOCR/RapidOCR Provider 探测和独立运行时边界；
-4. MinerU DocumentParser Provider 与 ProcessingPlanner；
-5. 发票 Schema、确定性信号和统一分类；
-6. RetrievalService、StructureIndex/PageIndex 证据查询；
-7. LLM 结构化裁决与归档就绪门；
-8. LibreOffice `.doc` 转换；
-9. 复核队列和反馈表修复；
-10. 单元/集成/治理测试；
-11. 相同真实样本只读回归。
+2. 发票 Schema、确定性信号和统一分类；
+3. 受控业务上下文 Provider、RetrievalService 与按需 StructureIndex/PageIndex 查询；
+4. LLM 结构化裁决、归档意图和归档就绪门；
+5. 复核队列、反馈表和人工修正闭环；
+6. 安全 CLI 与原生可读 PDF、DOCX、XLSX、Markdown、XML 的只读回归；
+7. LibreOffice `.doc` 转换；
+8. MinerU DocumentParser Provider 与 ProcessingPlanner；
+9. 统一 OCR Port、Registry、选择策略与 EasyOCR 默认禁用；
+10. PaddleOCR/RapidOCR Provider 探测和独立运行时边界；
+11. 扫描件与全部样本的最终只读回归。
+
+完成第 6 项即形成首个可用里程碑：非扫描文件可以完成解析、业务候选检索、LLM
+结构化裁决、人工复核和安全归档计划；扫描件在此阶段必须明确返回 `blocked`，不得
+隐式调用 EasyOCR。OCR 识别质量和 Provider 安装问题留到业务闭环可用后处理。
 
 每个阶段先建立失败测试，再写最小实现，并保持现有契约兼容。外部 Provider 的真实
 模型、网络和大型依赖测试必须显式启用，不成为默认快速测试的隐式依赖。
