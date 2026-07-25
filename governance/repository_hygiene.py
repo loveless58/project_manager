@@ -104,6 +104,14 @@ _STATIC_TEXT_BINDING = re.compile(
     r"|(?P<bare>[^\s#;,()]+)(?=\s*(?:#.*)?$))",
     re.MULTILINE,
 )
+_JS_LITERAL_BINDING = re.compile(
+    r"^\s*(?:export\s+)?(?:const|let|var)\s+"
+    r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)"
+    r"(?:\s*:\s*[^=;\r\n]+)?\s*=\s*"
+    r"(?P<quote>[\"'`])(?P<value>[^\r\n]*?)(?P=quote)"
+    r"\s*;?\s*(?://.*)?$",
+    re.MULTILINE,
+)
 _CREDENTIAL_TERMINALS = {
     "token",
     "secret",
@@ -465,6 +473,7 @@ def _decoded_json_strings(text: str) -> Iterator[str]:
         if isinstance(value, str):
             yield value
         elif isinstance(value, dict):
+            pending.extend(value.keys())
             pending.extend(value.values())
         elif isinstance(value, list):
             pending.extend(value)
@@ -496,46 +505,58 @@ def _contains_business_absolute_path(text: str, synthetic_fixture: bool) -> bool
     return False
 
 
-_YAML_ENV_NAME_LINE = re.compile(
-    r"^(?P<indent>[ \t]*)-\s*name\s*:\s*(?:"
-    r"(?P<quote>[\"'])(?P<quoted>[A-Za-z_][A-Za-z0-9_.-]*)(?P=quote)"
-    r"|(?P<bare>[A-Za-z_][A-Za-z0-9_.-]*))\s*(?:#.*)?$",
-    re.IGNORECASE,
-)
-_YAML_ENV_VALUE_LINE = re.compile(
-    r"^(?P<indent>[ \t]*)value\s*:\s*(?:"
+_YAML_ENV_ITEM_FIELD = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<dash>-\s+)?"
+    r"(?P<field>name|value)\s*:\s*(?:"
     r"(?P<quote>[\"'])(?P<quoted>[^\"'\r\n]+)(?P=quote)"
     r"|(?P<bare>[^\s#;,]+))\s*(?:#.*)?$",
     re.IGNORECASE,
 )
 
 
+def _yaml_item_contains_credential(item: Optional[Dict[str, Any]]) -> bool:
+    if item is None:
+        return False
+    return any(
+        _binding_contains_credential(name, value, quoted=quoted)
+        for name in item["names"]
+        for value, quoted in item["values"]
+    )
+
+
 def _contains_yaml_env_credential(text: str) -> bool:
-    pending: Optional[tuple[int, str]] = None
+    item: Optional[Dict[str, Any]] = None
     for line in text.splitlines():
-        name_match = _YAML_ENV_NAME_LINE.match(line)
-        if name_match:
-            pending = (
-                len(name_match.group("indent")),
-                name_match.group("quoted") or name_match.group("bare") or "",
-            )
-            continue
-        if pending is None or not line.strip() or line.lstrip().startswith("#"):
-            continue
-        value_match = _YAML_ENV_VALUE_LINE.match(line)
-        current_indent = len(line) - len(line.lstrip(" \t"))
-        if value_match and current_indent > pending[0]:
-            value = value_match.group("quoted") or value_match.group("bare") or ""
-            if _binding_contains_credential(
-                pending[1],
-                value,
-                quoted=value_match.group("quoted") is not None,
-            ):
+        field_match = _YAML_ENV_ITEM_FIELD.match(line)
+        if field_match and field_match.group("dash"):
+            if _yaml_item_contains_credential(item):
                 return True
-            pending = None
+            item = {
+                "column": field_match.start("field"),
+                "names": [],
+                "values": [],
+            }
+        elif field_match and item is not None:
+            if field_match.start("field") != item["column"]:
+                continue
+        elif not line.strip() or line.lstrip().startswith("#"):
             continue
-        pending = None
-    return False
+        else:
+            current_column = len(line) - len(line.lstrip(" \t"))
+            if item is not None and current_column <= item["column"]:
+                if _yaml_item_contains_credential(item):
+                    return True
+                item = None
+            continue
+
+        scalar = field_match.group("quoted") or field_match.group("bare") or ""
+        if field_match.group("field").casefold() == "name":
+            item["names"].append(scalar)
+        else:
+            item["values"].append(
+                (scalar, field_match.group("quoted") is not None)
+            )
+    return _yaml_item_contains_credential(item)
 
 
 _PLACEHOLDER_SECRETS = {
@@ -703,6 +724,12 @@ def _contains_hardcoded_credential(text: str) -> bool:
 
     if _contains_yaml_env_credential(text):
         return True
+
+    for match in _JS_LITERAL_BINDING.finditer(text):
+        if _binding_contains_credential(
+            match.group("name"), match.group("value"), quoted=True
+        ):
+            return True
 
     for match in _STATIC_TEXT_BINDING.finditer(text):
         value = match.group("quoted") or match.group("bare") or ""

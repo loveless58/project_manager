@@ -413,3 +413,46 @@ def test_main_scanner_allows_decoded_json_relative_paths(tmp_path):
     report = _scan_bytes(tmp_path, "config/provider.json", encoded_json.encode())
 
     assert report.errors == 0, report.findings
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "content"),
+    [
+        (
+            "config/provider.js",
+            'export const servicePassword = "production-value-0123456789";',
+        ),
+        (
+            "config/provider.js",
+            'const servicePassword: string = "production-value-0123456789";',
+        ),
+        (
+            "deploy/provider.yaml",
+            "env:\n  - value: production-value-0123456789\n    name: SERVICE_PASSWORD\n",
+        ),
+    ],
+)
+def test_main_scanner_rejects_export_typed_js_and_unordered_kubernetes_env(
+    tmp_path, relative_path, content
+):
+    report = _scan_bytes(tmp_path, relative_path, content.encode())
+
+    assert "REPO-HARDCODED-CREDENTIAL" in _finding_ids(report), content
+
+
+def test_main_scanner_rejects_decoded_json_unc_object_key(tmp_path):
+    escape = "\\" + "u005c"
+    encoded_json = (
+        '{"'
+        + escape
+        + escape
+        + "nas01"
+        + escape
+        + "share"
+        + escape
+        + 'customer":1}'
+    )
+
+    report = _scan_bytes(tmp_path, "config/provider.json", encoded_json.encode())
+
+    assert "REPO-BUSINESS-ABSOLUTE-PATH" in _finding_ids(report)

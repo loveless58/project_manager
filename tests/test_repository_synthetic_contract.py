@@ -146,6 +146,14 @@ _TEXT_STATIC_ASSIGNMENT = re.compile(
     r"|(?P<bare>[^\s#;,()]+)(?=\s*(?:#.*)?$))",
     re.MULTILINE,
 )
+_INDEPENDENT_JS_LITERAL_BINDING = re.compile(
+    r"^\s*(?:export\s+)?(?:const|let|var)\s+"
+    r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)"
+    r"(?:\s*:\s*[^=;\r\n]+)?\s*=\s*"
+    r"(?P<quote>[\"'`])(?P<value>[^\r\n]*?)(?P=quote)"
+    r"\s*;?\s*(?://.*)?$",
+    re.MULTILINE,
+)
 _UNC_PATH = re.compile(
     r"(?<![A-Za-z0-9:/\\])(?:"
     r"\\\\\?\\UNC\\[^\\/\s\"'`?]+\\[^\\/\s\"'`]+"
@@ -241,6 +249,7 @@ def _independent_json_strings(text: str):
         if isinstance(value, str):
             yield value
         elif isinstance(value, dict):
+            pending.extend(value.keys())
             pending.extend(value.values())
         elif isinstance(value, list):
             pending.extend(value)
@@ -493,45 +502,61 @@ def _binding_is_credential(name: str, value: str) -> bool:
     )
 
 
-_INDEPENDENT_YAML_ENV_NAME = re.compile(
-    r"^(?P<indent>[ \t]*)-\s*name\s*:\s*(?:"
-    r"(?P<quote>[\"'])(?P<quoted>[A-Za-z_][A-Za-z0-9_.-]*)(?P=quote)"
-    r"|(?P<bare>[A-Za-z_][A-Za-z0-9_.-]*))\s*(?:#.*)?$",
-    re.IGNORECASE,
-)
-_INDEPENDENT_YAML_ENV_VALUE = re.compile(
-    r"^(?P<indent>[ \t]*)value\s*:\s*(?:"
+_INDEPENDENT_YAML_ENV_FIELD = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<dash>-\s+)?"
+    r"(?P<field>name|value)\s*:\s*(?:"
     r"(?P<quote>[\"'])(?P<quoted>[^\"'\r\n]+)(?P=quote)"
     r"|(?P<bare>[^\s#;,]+))\s*(?:#.*)?$",
     re.IGNORECASE,
 )
 
 
+def _independent_yaml_item_violations(
+    relative_path: str,
+    item: dict[str, object] | None,
+) -> list[str]:
+    if item is None:
+        return []
+    return [
+        f"{relative_path}:{line_number}:credential_binding:{name}"
+        for name in item["names"]
+        for value, line_number in item["values"]
+        if _binding_is_credential(name, value)
+    ]
+
+
 def _independent_yaml_env_credentials(relative_path: str, text: str) -> list[str]:
     violations: list[str] = []
-    pending: tuple[int, str, int] | None = None
+    item: dict[str, object] | None = None
     for line_number, line in enumerate(text.splitlines(), 1):
-        name_match = _INDEPENDENT_YAML_ENV_NAME.match(line)
-        if name_match:
-            pending = (
-                len(name_match.group("indent")),
-                name_match.group("quoted") or name_match.group("bare") or "",
-                line_number,
-            )
+        field_match = _INDEPENDENT_YAML_ENV_FIELD.match(line)
+        if field_match and field_match.group("dash"):
+            violations.extend(_independent_yaml_item_violations(relative_path, item))
+            item = {
+                "column": field_match.start("field"),
+                "names": [],
+                "values": [],
+            }
+        elif field_match and item is not None:
+            if field_match.start("field") != item["column"]:
+                continue
+        elif not line.strip() or line.lstrip().startswith("#"):
             continue
-        if pending is None or not line.strip() or line.lstrip().startswith("#"):
-            continue
-        value_match = _INDEPENDENT_YAML_ENV_VALUE.match(line)
-        current_indent = len(line) - len(line.lstrip(" \t"))
-        if value_match and current_indent > pending[0]:
-            value = value_match.group("quoted") or value_match.group("bare") or ""
-            if _binding_is_credential(pending[1], value):
-                violations.append(
-                    f"{relative_path}:{line_number}:credential_binding:{pending[1]}"
+        else:
+            current_column = len(line) - len(line.lstrip(" \t"))
+            if item is not None and current_column <= item["column"]:
+                violations.extend(
+                    _independent_yaml_item_violations(relative_path, item)
                 )
-            pending = None
+                item = None
             continue
-        pending = None
+
+        scalar = field_match.group("quoted") or field_match.group("bare") or ""
+        if field_match.group("field").casefold() == "name":
+            item["names"].append(scalar)
+        else:
+            item["values"].append((scalar, line_number))
+    violations.extend(_independent_yaml_item_violations(relative_path, item))
     return violations
 
 
@@ -546,6 +571,13 @@ def _independent_credential_violations(
                 f"{relative_path}:{line_number}:credential_signature"
             )
     violations.extend(_independent_yaml_env_credentials(relative_path, text))
+
+    for match in _INDEPENDENT_JS_LITERAL_BINDING.finditer(text):
+        if _binding_is_credential(match.group("name"), match.group("value")):
+            line_number = text.count("\n", 0, match.start()) + 1
+            violations.append(
+                f"{relative_path}:{line_number}:credential_binding:{match.group('name')}"
+            )
 
     suffix = Path(relative_path).suffix.casefold()
     if suffix == ".json":
@@ -1012,6 +1044,45 @@ def test_independent_contract_allows_decoded_json_relative_paths():
     encoded_json = r'{"deep":[{"path":"relative\/folder\/contract.pdf"}]}'
 
     assert _independent_unc_violations("config/provider.json", encoded_json) == []
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "content"),
+    [
+        (
+            "config/provider.js",
+            'export const servicePassword = "production-value-0123456789";',
+        ),
+        (
+            "config/provider.js",
+            'const servicePassword: string = "production-value-0123456789";',
+        ),
+        (
+            "deploy/provider.yaml",
+            "env:\n  - value: production-value-0123456789\n    name: SERVICE_PASSWORD\n",
+        ),
+    ],
+)
+def test_independent_rejects_export_typed_js_and_unordered_kubernetes_env(
+    relative_path, content
+):
+    assert _independent_credential_violations(relative_path, content), content
+
+
+def test_independent_rejects_decoded_json_unc_object_key():
+    escape = "\\" + "u005c"
+    encoded_json = (
+        '{"'
+        + escape
+        + escape
+        + "nas01"
+        + escape
+        + "share"
+        + escape
+        + 'customer":1}'
+    )
+
+    assert _independent_unc_violations("config/provider.json", encoded_json)
 
 
 def test_all_tracked_files_match_independent_default_deny_contract():
