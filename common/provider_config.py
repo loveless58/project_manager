@@ -6,10 +6,14 @@ from typing import Mapping, Optional
 
 
 LLM_BASE_URL_ENV = "PROJECT_MANAGER_LLM_BASE_URL"
+LLM_API_KEY_ENV = "LLM_API_KEY"
+LLM_MODEL_ENV = "LLM_MODEL"
 LEGACY_LLM_BASE_URL_ENVS = ("LLM_BASE_URL", "OPENAI_API_BASE")
 MISSING_LLM_BASE_URL_MESSAGE = (
     "PROJECT_MANAGER_LLM_BASE_URL is required when LLM is enabled"
 )
+MISSING_LLM_API_KEY_MESSAGE = "LLM_API_KEY is required when LLM is enabled"
+DEFAULT_LLM_MODEL = "minimax-m3-mxfp8"
 
 
 class ProviderConfigurationError(RuntimeError):
@@ -40,3 +44,30 @@ def resolve_llm_base_url(
     if required:
         raise ProviderConfigurationError(MISSING_LLM_BASE_URL_MESSAGE)
     return None
+
+
+def resolve_llm_api_key(
+    explicit: Optional[str] = None,
+    *,
+    environ: Optional[Mapping[str, str]] = None,
+    required: bool = False,
+) -> Optional[str]:
+    """Resolve the shared LLM credential without logging or transforming it."""
+    environment = os.environ if environ is None else environ
+    value = explicit if explicit is not None else environment.get(LLM_API_KEY_ENV)
+    if value is not None and value.strip():
+        return value.strip()
+    if required:
+        raise ProviderConfigurationError(MISSING_LLM_API_KEY_MESSAGE)
+    return None
+
+
+def resolve_llm_model(
+    explicit: Optional[str] = None,
+    *,
+    environ: Optional[Mapping[str, str]] = None,
+) -> str:
+    """Resolve the shared model name with the existing document-parse default."""
+    environment = os.environ if environ is None else environ
+    value = explicit if explicit is not None else environment.get(LLM_MODEL_ENV)
+    return value.strip() if value is not None and value.strip() else DEFAULT_LLM_MODEL
