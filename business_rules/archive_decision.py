@@ -3,6 +3,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List
 
+from .semantic_document import normalize_document_classification
+
 
 INTERNAL_PROJECT_NAME = "project_manager"
 
@@ -17,8 +19,13 @@ def evaluate_archive_decision(
     filename = extracted.get("filename") or os.path.basename(source_file)
     text = extracted.get("extracted_text", "") or ""
     fields = extracted.get("fields") or {}
+    classification = normalize_document_classification(
+        extracted.get("classification"),
+        fallback_document_type=extracted.get("document_type") or "未分类",
+    )
 
-    if _is_project_manager_internal_document(filename, text):
+
+    if classification["business_domain"] == "internal_project":
         # TODO: PM 内部文档归档 phase 待重新设计 (2026-07-15)
         # 原"项目归档"作为业务状态删除后，这里临时返回未决标记，
         # 避免 PM 内部文档被错误归档到业务项目目录。
@@ -26,9 +33,10 @@ def evaluate_archive_decision(
             "schema_version": "archive_decision.v1",
             "subject_type": "internal_project",
             "subject_name": INTERNAL_PROJECT_NAME,
-            "archive_phase": None,
-            "document_type": "项目治理文档",
-            "confidence": 0.0,
+            "archive_phase": classification["archive_phase"],
+            "document_type": classification["document_type"],
+            "confidence": classification["confidence"],
+            "classification": classification,
             "target_dir": None,
             "target_path": None,
             "blockers": ["pm_internal_archive_pending_redesign"],
@@ -42,7 +50,7 @@ def evaluate_archive_decision(
         if parent_name and parent_name not in {"项目投标", "项目弃标", "项目丢标", "项目执行"}:
             project_name = parent_name
 
-    archive_phase = _archive_phase_for_bid_project(source_file, fields, business_judgement)
+    archive_phase = classification["archive_phase"] or _archive_phase_for_bid_project(source_file, fields, business_judgement)
     blockers: List[str] = []
     if project_name in {"", "未命名项目", "鏈懡鍚嶉」鐩?"}:
         blockers.append("unknown_project")
@@ -54,18 +62,20 @@ def evaluate_archive_decision(
         blockers.append("human_review_recommended")
 
     subject_name = project_name or "未命名项目"
-    return _decision(
+    decision = _decision(
         source_file=source_file,
         subject_type="bid_project" if project_name else "unknown",
         subject_name=subject_name,
         archive_phase=archive_phase,
-        document_type=extracted.get("document_type") or "未分类",
+        document_type=classification["document_type"],
         confidence=0.72 if archive_phase == "项目丢标" and project_name else (0.45 if project_name else 0.0),
         project_files_dir=project_files_dir,
         blockers=blockers,
         human_review_required=bool(blockers),
         reasons=["closed_lost_project_policy"] if archive_phase == "项目丢标" else ["fallback_bid_project_policy"],
     )
+    decision["classification"] = classification
+    return decision
 
 
 def _decision(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Tuple
 
 from .field_quality import filter_business_facts
@@ -103,3 +104,33 @@ def apply_semantic_guardrail(
         "field_quality": field_quality,
     }
     return accepted, guardrail
+
+@dataclass(frozen=True)
+class DocumentClassification:
+    """The single deterministic classification payload shared by consumers."""
+
+    document_type: str
+    business_domain: str
+    project_phase: str | None
+    archive_phase: str | None
+    confidence: float
+    evidence: List[str]
+    requires_review: bool
+
+    def payload(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+def normalize_document_classification(value: Any, fallback_document_type: str = "未分类") -> Dict[str, Any]:
+    """Return the stable classification payload without re-inspecting source text."""
+    payload = value if isinstance(value, dict) else {}
+    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), list) else []
+    return {
+        "document_type": payload.get("document_type") or fallback_document_type,
+        "business_domain": payload.get("business_domain") or "unknown",
+        "project_phase": payload.get("project_phase"),
+        "archive_phase": payload.get("archive_phase"),
+        "confidence": payload.get("confidence", 0.0),
+        "evidence": evidence,
+        "requires_review": bool(payload.get("requires_review", False)),
+    }

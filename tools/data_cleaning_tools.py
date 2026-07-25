@@ -32,7 +32,8 @@ from agents import AdversarialAgent, AuditAgent
 from business_rules.archive_decision import evaluate_archive_decision
 from business_rules.bid_project_rules import BidProjectRuleEngine
 from business_rules.field_quality import filter_business_facts
-from business_rules.semantic_document import apply_semantic_guardrail, normalize_semantic_response
+from business_rules.invoice_fields import extract_invoice_fields
+from business_rules.semantic_document import DocumentClassification, apply_semantic_guardrail, normalize_semantic_response
 from contracts.feedback_schema import (
     FeedbackValidationError,
     build_parser_test_candidates,
@@ -245,11 +246,17 @@ class DataCleaningTools:
         )
         text = result.get("extracted_text", "")
         if result.get("status") == "success":
-            document_type = result.get("document_type") or self._classify_text_document(file_path, text)
-            fields = self._extract_fields(text)
-            self._apply_ocr_field_aliases(fields, result.get("fields", {}), document_type)
+            classification = self._classify_document(file_path, text)
+            provider_document_type = result.get("document_type")
+            if provider_document_type:
+                classification["document_type"] = provider_document_type
+            document_type = classification["document_type"]
+            fields = self._extract_fields_for_document(text, document_type)
+            if document_type != "发票":
+                self._apply_ocr_field_aliases(fields, result.get("fields", {}), document_type)
             result["fields"] = fields
             result["document_type"] = document_type
+            result["classification"] = classification
         return result
 
     def run_ocr(self, file_path: str) -> Dict[str, Any]:
@@ -282,14 +289,16 @@ class DataCleaningTools:
             try:
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                     text = f.read()
-                fields = self._extract_fields(text)
-                document_type = self._classify_text_document(file_path, text)
+                classification = self._classify_document(file_path, text)
+                document_type = classification["document_type"]
+                fields = self._extract_fields_for_document(text, document_type)
                 return {
                     "schema_version": "document.extract.v1",
                     "file": file_path,
                     "filename": os.path.basename(file_path),
                     "file_type": ext,
                     "document_type": document_type,
+                    "classification": classification,
                     "text_length": len(text),
                     "extracted_text": text[:4000] + ("..." if len(text) > 4000 else ""),
                     "fields": fields,
@@ -325,9 +334,11 @@ class DataCleaningTools:
 
             table_text_lines = [" | ".join(row) for row in table_rows]
             text = "\n".join(paragraphs + table_text_lines)
-            fields = self._extract_fields(text)
-            fields.update(self._extract_docx_business_fields(paragraphs, table_rows, file_path))
-            document_type = self._classify_text_document(file_path, text)
+            classification = self._classify_document(file_path, text)
+            document_type = classification["document_type"]
+            fields = self._extract_fields_for_document(text, document_type)
+            if document_type != "发票":
+                fields.update(self._extract_docx_business_fields(paragraphs, table_rows, file_path))
 
             return {
                 "schema_version": "document.extract.v1",
@@ -335,6 +346,7 @@ class DataCleaningTools:
                 "filename": os.path.basename(file_path),
                 "file_type": ext,
                 "document_type": document_type,
+                "classification": classification,
                 "paragraph_count": len(paragraphs),
                 "table_count": len(doc.tables),
                 "table_row_count": len(table_rows),
@@ -370,8 +382,9 @@ class DataCleaningTools:
             }
 
         text = ocr.get("text", "") or ""
-        fields = self._extract_fields(text)
-        document_type = self._classify_text_document(file_path, text)
+        classification = self._classify_document(file_path, text)
+        document_type = classification["document_type"]
+        fields = self._extract_fields_for_document(text, document_type)
         needs_human_review = bool(ocr.get("quality", {}).get("needs_human_review"))
         return {
             "schema_version": "document.extract.v1",
@@ -380,6 +393,7 @@ class DataCleaningTools:
             "filename": os.path.basename(file_path),
             "file_type": file_type,
             "document_type": document_type,
+            "classification": classification,
             "extract_method": "ocr",
             "text_length": len(text),
             "extracted_text": text[:4000] + ("..." if len(text) > 4000 else ""),
@@ -430,14 +444,17 @@ class DataCleaningTools:
             workbook.close()
 
             text = "\n".join(lines)
-            fields = self._extract_fields(text)
+            classification = self._classify_document(file_path, text)
+            document_type = classification["document_type"]
+            fields = self._extract_fields_for_document(text, document_type)
             return {
                 "schema_version": "document.extract.v1",
                 "status": "success",
                 "file": file_path,
                 "filename": os.path.basename(file_path),
                 "file_type": ".xlsx",
-                "document_type": self._classify_text_document(file_path, text),
+                "document_type": document_type,
+                "classification": classification,
                 "extract_method": "xlsx_table",
                 "sheet_count": len(workbook.worksheets),
                 "table_row_count": row_count,
@@ -463,14 +480,17 @@ class DataCleaningTools:
                 if len(pairs) >= 200:
                     break
             extracted_text = "\n".join(pairs)
-            fields = self._extract_fields(extracted_text)
+            classification = self._classify_document(file_path, extracted_text)
+            document_type = classification["document_type"]
+            fields = self._extract_fields_for_document(extracted_text, document_type)
             return {
                 "schema_version": "document.extract.v1",
                 "status": "success",
                 "file": file_path,
                 "filename": os.path.basename(file_path),
                 "file_type": ".xml",
-                "document_type": self._classify_text_document(file_path, extracted_text),
+                "document_type": document_type,
+                "classification": classification,
                 "extract_method": "xml_text",
                 "text_length": len(extracted_text),
                 "extracted_text": extracted_text[:4000] + ("..." if len(extracted_text) > 4000 else ""),
@@ -650,6 +670,13 @@ class DataCleaningTools:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             return f.read()
     
+
+    def _extract_fields_for_document(self, text: str, document_type: str) -> Dict[str, Any]:
+        """Select a document-specific extractor before applying generic rules."""
+        if document_type == "发票":
+            return extract_invoice_fields(text)
+        return self._extract_fields(text)
+
     def _extract_fields(self, text: str) -> Dict:
         """从文本中提取常见字段"""
         fields = {}
@@ -878,6 +905,19 @@ class DataCleaningTools:
 
         return fields
 
+
+    def _classify_document(self, file_path: str, text: str) -> Dict[str, Any]:
+        """Build one classification payload for extraction and archive planning."""
+        filename = os.path.basename(file_path)
+        haystack = f"{filename}\n{text[:5000]}".lower()
+        if "project_manager" in haystack or filename.lower().startswith("prd-project-manager"):
+            return DocumentClassification("项目治理文档", "internal_project", None, None, 0.98, [f"filename:{filename}", "text:project_manager"], True).payload()
+
+        document_type = self._classify_text_document(file_path, text)
+        phase = self._business_phase_from_path(file_path)
+        domain = "finance" if document_type == "发票" else ("bid_project" if phase else "unknown")
+        requires_review = domain == "unknown" or (document_type == "发票" and not phase)
+        return DocumentClassification(document_type, domain, phase or None, phase or None, 0.9 if document_type != "未分类" else 0.3, [f"filename:{filename}"], requires_review).payload()
     def _classify_text_document(self, file_path: str, text: str) -> str:
         filename = os.path.basename(file_path)
         haystack = f"{filename}\n{text[:5000]}"
