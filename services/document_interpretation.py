@@ -1,6 +1,8 @@
 """Controlled, fail-closed document interpretation boundary."""
 from __future__ import annotations
 from typing import Any
+import re
+import math
 from contracts.document_interpretation import DocumentInterpretationSchemaError, parse_candidate_document_interpretation
 from platform_core.models import BusinessContextEvidence, BusinessContextQuery
 
@@ -11,13 +13,14 @@ _REQUEST_FAILED="DOCUMENT_INTERPRETATION.REQUEST_FAILED"
 _ALLOWED_ERROR_CODES={_REQUEST_FAILED,"DOCUMENT_INTERPRETATION.LLM.REQUEST_FAILED","DOCUMENT_INTERPRETATION.LLM.RESPONSE_INVALID"}
 _FIELDS={"invoice_number","invoice_date","amount","tax_amount","total_amount","buyer_name","buyer_tax_id","seller_name","seller_tax_id","project_code","project_name","contract_code","contract_name"}
 _FACTS={"contract_code","project_code","amount","date"}
-_EVIDENCE={"contract_code","project_code","buyer_tax_id","seller_tax_id","buyer_name","seller_name","invoice_number"}
+_EVIDENCE={"buyer.tax_id","seller.tax_id","buyer.name","seller.name","contract_code","project_code","amount","date"}
+_ARTIFACT=re.compile(r"^artifact:[a-z][a-z0-9_-]{0,31}:[A-Za-z0-9_.:-]{1,128}$")
 _DIAGNOSTICS={"BUSINESS_CONTEXT.CANDIDATES_FOUND","BUSINESS_CONTEXT.NO_CANDIDATES","BUSINESS_CONTEXT.CONFLICTS_FOUND"}
 
 class DocumentInterpretationService:
  def __init__(self,retrieval_service:Any,interpreter:Any)->None: self.retrieval_service,self.interpreter=retrieval_service,interpreter
  def interpret(self,evidence_pack:Any)->dict[str,Any]:
-  ref=_text(evidence_pack.get("parse_artifact_ref")) if type(evidence_pack) is dict else ""
+  ref=_artifact(evidence_pack.get("parse_artifact_ref")) if type(evidence_pack) is dict else ""
   try:
    doc=_document(evidence_pack)
    context=self.retrieval_service.find_business_candidates(BusinessContextQuery(doc["document_type_hint"],doc["candidate_fields"],doc["text_segments"]))
@@ -33,11 +36,12 @@ class DocumentInterpretationService:
   if out["status"]=="success" and out["relations"]: out["status"]="needs_review"
   return out
 
-def _text(v:object)->str: return v if type(v) is str and 0<len(v)<=512 and v==v.strip() else ""
+def _text(v:object)->str: return v if type(v) is str and 0<len(v)<=512 and v==v.strip() and not re.search(r"(^[A-Za-z]:[\\/]|^/|^\\\\|authorization|bearer|token|api[_-]?key)", v, re.I) else ""
+def _artifact(v:object)->str: return v if type(v) is str and bool(_ARTIFACT.fullmatch(v)) else ""
 def _document(raw:object)->dict[str,Any]:
  if type(raw) is not dict: raise DocumentInterpretationSchemaError("input")
  hint=_text(raw.get("document_type_hint")); fields=raw.get("candidate_fields"); segs=raw.get("text_segments")
- if not _text(raw.get("parse_artifact_ref")) or not hint or type(fields) is not dict or type(segs) is not list or len(segs)>64: raise DocumentInterpretationSchemaError("input")
+ if not _artifact(raw.get("parse_artifact_ref")) or not hint or type(fields) is not dict or type(segs) is not list or len(segs)>64: raise DocumentInterpretationSchemaError("input")
  clean={}
  for key,value in fields.items():
   if key not in _FIELDS: continue
@@ -82,9 +86,11 @@ def _candidate(x:dict[str,Any])->dict[str,Any]:
   if q:out["facts"]=q
  return out
 def _evidence(x:dict[str,Any])->dict[str,str]:
- return {k:x[k] for k in ("kind","candidate_id","field") if _text(x.get(k)) and (k!="field" or x[k] in _EVIDENCE)}
+ field=x.get("field"); candidate=x.get("candidate_id")
+ if field in _EVIDENCE and _text(candidate): return {"kind":"business_context","candidate_id":candidate,"field":field}
+ return {}
 def _identity(r:dict[str,Any],i:Any)->None:
- if r["schema_version"]!=SCHEMA_VERSION or r["prompt_version"]!=PROMPT_VERSION or r["policy_version"]!=POLICY_VERSION or r["interpreter"]!=getattr(i,"name",None) or r["model"]!=getattr(i,"model",None): raise DocumentInterpretationSchemaError("identity")
+ if (getattr(i,"schema_version",None),getattr(i,"prompt_version",None),getattr(i,"policy_version",None)) != (SCHEMA_VERSION,PROMPT_VERSION,POLICY_VERSION) or (r["schema_version"],r["prompt_version"],r["policy_version"]) != (getattr(i,"schema_version",None),getattr(i,"prompt_version",None),getattr(i,"policy_version",None)) or r["interpreter"]!=getattr(i,"name",None) or r["model"]!=getattr(i,"model",None): raise DocumentInterpretationSchemaError("identity")
 def _trace(r:dict[str,Any],ctx:dict[str,Any])->None:
  allowed={(x.get("kind"),x.get("candidate_id"),x.get("field")) for x in ctx["evidence"] if type(x) is dict}
  ids={x.get("id") for x in ctx["candidates"] if type(x) is dict}

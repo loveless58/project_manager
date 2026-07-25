@@ -21,6 +21,9 @@ class StaticRetrieval:
 class MalformedInterpreter:
     name = "malformed"
     model = "synthetic-model"
+    schema_version = "candidate_document_interpretation.v1"
+    prompt_version = "document_interpretation.v1"
+    policy_version = "document_interpretation_policy.v1"
 
     def complete_json(self, request):
         return {"unexpected": "shape"}
@@ -29,6 +32,9 @@ class MalformedInterpreter:
 class CapturingInterpreter:
     name = "fake"
     model = "fake-model"
+    schema_version = "candidate_document_interpretation.v1"
+    prompt_version = "document_interpretation.v1"
+    policy_version = "document_interpretation_policy.v1"
 
     def __init__(self, response: object) -> None:
         self.response = response

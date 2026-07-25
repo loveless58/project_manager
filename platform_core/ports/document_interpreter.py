@@ -10,6 +10,9 @@ class DocumentInterpreter(Protocol):
 
     name: str
     model: str
+    schema_version: str
+    prompt_version: str
+    policy_version: str
 
     def complete_json(self, request: Mapping[str, Any]) -> object:
         raise NotImplementedError
