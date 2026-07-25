@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import ast
 import codecs
+from collections import Counter
 from dataclasses import dataclass
+import hashlib
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -39,6 +42,20 @@ _POSIX_BUSINESS_ABSOLUTE_PATH = re.compile(
     r"/(?:Volumes|mnt|media|srv|volume[0-9]+)/(?:[^/\s\"'`]+/){1,}[^/\s\"'`]+",
     re.IGNORECASE,
 )
+_UNC_BACKSLASH_PATH = re.compile(
+    r"(?<![A-Za-z0-9\\])"
+    r"(?:\\\\\?\\UNC\\|\\\\)"  # repo-hygiene: allow=synthetic-path
+    r"[^\\/\s\"'`?]+\\[^\\/\s\"'`]+"
+    r"(?:\\[^\\/\s\"'`]*)?",
+    re.IGNORECASE,
+)
+_UNC_FORWARD_PATH = re.compile(
+    r"(?<![A-Za-z0-9:/])"
+    r"//(?![/?])"  # repo-hygiene: allow=synthetic-path
+    r"[^/\s\"'`]+/[^/\s\"'`]+"
+    r"(?:/[^/\s\"'`]*)?",
+    re.IGNORECASE,
+)
 _CREDENTIAL_DSN = re.compile(
     r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqps?)://"
     r"[^:/\s]+:(?P<secret>[^@/\s]+)@",
@@ -60,6 +77,42 @@ _DIRECT_API_CREDENTIAL = re.compile(
     r"\b(?P<secret>(?:sk|pk)-(?:live|prod)-[A-Za-z0-9_-]{16,})\b",
     re.IGNORECASE,
 )
+_AWS_ACCESS_KEY = re.compile(r"(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])")
+_GITHUB_CREDENTIAL = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})\b"
+)
+_OPENAI_CREDENTIAL = re.compile(
+    r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b"
+)
+_PRIVATE_KEY_HEADER = re.compile(
+    r"-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----",
+    re.IGNORECASE,
+)
+_STATIC_TEXT_BINDING = re.compile(
+    r"^\s*(?:(?:export|set)\s+|-\s*)?"
+    r"(?:[\"'])?(?P<name>[A-Za-z][A-Za-z0-9_.-]*)(?:[\"'])?"
+    r"\s*[:=]\s*(?:"
+    r"(?P<quote>[\"'])(?P<quoted>[^\"'\r\n]+)(?P=quote)"
+    r"|(?P<bare>[^\s#;,()]+)(?=\s*(?:#.*)?$))",
+    re.MULTILINE,
+)
+_CREDENTIAL_TERMINALS = {
+    "token",
+    "secret",
+    "key",
+    "credential",
+    "credentials",
+    "cookie",
+    "session",
+}
+_BENIGN_KEY_PREFIXES = {
+    "cache", "content", "dictionary", "foreign", "index", "lookup",
+    "object", "primary", "public", "schema", "sort",
+}
+_HIGH_ENTROPY_SECURITY_WORDS = {
+    "auth", "authentication", "authorization", "bearer", "encryption",
+    "oauth", "signing", "webhook",
+}
 _REAL_SAMPLE_HINT = re.compile(
     r"(?:真实样本|real[_ -]?samples?|customer[_ -]?samples?|production[_ -]?samples?)",
     re.IGNORECASE,
@@ -90,7 +143,7 @@ _STRUCTURED_BUSINESS_VALUE = re.compile(
     r"(?P<label>客户(?:名称)?|项目(?:名称|编号|记录)|销售负责人|联系人|"
     r"发票(?:号码|号)|票号|来源文件|文件名)\s*[：:]\s*"
     r"(?P<label_value>\{[^{}\r\n]+\}|"
-    r"(?:(?!\\n)[^\r\n|,，;；\"']){2,})"
+    r"(?:(?!\\n)[^\r\n|,，;；\"']){2,})"  # repo-hygiene: allow=synthetic-path
     r")",
     re.IGNORECASE,
 )
@@ -102,7 +155,7 @@ _UNQUOTED_STRUCTURED_BUSINESS_VALUE = re.compile(
     re.IGNORECASE,
 )
 _ORGANIZATION_BUSINESS_VALUE = re.compile(
-    r"(?<!\\)[\u4e00-\u9fffA-Za-z0-9（）()·]{2,40}"
+    r"(?<!\\)[\u4e00-\u9fffA-Za-z0-9（）()·]{2,40}"  # repo-hygiene: allow=synthetic-path
     r"(?:股份有限" + r"公司|有限责任" + r"公司|有限" + r"公司|公司|"
     r"集团|银行|研究院|大学)"
 )
@@ -156,8 +209,27 @@ _BUSINESS_CONTENT_PLACEHOLDERS = {
     "空",
 }
 _SYNTHETIC_PATH_EXEMPTION = "repo-hygiene: allow=synthetic-path"
+_SYNTHETIC_PATH_EXEMPTION_LINE = re.compile(
+    r"(?:#|//|<!--)\s*repo-hygiene:\s*allow=synthetic-path"
+    r"(?:\s*-->)?\s*$",
+    re.IGNORECASE,
+)
 _SYNTHETIC_DATA_DECLARATION = "repo-hygiene: data=synthetic"
 _BUSINESS_KB_PATH = re.compile(r"^business_rules/(?:[^/]+/)*kb\.md$")
+_SENSITIVE_TRACKED_SUFFIXES = {
+    ".7z", ".cer", ".crt", ".db", ".der", ".doc", ".docx", ".gif",
+    ".gz", ".jks", ".jpeg", ".jpg", ".key", ".keystore", ".p12",
+    ".pfx", ".pem", ".pdf", ".png", ".ppt", ".pptx", ".rar", ".sqlite",
+    ".sqlite3", ".tar", ".tif", ".tiff", ".xls", ".xlsx", ".zip",
+}
+_SWIFT_BRIDGE_PATH = "integrations/macos_vision_bridge/swift_ocr_bridge"
+_SWIFT_BRIDGE_SHA256 = (
+    "384c1fabeaccec7133f1563a9681c2e5dbd1fceee1b22edc9f4138e78bb114f7"
+)
+# Mach-O 64-bit little-endian, CPU_TYPE_ARM64, subtype 0, MH_EXECUTE.
+_SWIFT_BRIDGE_HEADER = bytes.fromhex(
+    "cffaedfe" "0c000001" "00000000" "02000000"
+)
 _MANAGED_TEXT_SUFFIXES = {
     ".bat",
     ".cfg",
@@ -350,11 +422,33 @@ def _is_declared_synthetic_fixture(relative_path: str, text: str) -> bool:
     )
 
 
+def _unc_scan_views(line: str) -> Iterator[str]:
+    """Yield source text plus bounded unescape layers for Python/JSON literals."""
+    yield line
+    candidate = line
+    for _ in range(3):
+        unescaped = candidate.replace("\\\\", "\\")
+        if unescaped == candidate:
+            return
+        yield unescaped
+        candidate = unescaped
+
+
 def _contains_business_absolute_path(text: str, synthetic_fixture: bool) -> bool:
-    if synthetic_fixture:
-        return False
     for line in text.splitlines():
-        if _SYNTHETIC_PATH_EXEMPTION in line:
+        strictly_exempt = bool(_SYNTHETIC_PATH_EXEMPTION_LINE.search(line))
+        if strictly_exempt:
+            continue
+        for view in _unc_scan_views(line):
+            for pattern in (_UNC_BACKSLASH_PATH, _UNC_FORWARD_PATH):
+                for match in pattern.finditer(view):
+                    value = match.group(0)
+                    if _POSIX_PERSONAL_PATH.search(value) or _WINDOWS_PERSONAL_PATH.search(
+                        value
+                    ):
+                        continue
+                    return True
+        if synthetic_fixture:
             continue
         for pattern in (
             _WINDOWS_BUSINESS_ABSOLUTE_PATH,
@@ -403,11 +497,143 @@ def _is_placeholder_secret(value: str, *, quoted: bool = False) -> bool:
         r"os\.environ\[\s*[\"'][A-Za-z_][A-Za-z0-9_]*[\"']\s*\]",
         r"os\.getenv\(\s*[\"'][A-Za-z_][A-Za-z0-9_]*[\"']\s*\)",
         r"settings\.[A-Za-z_][A-Za-z0-9_]*",
+        r"[A-Za-z_][A-Za-z0-9_.]*\[[^\]\r\n]+\]",
     )
     return any(re.fullmatch(pattern, raw) for pattern in python_references)
 
 
+def _credential_name_words(name: str) -> list[str]:
+    expanded = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    expanded = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", expanded)
+    return [
+        word.casefold()
+        for word in re.split(r"[^A-Za-z0-9]+", expanded)
+        if word
+    ]
+
+
+def _is_credential_binding_name(name: str) -> bool:
+    words = _credential_name_words(name)
+    if not words or words[-1] not in _CREDENTIAL_TERMINALS:
+        return False
+    if words[-1] == "key" and any(word in _BENIGN_KEY_PREFIXES for word in words[:-1]):
+        return False
+    return True
+
+
+def _has_high_entropy_security_context(name: str) -> bool:
+    return bool(_HIGH_ENTROPY_SECURITY_WORDS.intersection(_credential_name_words(name)))
+
+
+def _looks_high_entropy_secret(value: str) -> bool:
+    raw = value.strip()
+    if not 32 <= len(raw) <= 512 or any(character.isspace() for character in raw):
+        return False
+    if re.fullmatch(r"[0-9a-fA-F]{32,128}", raw):
+        return False
+    classes = sum(
+        bool(pattern.search(raw))
+        for pattern in (
+            re.compile(r"[a-z]"),
+            re.compile(r"[A-Z]"),
+            re.compile(r"[0-9]"),
+            re.compile(r"[^A-Za-z0-9]"),
+        )
+    )
+    if classes < 3:
+        return False
+    counts = Counter(raw)
+    entropy = -sum(
+        (count / len(raw)) * math.log2(count / len(raw))
+        for count in counts.values()
+    )
+    return entropy >= 4.0
+
+
+def _binding_contains_credential(name: str, value: str, *, quoted: bool) -> bool:
+    if _is_placeholder_secret(value, quoted=quoted):
+        return False
+    if _is_credential_binding_name(name):
+        return len(value.strip()) >= 8
+    return _has_high_entropy_security_context(name) and _looks_high_entropy_secret(value)
+
+
+def _analyze_json_document(text: str) -> tuple[bool, bool]:
+    """Return ``(invalid_json, contains_static_credential)``.
+
+    ``object_pairs_hook`` deliberately observes object members before a mapping
+    can discard duplicate names.  Duplicate names and non-standard numeric
+    constants are rejected so tracked JSON cannot hide an earlier credential
+    behind a later placeholder or rely on Python's permissive JSON extensions.
+    """
+
+    pairs: list[tuple[str, object]] = []
+    duplicate_key = False
+
+    def capture_pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        nonlocal duplicate_key
+        seen: set[str] = set()
+        for field, value in items:
+            if field in seen:
+                duplicate_key = True
+            seen.add(field)
+            pairs.append((field, value))
+        return dict(items)
+
+    def reject_nonstandard_constant(value: str) -> object:
+        raise ValueError(f"non-standard JSON constant: {value}")
+
+    try:
+        json.loads(
+            text,
+            object_pairs_hook=capture_pairs,
+            parse_constant=reject_nonstandard_constant,
+        )
+    except (TypeError, ValueError, RecursionError):
+        return True, False
+
+    contains_credential = any(
+        isinstance(value, str)
+        and _binding_contains_credential(field, value, quoted=True)
+        for field, value in pairs
+    )
+    return duplicate_key, contains_credential
+
+
+def _contains_static_python_credential(text: str) -> bool:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        for field, value in _python_literal_business_bindings(node):
+            if _binding_contains_credential(field, value, quoted=True):
+                return True
+    return False
+
+
 def _contains_hardcoded_credential(text: str) -> bool:
+    for pattern in (
+        _AWS_ACCESS_KEY,
+        _GITHUB_CREDENTIAL,
+        _OPENAI_CREDENTIAL,
+        _PRIVATE_KEY_HEADER,
+    ):
+        if pattern.search(text):
+            return True
+
+    if _contains_static_python_credential(text):
+        return True
+
+    for match in _STATIC_TEXT_BINDING.finditer(text):
+        value = match.group("quoted") or match.group("bare") or ""
+        if _binding_contains_credential(
+            match.group("name"),
+            value,
+            quoted=match.group("quoted") is not None,
+        ):
+            return True
+
     for pattern in (
         _CREDENTIAL_DSN,
         _CREDENTIAL_ASSIGNMENT,
@@ -517,13 +743,13 @@ def _static_python_string(node: ast.AST) -> str | None:
 
 def _python_binding_field(target: ast.AST) -> str | None:
     if isinstance(target, ast.Name):
-        return target.id.casefold()
+        return target.id
     if isinstance(target, ast.Attribute):
-        return target.attr.casefold()
+        return target.attr
     if isinstance(target, ast.Subscript):
         key = _static_python_string(target.slice)
         if key is not None:
-            return key.casefold()
+            return key
     return None
 
 
@@ -551,7 +777,7 @@ def _python_literal_business_bindings(node: ast.AST) -> list[tuple[str, str]]:
             field = _static_python_string(key_node)
             value = _static_python_string(value_node)
             if field is not None and value is not None:
-                bindings.append((field.casefold(), value))
+                bindings.append((field, value))
         return bindings
     if isinstance(node, ast.Call):
         bindings = []
@@ -560,7 +786,7 @@ def _python_literal_business_bindings(node: ast.AST) -> list[tuple[str, str]]:
                 continue
             value = _static_python_string(keyword.value)
             if value is not None:
-                bindings.append((keyword.arg.casefold(), value))
+                bindings.append((keyword.arg, value))
         return bindings
     return []
 
@@ -572,9 +798,10 @@ def _contains_python_literal_business_binding(text: str) -> bool:
         return False
     for node in ast.walk(tree):
         for field, value in _python_literal_business_bindings(node):
-            if field in _PYTHON_BUSINESS_FIELDS and not _is_allowed_business_value(value):
+            normalized_field = field.casefold()
+            if normalized_field in _PYTHON_BUSINESS_FIELDS and not _is_allowed_business_value(value):
                 return True
-            if field == "source_kind" and value.strip().casefold() == "real":
+            if normalized_field == "source_kind" and value.strip().casefold() == "real":
                 return True
     return False
 
@@ -655,10 +882,43 @@ def validate_repository_hygiene(
             continue
 
         if not _is_managed_text(normalized):
-            if _non_target_is_binary(payload):
-                skipped_binary_count += 1
+            suffix = Path(normalized).suffix.casefold()
+            if suffix in _SENSITIVE_TRACKED_SUFFIXES:
+                findings.append(
+                    _finding(
+                        "REPO-TRACKED-SENSITIVE-FILE",
+                        normalized,
+                        "sensitive document, archive, database, key, or media file must not be tracked",
+                    )
+                )
+            elif normalized == _SWIFT_BRIDGE_PATH:
+                digest = hashlib.sha256(payload).hexdigest()
+                if not payload.startswith(_SWIFT_BRIDGE_HEADER) or digest != _SWIFT_BRIDGE_SHA256:
+                    findings.append(
+                        _finding(
+                            "REPO-TRACKED-BINARY-ALLOWLIST-MISMATCH",
+                            normalized,
+                            "allowlisted Swift bridge type or digest does not match policy",
+                        )
+                    )
+                else:
+                    skipped_binary_count += 1
+            elif _non_target_is_binary(payload):
+                findings.append(
+                    _finding(
+                        "REPO-TRACKED-BINARY-FORBIDDEN",
+                        normalized,
+                        "tracked binary is not in the exact binary allowlist",
+                    )
+                )
             else:
-                skipped_non_target_count += 1
+                findings.append(
+                    _finding(
+                        "REPO-TRACKED-UNSUPPORTED-FILE",
+                        normalized,
+                        "tracked file type is not in the managed text allowlist",
+                    )
+                )
             continue
 
         try:
@@ -675,6 +935,21 @@ def validate_repository_hygiene(
             continue
         scanned_text_count += 1
         synthetic_fixture = _is_declared_synthetic_fixture(normalized, text)
+        invalid_json = False
+        json_credential = False
+        if normalized.casefold().endswith(".json"):
+            invalid_json, json_credential = _analyze_json_document(text)
+            if invalid_json:
+                findings.append(
+                    _finding(
+                        "REPO-INVALID-JSON",
+                        normalized,
+                        (
+                            "tracked JSON must parse strictly and contain unique "
+                            "object keys"
+                        ),
+                    )
+                )
 
         if _contains_rfc1918_url(text):
             findings.append(
@@ -696,7 +971,7 @@ def validate_repository_hygiene(
                     "non-user business absolute path is forbidden",
                 )
             )
-        if _contains_hardcoded_credential(text):
+        if json_credential or _contains_hardcoded_credential(text):
             findings.append(
                 _finding(
                     "REPO-HARDCODED-CREDENTIAL",

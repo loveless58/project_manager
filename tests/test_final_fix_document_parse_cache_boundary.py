@@ -130,8 +130,8 @@ def test_injected_runtime_rejects_obvious_network_managed_root() -> None:
     with pytest.raises(ValueError, match="node-local"):
         resolve_document_parse_runtime(
             structure_index=StaticStructureIndex(),
-            cache_path=r"\\server\share\document_parse\kb.json",
-            managed_cache_root=r"\\server\share\document_parse",
+            cache_path=r"\\server\share\document_parse\kb.json",  # repo-hygiene: allow=synthetic-path
+            managed_cache_root=r"\\server\share\document_parse",  # repo-hygiene: allow=synthetic-path
         )
 
 

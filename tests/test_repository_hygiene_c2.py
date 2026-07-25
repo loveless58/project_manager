@@ -84,7 +84,7 @@ def test_repository_hygiene_fails_closed_for_undecodable_managed_text(tmp_path):
     assert report.decode_error_count == 1
 
 
-def test_repository_hygiene_reports_scan_and_skip_counts(tmp_path):
+def test_repository_hygiene_default_denies_binary_and_unknown_file_types(tmp_path):
     from governance.repository_hygiene import validate_repository_hygiene
 
     (tmp_path / "docs").mkdir()
@@ -100,5 +100,10 @@ def test_repository_hygiene_reports_scan_and_skip_counts(tmp_path):
 
     assert report.tracked_count == 3
     assert report.scanned_text_count == 1
-    assert report.skipped_binary_count == 1
-    assert report.skipped_non_target_count == 1
+    assert report.skipped_binary_count == 0
+    assert report.skipped_non_target_count == 0
+    assert report.errors == 2
+    assert {finding["id"] for finding in report.findings} == {
+        "REPO-TRACKED-SENSITIVE-FILE",
+        "REPO-TRACKED-UNSUPPORTED-FILE",
+    }

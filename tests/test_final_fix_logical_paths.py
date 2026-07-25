@@ -22,8 +22,8 @@ INVALID_LOGICAL_PATHS = (
     "/absolute.json",
     "C:/absolute.json",
     "C:drive-relative.json",
-    "//server/share/file.json",
-    r"\\server\share\file.json",
+    "//server/share/file.json",  # repo-hygiene: allow=synthetic-path
+    r"\\server\share\file.json",  # repo-hygiene: allow=synthetic-path
     r"folder\file.json",
     ".",
     "./file.json",

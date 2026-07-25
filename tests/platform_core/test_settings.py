@@ -135,7 +135,7 @@ def test_business_root_may_be_sync_directory_while_defaults_stay_node_local(
     ("sqlite_path", "message"),
     [
         ("inside", "sqlite_path must not be inside business_root"),
-        (r"\\server\share\project_manager.sqlite3", "sqlite_path must be node-local"),
+        (r"\\server\share\project_manager.sqlite3", "sqlite_path must be node-local"),  # repo-hygiene: allow=synthetic-path
     ],
 )
 def test_local_sqlite_rejects_business_or_unc_paths(tmp_path, sqlite_path, message):

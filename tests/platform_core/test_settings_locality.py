@@ -46,7 +46,7 @@ def test_settings_reject_runtime_artifacts_in_business_root(
         (
             "runtime_workspace",
             "PROJECT_MANAGER_WORKSPACE_DIR",
-            r"\\server\share\runtime",
+            r"\\server\share\runtime",  # repo-hygiene: allow=synthetic-path
         ),
         (
             "projection_root",

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import ast
+import codecs
+from collections import Counter
+import hashlib
+import math
 import json
 import os
 from pathlib import Path
@@ -11,11 +15,23 @@ import pytest
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
-MANAGED_SUFFIXES = {".py", ".md", ".json", ".yaml", ".yml", ".ini", ".env", ".txt"}
+MANAGED_SUFFIXES = {
+    ".bat", ".cfg", ".cmd", ".conf", ".css", ".csv", ".env", ".htm",
+    ".html", ".ini", ".js", ".json", ".md", ".ps1", ".py", ".sh",
+    ".sql", ".swift", ".toml", ".tsv", ".txt", ".xml", ".yaml", ".yml",
+}
+MANAGED_NAMES = {
+    ".gitattributes", ".gitignore", "Dockerfile", "LICENSE", "Makefile",
+    "NOTICE", "README",
+}
+MANAGED_EXTENSIONLESS_ROLES = {"config", "governance", "scripts", "skills"}
 POLICY_IMPLEMENTATIONS = {
     "governance/repository_hygiene.py",
     "tests/test_repository_hygiene.py",
+    "tests/test_repository_hygiene_c2.py",
+    "tests/test_repository_hygiene_c3.py",
     "tests/test_repository_synthetic_contract.py",
+    "tests/test_final_fix_repository_governance.py",
 }
 BUSINESS_CONTENT_PREFIXES = ("tests/", "business_rules/", "docs/superpowers/templates/")
 SYNTHETIC = re.compile(
@@ -52,7 +68,7 @@ BUSINESS_FIELDS = {
     "contract_id",
 }
 ORGANIZATION = re.compile(
-    r"(?<!\\)[\u4e00-\u9fffA-Za-z0-9（）()·]{2,40}(?:"
+    r"(?<!\\)[\u4e00-\u9fffA-Za-z0-9（）()·]{2,40}(?:"  # repo-hygiene: allow=synthetic-path
     + "股份有限" + "公司|有限责任" + "公司|有限" + "公司|公司|集团|银行|研究院|大学)"
 )
 LABELED_VALUE = re.compile(
@@ -79,6 +95,133 @@ REAL_SOURCE_CLAIM = re.compile(
     r"(?:数据来源|来源类型|fixture_kind|source_kind)\s*[：:=]"
     r"[^\r\n]{0,80}(?:真实|real)", re.IGNORECASE
 )
+
+
+
+SWIFT_BRIDGE_PATH = "integrations/macos_vision_bridge/swift_ocr_bridge"
+SWIFT_BRIDGE_SHA256 = (
+    "384c1fabeaccec7133f1563a9681c2e5dbd1fceee1b22edc9f4138e78bb114f7"
+)
+SWIFT_BRIDGE_MACHO_ARM64_EXECUTABLE_HEADER = bytes.fromhex(
+    "cffaedfe" "0c000001" "00000000" "02000000"
+)
+
+_CREDENTIAL_TERMINALS = {
+    "token", "secret", "key", "credential", "credentials", "cookie", "session",
+}
+_BENIGN_KEY_PREFIXES = {
+    "cache", "content", "dictionary", "foreign", "index", "lookup", "object",
+    "primary", "public", "schema", "sort",
+}
+_HIGH_ENTROPY_SECURITY_WORDS = {
+    "auth", "authentication", "authorization", "bearer", "encryption", "oauth",
+    "signing", "webhook",
+}
+_SAFE_CREDENTIAL_LITERALS = {
+    "dummy-token", "fake-key-for-test", "redacted", "test-key",
+}
+_TEMPLATE_REFERENCE = re.compile(
+    r"(?:\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\}|"
+    r"%[A-Za-z_][A-Za-z0-9_]*%|\{\{\s*[A-Za-z_][A-Za-z0-9_.-]*\s*\}\}|"
+    r"env:[A-Za-z_][A-Za-z0-9_]*|<[^<>\r\n]+>|"
+    r"%\([A-Za-z_][A-Za-z0-9_]*\)s?)",
+    re.IGNORECASE,
+)
+_DIRECT_CREDENTIAL_PATTERNS = (
+    re.compile(r"(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,255}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,255}\b"),
+    re.compile(r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}\b"),
+    re.compile(
+        r"-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE\s+KEY-----",
+        re.IGNORECASE,
+    ),
+)
+_TEXT_STATIC_ASSIGNMENT = re.compile(
+    r"^\s*(?:(?:export|set)\s+|-\s*)?"
+    r"(?:[\"'])?(?P<name>[A-Za-z][A-Za-z0-9_.-]*)(?:[\"'])?"
+    r"\s*[:=]\s*(?:"
+    r"(?P<quote>[\"'])(?P<quoted>[^\"'\r\n]+)(?P=quote)"
+    r"|(?P<bare>[^\s#;,()]+)(?=\s*(?:#.*)?$))",
+    re.MULTILINE,
+)
+_UNC_PATH = re.compile(
+    r"(?<![A-Za-z0-9:/\\])(?:"
+    r"\\\\\?\\UNC\\[^\\/\s\"'`?]+\\[^\\/\s\"'`]+"
+    r"|\\\\[^\\/?\s\"'`]+\\[^\\/\s\"'`]+"
+    r"|//(?![/?])[^/\s\"'`]+/[^/\s\"'`]+)",  # repo-hygiene: allow=synthetic-path
+    re.IGNORECASE,
+)
+_STRICT_SYNTHETIC_PATH_COMMENT = re.compile(
+    r"(?:#|//|<!--)\s*repo-hygiene:\s*allow=synthetic-path"
+    r"(?:\s*-->)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _independent_is_managed_text(relative_path: str) -> bool:
+    path = Path(relative_path)
+    if path.suffix.casefold() in MANAGED_SUFFIXES:
+        return True
+    if path.name in MANAGED_NAMES:
+        return True
+    return not path.suffix and bool(
+        MANAGED_EXTENSIONLESS_ROLES.intersection(path.parts)
+    )
+
+
+def _independent_decode_managed_text(payload: bytes) -> str:
+    if payload.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        raise UnicodeDecodeError("utf-32", payload, 0, 4, "UTF-32 is not managed")
+    if payload.startswith(codecs.BOM_UTF8):
+        text = payload.decode("utf-8-sig")
+    elif payload.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        text = payload.decode("utf-16")
+    else:
+        text = payload.decode("utf-8")
+    if "\0" in text:
+        raise UnicodeDecodeError("managed-text", payload, 0, 1, "NUL is forbidden")
+    return text
+
+
+def _independent_file_policy_violation(
+    relative_path: str, payload: bytes
+) -> str | None:
+    normalized = relative_path.replace("\\", "/")
+    if normalized == SWIFT_BRIDGE_PATH:
+        if not payload.startswith(SWIFT_BRIDGE_MACHO_ARM64_EXECUTABLE_HEADER):
+            return "pinned Swift bridge is not a Mach-O arm64 executable"
+        if hashlib.sha256(payload).hexdigest() != SWIFT_BRIDGE_SHA256:
+            return "pinned Swift bridge SHA-256 mismatch"
+        return None
+    if not _independent_is_managed_text(normalized):
+        return "tracked file type is outside the independent managed-text allowlist"
+    try:
+        _independent_decode_managed_text(payload)
+    except UnicodeDecodeError:
+        return "managed tracked text is not safely decodable"
+    return None
+
+
+def _independent_unc_views(line: str):
+    yield line
+    candidate = line
+    for _ in range(3):
+        unescaped = candidate.replace("\\\\", "\\")
+        if unescaped == candidate:
+            return
+        yield unescaped
+        candidate = unescaped
+
+
+def _independent_unc_violations(relative_path: str, text: str) -> list[str]:
+    violations: list[str] = []
+    for line_number, line in enumerate(text.splitlines(), 1):
+        if _STRICT_SYNTHETIC_PATH_COMMENT.search(line):
+            continue
+        if any(_UNC_PATH.search(view) for view in _independent_unc_views(line)):
+            violations.append(f"{relative_path}:{line_number}:unc_path")
+    return violations
 
 
 def _tracked_files() -> list[str]:
@@ -208,6 +351,184 @@ def _literal_bindings(node: ast.AST) -> list[tuple[str, ast.AST, str]]:
                 bindings.append((keyword.arg.casefold(), keyword.value, value))
         return bindings
     return []
+
+
+def _raw_assignment_field(target: ast.AST) -> str | None:
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    if isinstance(target, ast.Subscript):
+        return _static_string_value(target.slice)
+    return None
+
+
+def _credential_literal_bindings(node: ast.AST) -> list[tuple[str, ast.AST, str]]:
+    if isinstance(node, ast.Assign):
+        value = _static_string_value(node.value)
+        if value is None:
+            return []
+        return [
+            (field, node.value, value)
+            for target in node.targets
+            if (field := _raw_assignment_field(target)) is not None
+        ]
+    if isinstance(node, ast.AnnAssign):
+        field = _raw_assignment_field(node.target)
+        value = _static_string_value(node.value) if node.value is not None else None
+        if field is None or value is None or node.value is None:
+            return []
+        return [(field, node.value, value)]
+    if isinstance(node, ast.Dict):
+        bindings: list[tuple[str, ast.AST, str]] = []
+        for key_node, value_node in zip(node.keys, node.values):
+            if key_node is None:
+                continue
+            field = _static_string_value(key_node)
+            value = _static_string_value(value_node)
+            if field is not None and value is not None:
+                bindings.append((field, value_node, value))
+        return bindings
+    if isinstance(node, ast.Call):
+        return [
+            (keyword.arg, keyword.value, value)
+            for keyword in node.keywords
+            if keyword.arg is not None
+            if (value := _static_string_value(keyword.value)) is not None
+        ]
+    return []
+
+
+def _credential_name_words(name: str) -> list[str]:
+    expanded = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    expanded = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", expanded)
+    return [
+        word.casefold()
+        for word in re.split(r"[^A-Za-z0-9]+", expanded)
+        if word
+    ]
+
+
+def _is_credential_binding_name(name: str) -> bool:
+    words = _credential_name_words(name)
+    if not words or words[-1] not in _CREDENTIAL_TERMINALS:
+        return False
+    if words[-1] == "key" and _BENIGN_KEY_PREFIXES.intersection(words[:-1]):
+        return False
+    return True
+
+
+def _is_safe_credential_literal(value: str) -> bool:
+    raw = value.strip()
+    if raw.casefold() in _SAFE_CREDENTIAL_LITERALS:
+        return True
+    return bool(_TEMPLATE_REFERENCE.fullmatch(raw))
+
+
+def _looks_high_entropy_secret(value: str) -> bool:
+    raw = value.strip()
+    if not 32 <= len(raw) <= 512 or any(character.isspace() for character in raw):
+        return False
+    if re.fullmatch(r"[0-9a-fA-F]{32,128}", raw):
+        return False
+    character_classes = sum(
+        bool(re.search(pattern, raw))
+        for pattern in (r"[a-z]", r"[A-Z]", r"[0-9]", r"[^A-Za-z0-9]")
+    )
+    if character_classes < 3:
+        return False
+    counts = Counter(raw)
+    entropy = -sum(
+        (count / len(raw)) * math.log2(count / len(raw))
+        for count in counts.values()
+    )
+    return entropy >= 4.0
+
+
+def _binding_is_credential(name: str, value: str) -> bool:
+    if _is_safe_credential_literal(value):
+        return False
+    if _is_credential_binding_name(name):
+        return len(value.strip()) >= 8
+    words = set(_credential_name_words(name))
+    return bool(words.intersection(_HIGH_ENTROPY_SECURITY_WORDS)) and (
+        _looks_high_entropy_secret(value)
+    )
+
+
+def _independent_credential_violations(
+    relative_path: str, text: str
+) -> list[str]:
+    violations: list[str] = []
+    for pattern in _DIRECT_CREDENTIAL_PATTERNS:
+        for match in pattern.finditer(text):
+            line_number = text.count("\n", 0, match.start()) + 1
+            violations.append(
+                f"{relative_path}:{line_number}:credential_signature"
+            )
+
+    suffix = Path(relative_path).suffix.casefold()
+    if suffix == ".json":
+        pairs: list[tuple[str, object]] = []
+        duplicate_keys: list[str] = []
+
+        def capture_pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+            seen: set[str] = set()
+            for field, child in items:
+                if field in seen:
+                    duplicate_keys.append(field)
+                seen.add(field)
+                pairs.append((field, child))
+            return dict(items)
+
+        def reject_nonstandard_constant(value: str) -> object:
+            raise ValueError(f"non-standard JSON constant: {value}")
+
+        try:
+            json.loads(
+                text,
+                object_pairs_hook=capture_pairs,
+                parse_constant=reject_nonstandard_constant,
+            )
+        except (TypeError, ValueError, RecursionError):
+            violations.append(f"{relative_path}:1:invalid_json")
+            return violations
+
+        violations.extend(
+            f"{relative_path}:1:duplicate_json_key:{field}"
+            for field in duplicate_keys
+        )
+        for field, child in pairs:
+            if isinstance(child, str) and _binding_is_credential(field, child):
+                violations.append(
+                    f"{relative_path}:1:credential_binding:{field}"
+                )
+        return violations
+
+    parsed_python = False
+    if suffix == ".py":
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            pass
+        else:
+            parsed_python = True
+            for node in ast.walk(tree):
+                for field, value_node, value in _credential_literal_bindings(node):
+                    if _binding_is_credential(field, value):
+                        violations.append(
+                            f"{relative_path}:{value_node.lineno}:credential_binding:{field}"
+                        )
+
+    if not parsed_python:
+        for match in _TEXT_STATIC_ASSIGNMENT.finditer(text):
+            value = match.group("quoted") or match.group("bare") or ""
+            if _binding_is_credential(match.group("name"), value):
+                line_number = text.count("\n", 0, match.start()) + 1
+                violations.append(
+                    f"{relative_path}:{line_number}:credential_binding:{match.group('name')}"
+                )
+    return violations
 
 
 def _python_violations(relative_path: str, text: str) -> list[str]:
@@ -359,3 +680,237 @@ def test_ocr_baseline_does_not_relabel_historical_rows_as_synthetic():
         benchmark_section,
         re.MULTILINE,
     )
+
+
+def test_independent_contract_default_denies_unmanaged_and_sensitive_files(tmp_path):
+    bridge = (PROJECT_DIR / "integrations/macos_vision_bridge/swift_ocr_bridge").read_bytes()
+    cases = [
+        ("customer/contract.pdf", b"%PDF-1.7\x00customer"),
+        ("config/server.key", b"-----BEGIN " + b"PRIVATE KEY-----"),
+        ("NOTICE.unknown", b"plain text"),
+        ("bin/tool", b"\x7fELF\x00binary"),
+        ("bin/swift_ocr_bridge", bridge),
+    ]
+
+    for relative_path, payload in cases:
+        assert _independent_file_policy_violation(relative_path, payload)
+
+
+def test_independent_contract_exactly_allows_tracked_swift_bridge():
+    relative_path = "integrations/macos_vision_bridge/swift_ocr_bridge"
+    payload = (PROJECT_DIR / relative_path).read_bytes()
+
+    assert _independent_file_policy_violation(relative_path, payload) is None
+    assert _independent_file_policy_violation(relative_path, payload + b"tamper")
+
+
+@pytest.mark.parametrize(
+    "credential_name",
+    [
+        "NODE_TOKEN",
+        "REFRESH_TOKEN",
+        "SECRET_KEY",
+        "SERVICE_CREDENTIAL",
+        "AUTH_COOKIE",
+        "USER_SESSION",
+        "webhookSecret",
+    ],
+)
+def test_independent_contract_rejects_static_credential_vocabulary(credential_name):
+    text = credential_name + ' = "' + "production-value-0123456789" + '"'
+
+    assert _independent_credential_violations("config/provider.py", text)
+
+
+def test_independent_contract_covers_python_credential_binding_shapes():
+    value = "production-value-0123456789"
+    contents = [
+        "self." + "node_token = " + repr(value),
+        "record[" + repr("secret_key") + "] = " + repr(value),
+        "record = {" + repr("service_credential") + ": " + repr(value) + "}",
+        "Provider(auth_cookie=" + repr(value) + ")",
+        "user_session: str = " + repr(value),
+    ]
+
+    for content in contents:
+        assert _independent_credential_violations("config/provider.py", content), content
+
+
+def test_independent_contract_preserves_name_boundaries_and_text_shapes():
+    value = "production-value-0123456789"
+    cases = [
+        (".py", "Provider(webhook" + "Secret=" + repr(value) + ")"),
+        (".py", "record = {" + repr("webhook" + "Secret") + ": " + repr(value) + "}"),
+        (".py", "DB" + "Session = " + repr(value)),
+        (".py", "JWT" + "Token = " + repr(value)),
+        (".yaml", "- auth_" + "token: " + repr(value)),
+        (".sh", "export AUTH_" + "TOKEN=" + repr(value)),
+    ]
+
+    for suffix, content in cases:
+        assert _independent_credential_violations(
+            "config/provider" + suffix, content
+        ), content
+
+
+def test_independent_contract_covers_compact_json_credentials_and_placeholder():
+    fixture_value = "-".join(("production", "value", "0123456789"))
+    rejected = json.dumps(
+        {
+            "providers": [
+                {"auth_token": fixture_value, "enabled": False}
+            ]
+        },
+        separators=(",", ":"),
+    )
+    allowed = json.dumps(
+        {
+            "auth_token": "${AUTH_TOKEN}",
+            "content_hash": "sha256:0123456789abcdef",
+            "public_key": "ssh-rsa documentation-only",
+            "cache_key": "document-version-content-hash",
+        },
+        separators=(",", ":"),
+    )
+
+    assert _independent_credential_violations(
+        "config/provider.json", rejected
+    )
+    assert _independent_credential_violations(
+        "config/provider.json", allowed
+    ) == []
+
+
+def _independent_credential_json_parser_edge_case(kind: str) -> str:
+    field = '"' + "auth_" + "token" + '"'
+    fixture_value = "-".join(("production", "value", "0123456789"))
+    static_binding = field + ":" + json.dumps(fixture_value)
+    if kind == "duplicate":
+        dynamic_binding = field + ":" + json.dumps("${AUTH_TOKEN}")
+        return "{" + static_binding + "," + dynamic_binding + "}"
+    if kind == "malformed":
+        return "{" + static_binding + " garbage}"
+    raise AssertionError(f"unknown edge case: {kind}")
+
+
+@pytest.mark.parametrize("kind", ["duplicate", "malformed"])
+def test_independent_json_parser_edges_fail_closed(kind):
+    assert _independent_credential_violations(
+        "config/provider.json",
+        _independent_credential_json_parser_edge_case(kind),
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'NODE_TOKEN = os.environ["NODE_TOKEN"]',
+        'SECRET_KEY = os.getenv("SECRET_KEY")',
+        "SERVICE_CREDENTIAL = settings.service_credential",
+        'AUTH_COOKIE = "${AUTH_COOKIE}"',
+        'token_budget = "120000"',
+        'credential_name = "NODE_TOKEN"',
+        'public_key = "ssh-rsa documentation-only"',
+        'session_timeout = "30-seconds"',
+        'cookie_policy = "strict-same-site"',
+        'cache_key = "document-version-content-hash"',
+    ],
+)
+def test_independent_contract_allows_dynamic_credentials_and_false_positives(text):
+    assert _independent_credential_violations("config/provider.py", text) == []
+
+
+def test_independent_contract_rejects_prefix_and_high_entropy_secrets():
+    secrets = [
+        "AKIA" + "ABCDEFGHIJKLMNOP",
+        "ghp_" + "A1b2" * 9,
+        "github_pat_" + "A1b2" * 10,
+        "sk-proj-" + "A1b2" * 10,
+        "-----BEGIN " + "PRIVATE KEY-----\nsynthetic-material",
+    ]
+    for value in secrets:
+        assert _independent_credential_violations("docs/provider.md", "value: " + value)
+
+    entropy = "uN4@zQ8#pL2$xR6!vT0%mK7&wC3*eH9?"
+    assert _independent_credential_violations(
+        "config/provider.py", 'AUTH_MATERIAL = "' + entropy + '"'
+    )
+
+
+def _independent_unc_samples() -> list[str]:
+    slash = "\\"
+    return [
+        slash * 2 + "nas01" + slash + "share" + slash + "customer" + slash + "contract.pdf",
+        "//" + "nas01/share/customer/contract.pdf",
+        slash * 2 + "?" + slash + "UNC" + slash + "nas01" + slash + "share" + slash + "customer" + slash + "contract.pdf",
+    ]
+
+
+@pytest.mark.parametrize("unc_path", _independent_unc_samples())
+def test_independent_contract_rejects_unc_with_strict_line_exemption(unc_path):
+    marker = "repo-hygiene: allow=synthetic-path"
+
+    assert _independent_unc_violations("docs/runbook.md", "source: " + unc_path)
+    assert _independent_unc_violations(
+        "docs/runbook.md", "# " + marker + "\nsource: " + unc_path
+    )
+    assert _independent_unc_violations(
+        "docs/runbook.md", "source: " + unc_path + " # " + marker + "; ignored"
+    )
+    assert _independent_unc_violations(
+        "tests/fixture.md", "source: " + unc_path + " # " + marker
+    ) == []
+
+
+@pytest.mark.parametrize("unc_path", _independent_unc_samples())
+def test_independent_contract_rejects_escaped_unc_source_and_json(unc_path):
+    escaped_source = "source = " + repr(unc_path)
+    declared_synthetic_json = json.dumps(
+        {
+            "fixture_kind": "synthetic",
+            "contains_real_business_data": False,
+            "path": unc_path,
+        }
+    )
+
+    assert _independent_unc_violations("tests/path_source.py", escaped_source)
+    assert _independent_unc_violations(
+        "tests/fixtures/synthetic_unc.json", declared_synthetic_json
+    )
+
+
+def test_all_tracked_files_match_independent_default_deny_contract():
+    violations = []
+    tracked_files = _tracked_files()
+    assert tracked_files
+    assert SWIFT_BRIDGE_PATH in tracked_files
+
+    for relative_path in tracked_files:
+        payload = (PROJECT_DIR / relative_path).read_bytes()
+        violation = _independent_file_policy_violation(relative_path, payload)
+        if violation:
+            violations.append(f"{relative_path}:{violation}")
+
+    assert violations == []
+
+
+def test_all_tracked_managed_text_has_no_independent_secret_or_unc_violation():
+    violations: list[str] = []
+    scanned_paths: list[str] = []
+    tracked_files = _tracked_files()
+    for relative_path in tracked_files:
+        if relative_path in POLICY_IMPLEMENTATIONS or relative_path == SWIFT_BRIDGE_PATH:
+            continue
+        payload = (PROJECT_DIR / relative_path).read_bytes()
+        if _independent_file_policy_violation(relative_path, payload):
+            continue
+        text = _independent_decode_managed_text(payload)
+        scanned_paths.append(relative_path)
+        violations.extend(
+            _independent_credential_violations(relative_path, text)
+        )
+        violations.extend(_independent_unc_violations(relative_path, text))
+
+    assert scanned_paths
+    assert len(scanned_paths) == len(tracked_files) - len(POLICY_IMPLEMENTATIONS) - 1
+    assert not sorted(set(violations)), "\n".join(sorted(set(violations)))

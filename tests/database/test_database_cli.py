@@ -436,7 +436,7 @@ def test_migrate_does_not_run_when_backup_verification_fails(monkeypatch, tmp_pa
 
 @pytest.mark.parametrize(
     "value",
-    [r"\\server\share", "smb://server/share", "nfs://server/share", "afp://server/share"],
+    [r"\\server\share", "smb://server/share", "nfs://server/share", "afp://server/share"],  # repo-hygiene: allow=synthetic-path
 )
 def test_operations_paths_reject_obvious_network_locations(value):
     from infrastructure.database import cli

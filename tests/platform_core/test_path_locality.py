@@ -6,8 +6,8 @@ import pytest
 @pytest.mark.parametrize(
     "raw_value",
     [
-        r"\\server\share\runtime",
-        "//server/share/runtime",
+        r"\\server\share\runtime",  # repo-hygiene: allow=synthetic-path
+        "//server/share/runtime",  # repo-hygiene: allow=synthetic-path
         "smb://server/share/runtime",
         "nfs://server/export/runtime",
         "afp://server/share/runtime",
