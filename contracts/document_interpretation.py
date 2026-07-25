@@ -1,5 +1,6 @@
 """Fail-closed contract for candidate_document_interpretation.v1."""
 from __future__ import annotations
+from datetime import date
 import json
 import math
 import re
@@ -18,6 +19,7 @@ _FIELD_TYPES = {
 _RELATION_TYPES = {"invoice_contract","invoice_project","contract_project"}
 _EVIDENCE_FIELDS = {"buyer.tax_id","seller.tax_id","buyer.name","seller.name","contract_code","project_code","amount","date"}
 _ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_TAX_ID = re.compile(r"^[A-Za-z0-9]{8,32}$")
 
 class DocumentInterpretationSchemaError(ValueError):
     """Public fail-closed schema error."""
@@ -93,9 +95,22 @@ def _fields(value:object) -> None:
     _only(value,set(_FIELD_TYPES))
     for key,item in value.items():
         allowed=_FIELD_TYPES[key]
-        if allowed is str:
+        if key == "invoice_date":
+            if not _iso_date(item): raise DocumentInterpretationSchemaError("field")
+        elif key in {"buyer_tax_id", "seller_tax_id"}:
+            if not _text(item) or not _TAX_ID.fullmatch(item): raise DocumentInterpretationSchemaError("field")
+        elif allowed is str:
             if not _text(item): raise DocumentInterpretationSchemaError("field")
         elif type(item) not in allowed or not math.isfinite(item): raise DocumentInterpretationSchemaError("field")
+
+def _iso_date(value:object) -> bool:
+    if type(value) is not str or len(value) != 10 or value != value.strip():
+        return False
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.isoformat() == value
 
 def _relations(value:object) -> None:
     if type(value) is not list: raise DocumentInterpretationSchemaError("relations")

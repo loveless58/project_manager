@@ -101,14 +101,23 @@ _CANDIDATE_KEYS = {
 _ARTIFACT = re.compile(
     r"^artifact:[a-z][a-z0-9_-]{0,31}:[A-Za-z0-9_.:-]{1,128}$"
 )
+_ADAPTER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
 _ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _TAX_ID = re.compile(r"^[A-Za-z0-9]{8,32}$")
+_CONTENT_HASH = re.compile(r"^[0-9a-fA-F]{64}$")
+_DOCUMENT_KEYS = {
+    "path", "document_version_id", "content_hash", "media_type", "page_count",
+    "requires_structure_index",
+}
+_EVIDENCE_KEYS = {"kind", "candidate_id", "field", "query_value", "candidate_value", "weight"}
 _CREDENTIAL = re.compile(
     r"(?<!\w)(?:(?:authorization|token|api[_-]?(?:key|token)|password)\s*[:=]\s*\S|bearer\s+\S)",
     re.IGNORECASE,
 )
+_DOUBLE_SLASH = "/" * 2
+_FILE_URI = "file:" + "/" * 3
 _ABSOLUTE_PATH = re.compile(
-    r"(?:^|[\s\"'(=])(?:[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/][^\\/\s]+|/(?!/))"
+    rf"(?:^|[\s\"'(=])(?:{re.escape(_FILE_URI)}|{re.escape(_DOUBLE_SLASH)}[^/\s]+/[^/\s]+|[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/][^\\/\s]+|/(?!/))"
 )
 
 _MAX_REQUEST_BYTES = 64 * 1024
@@ -171,12 +180,17 @@ class DocumentInterpretationService:
 
 
 def _validate_adapter(interpreter: Any) -> None:
-    versions = (
+    identity = (
+        getattr(interpreter, "name", None),
+        getattr(interpreter, "model", None),
         getattr(interpreter, "schema_version", None),
         getattr(interpreter, "prompt_version", None),
         getattr(interpreter, "policy_version", None),
     )
-    if versions != (SCHEMA_VERSION, PROMPT_VERSION, POLICY_VERSION):
+    if any(
+        type(value) is not str or not _ADAPTER_ID.fullmatch(value)
+        for value in identity
+    ) or identity[2:] != (SCHEMA_VERSION, PROMPT_VERSION, POLICY_VERSION):
         raise DocumentInterpretationSchemaError("adapter identity")
 
 
@@ -269,6 +283,7 @@ def _request(
     document: dict[str, Any],
     context: BusinessContextEvidence,
 ) -> dict[str, Any]:
+    _validate_business_context_source(context)
     status = context.status
     if type(status) is not str or status not in _CONTEXT_STATUSES:
         raise DocumentInterpretationSchemaError("context status")
@@ -280,11 +295,7 @@ def _request(
 
     clean_candidates = [_candidate(item) for item in candidates]
     candidate_ids = {item["id"] for item in clean_candidates}
-    clean_evidence = []
-    for item in evidence_refs:
-        mapped = _evidence(item)
-        if mapped is not None:
-            clean_evidence.append(mapped)
+    clean_evidence = [_evidence(item) for item in evidence_refs]
     if not clean_evidence:
         raise DocumentInterpretationSchemaError("evidence")
     if any(item["candidate_id"] not in candidate_ids for item in clean_evidence):
@@ -312,6 +323,33 @@ def _request(
     return request
 
 
+def _validate_business_context_source(context: BusinessContextEvidence) -> None:
+    candidates = _bounded_sequence(context.candidates, "candidates")
+    evidence = _bounded_sequence(context.evidence_refs, "evidence")
+    conflicts = _bounded_sequence(context.conflicts, "conflicts")
+    diagnostics = _bounded_sequence(context.diagnostics, "diagnostics")
+    source = {
+        "status": context.status,
+        "candidates": candidates,
+        "evidence": evidence,
+        "conflicts": conflicts,
+        "diagnostics": diagnostics,
+    }
+    _validate_json_tree(source, inspect_sensitive=False)
+    if _json_bytes(source) > _MAX_REQUEST_BYTES:
+        raise DocumentInterpretationSchemaError("context size")
+    if type(context.status) is not str or context.status not in _CONTEXT_STATUSES:
+        raise DocumentInterpretationSchemaError("context status")
+    for item in candidates:
+        _candidate(item)
+    for item in evidence:
+        _evidence(item)
+    for item in conflicts:
+        _conflict(item)
+    for item in diagnostics:
+        _diagnostic(item)
+
+
 def _bounded_sequence(value: object, label: str) -> list[Any]:
     if type(value) not in (list, tuple) or len(value) > _MAX_COLLECTION:
         raise DocumentInterpretationSchemaError(label)
@@ -337,6 +375,10 @@ def _candidate(value: object) -> dict[str, Any]:
     }
     if "match_score" in value:
         _amount(value["match_score"])
+    if "documents" in value:
+        _candidate_documents(value["documents"])
+    if "path_hints" in value:
+        _candidate_path_hints(value["path_hints"])
     if "parties" in value:
         result["parties"] = _candidate_parties(value["parties"])
     if "facts" in value:
@@ -374,12 +416,49 @@ def _candidate_facts(value: object) -> dict[str, Any]:
     return facts
 
 
-def _evidence(value: object) -> dict[str, str] | None:
-    if type(value) is not dict:
+def _candidate_documents(value: object) -> None:
+    documents = _bounded_sequence(value, "candidate documents")
+    for document in documents:
+        if (
+            type(document) is not dict
+            or set(document) - _DOCUMENT_KEYS
+            or not {
+                "path", "document_version_id", "content_hash", "media_type", "page_count"
+            } <= set(document)
+        ):
+            raise DocumentInterpretationSchemaError("candidate document")
+        _source_path(document["path"])
+        version = document["document_version_id"]
+        digest = document["content_hash"]
+        if type(version) is not str or not _ID.fullmatch(version):
+            raise DocumentInterpretationSchemaError("document version")
+        if type(digest) is not str or not _CONTENT_HASH.fullmatch(digest):
+            raise DocumentInterpretationSchemaError("document hash")
+        if document["media_type"] not in {"application/pdf", "text/markdown"}:
+            raise DocumentInterpretationSchemaError("document media type")
+        page_count = document["page_count"]
+        if type(page_count) is not int or not 0 <= page_count <= 1_000_000:
+            raise DocumentInterpretationSchemaError("document page count")
+        requires = document.get("requires_structure_index", False)
+        if type(requires) is not bool:
+            raise DocumentInterpretationSchemaError("document index flag")
+
+
+def _candidate_path_hints(value: object) -> None:
+    for hint in _bounded_sequence(value, "candidate path hints"):
+        _safe_text(hint, max_bytes=4_096)
+
+
+def _evidence(value: object) -> dict[str, str]:
+    if (
+        type(value) is not dict
+        or set(value) - _EVIDENCE_KEYS
+        or not {"candidate_id", "field"} <= set(value)
+    ):
         raise DocumentInterpretationSchemaError("evidence")
     field = value.get("field")
     if field not in _EVIDENCE:
-        return None
+        raise DocumentInterpretationSchemaError("evidence field")
     identifier = value.get("candidate_id")
     kind = value.get("kind", "business_context")
     if (
@@ -388,11 +467,58 @@ def _evidence(value: object) -> dict[str, str] | None:
         or kind != "business_context"
     ):
         raise DocumentInterpretationSchemaError("evidence")
+    detail_keys = {"query_value", "candidate_value", "weight"}
+    present = detail_keys & set(value)
+    if present and present != detail_keys:
+        raise DocumentInterpretationSchemaError("evidence detail")
+    if present:
+        _context_scalar(value["query_value"])
+        _context_scalar(value["candidate_value"])
+        weight = value["weight"]
+        if type(weight) not in (int, float) or not math.isfinite(weight):
+            raise DocumentInterpretationSchemaError("evidence weight")
     return {
         "kind": "business_context",
         "candidate_id": identifier,
         "field": field,
     }
+
+
+def _conflict(value: object) -> None:
+    required = {"code", "candidate_id", "field", "query_value", "candidate_value"}
+    if type(value) is not dict or set(value) != required:
+        raise DocumentInterpretationSchemaError("conflict")
+    if value["code"] != "BUSINESS_CONTEXT.CONFLICT":
+        raise DocumentInterpretationSchemaError("conflict code")
+    identifier = value["candidate_id"]
+    if type(identifier) is not str or not _ID.fullmatch(identifier):
+        raise DocumentInterpretationSchemaError("conflict id")
+    if value["field"] not in _EVIDENCE:
+        raise DocumentInterpretationSchemaError("conflict field")
+    _context_scalar(value["query_value"])
+    _context_scalar(value["candidate_value"])
+
+
+def _context_scalar(value: object) -> None:
+    if type(value) is str:
+        _safe_text(value)
+    elif type(value) in (int, float):
+        _amount(value)
+    else:
+        raise DocumentInterpretationSchemaError("context scalar")
+
+
+def _source_path(value: object) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value.encode("utf-8")) > 4_096
+        or _CREDENTIAL.search(unicodedata.normalize("NFKC", value).casefold())
+        or re.match(r"^(?:[A-Za-z]:[\\/]|\\\\|/)", value) is None
+    ):
+        raise DocumentInterpretationSchemaError("source path")
+    return value
 
 
 def _diagnostic(value: object) -> dict[str, str]:

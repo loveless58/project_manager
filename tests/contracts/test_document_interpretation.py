@@ -41,6 +41,19 @@ def test_parses_complete_candidate_document_interpretation_v1() -> None:
     assert parsed["evidence"][0]["candidate_id"] == "contract-001"
 
 
+def test_accepts_canonical_invoice_date_and_tax_ids() -> None:
+    parsed = parse_candidate_document_interpretation(
+        _valid_interpretation(
+            fields={
+                "invoice_date": "2026-07-25",
+                "buyer_tax_id": "913100001234567890",
+                "seller_tax_id": "913200001234567890",
+            }
+        )
+    )
+
+    assert parsed["fields"]["invoice_date"] == "2026-07-25"
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -55,6 +68,9 @@ def test_parses_complete_candidate_document_interpretation_v1() -> None:
         _valid_interpretation(evidence=[]),
         _valid_interpretation(prompt_version=""),
         _valid_interpretation(fields=[]),
+        _valid_interpretation(fields={"invoice_date": "2026-02-30"}),
+        _valid_interpretation(fields={"buyer_tax_id": "9131!"}),
+        _valid_interpretation(fields={"seller_tax_id": "9132!"}),
     ],
 )
 def test_rejects_nonconforming_or_incomplete_interpretation(payload: object) -> None:

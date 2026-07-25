@@ -58,7 +58,6 @@ def _evidence() -> BusinessContextEvidence:
                 "document_type": "contract",
                 "parties": {"buyer": {"name": "Buyer"}, "seller": {"name": "Seller"}},
                 "facts": {"contract_code": "CT-001"},
-                "documents": [{"path": "/private/contract.pdf"}],
             },
         ),
         (
@@ -183,6 +182,9 @@ def test_boundary_rejects_sensitive_or_invalid_before_interpreter() -> None:
         "C:" + chr(92) + "Users" + chr(92) + "x",
         chr(92) * 2 + "server" + chr(92) + "share",
         "/private/file",
+        "/" * 2 + "server/share",
+        "/" * 2 + "etc/passwd",
+        "file:" + "/" * 3 + "tmp/secret",
         "Bearer abc",
         "Authorization: Bearer abc",
         "token=abc",
@@ -330,6 +332,19 @@ def _candidate_with_fact(key: str, value: object) -> dict[str, object]:
     return candidate
 
 
+def _valid_document(**overrides: object) -> dict[str, object]:
+    document = {
+        "path": "/synthetic/contract.pdf",
+        "document_version_id": "contract-v1",
+        "content_hash": "a" * 64,
+        "media_type": "application/pdf",
+        "page_count": 1,
+        "requires_structure_index": False,
+    }
+    document.update(overrides)
+    return document
+
+
 @pytest.mark.parametrize(
     ("case", "context"),
     [
@@ -351,6 +366,34 @@ def _candidate_with_fact(key: str, value: object) -> dict[str, object]:
             _context(evidence_refs=({"kind": "business_context", "candidate_id": "contract-001", "field": "unknown"},)),
         ),
         ("unknown diagnostic", _context(diagnostics=({"code": "BUSINESS_CONTEXT.UNKNOWN"},))),
+        (
+            "credential in candidate document",
+            _context(candidates=(_candidate(documents=[_valid_document(path="api_token=abc")]),)),
+        ),
+        (
+            "oversized document metadata",
+            _context(candidates=(_candidate(documents=[_valid_document(metadata="x" * 70_000)]),)),
+        ),
+        (
+            "credential in conflict",
+            _context(conflicts=({"code": "BUSINESS_CONTEXT.CONFLICT", "candidate_id": "contract-001", "field": "buyer.name", "query_value": "Authorization: Bearer abc", "candidate_value": "***uyer"},)),
+        ),
+        (
+            "mixed valid and sensitive unknown evidence",
+            _context(evidence_refs=_evidence().evidence_refs + ({"kind": "business_context", "candidate_id": "contract-001", "field": "unknown", "metadata": "api_token=abc"},)),
+        ),
+        (
+            "unknown evidence property",
+            _context(evidence_refs=({"kind": "business_context", "candidate_id": "contract-001", "field": "contract_code", "extra": "drop-me"},)),
+        ),
+        (
+            "oversized path hints",
+            _context(candidates=(_candidate(path_hints=["contracts/synthetic"] * 300),)),
+        ),
+        (
+            "oversized document collection",
+            _context(candidates=(_candidate(documents=[_valid_document()] * 300),)),
+        ),
     ],
     ids=lambda value: value if isinstance(value, str) else None,
 )
@@ -370,6 +413,10 @@ def test_invalid_business_context_blocks_before_interpreter(case, context) -> No
 @pytest.mark.parametrize(
     ("attribute", "value"),
     [
+        ("name", None),
+        ("name", ""),
+        ("model", None),
+        ("model", ""),
         ("schema_version", None),
         ("schema_version", []),
         ("prompt_version", ""),
@@ -431,6 +478,29 @@ def test_real_adapter_with_matching_versions_is_accepted_by_service() -> None:
     assert result["schema_version"] == interpreter.schema_version
     assert result["prompt_version"] == interpreter.prompt_version
     assert result["policy_version"] == interpreter.policy_version
+
+
+def test_valid_source_only_candidate_metadata_is_checked_then_omitted() -> None:
+    from services.document_interpretation import DocumentInterpretationService
+
+    candidate = _candidate(
+        documents=[_valid_document()],
+        path_hints=["contracts/synthetic"],
+    )
+    context = _context(candidates=(candidate,))
+    interpreter = CapturingInterpreter(_valid_response())
+    service = DocumentInterpretationService(StaticRetrieval(context), interpreter)
+
+    result = service.interpret(_input())
+
+    assert result["status"] == "success"
+    projected = interpreter.requests[0]["business_context"]["candidates"][0]
+    assert projected == {
+        "id": "contract-001",
+        "document_type": "contract",
+        "parties": {"buyer": {"name": "Buyer"}, "seller": {"name": "Seller"}},
+        "facts": {"contract_code": "CT-001"},
+    }
 
 
 def test_task3_nested_fields_are_preserved_for_retrieval_and_allowlisted_for_llm() -> None:
