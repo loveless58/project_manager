@@ -169,3 +169,16 @@ def test_blocked_relation_response_never_downgrades_to_needs_review() -> None:
 
     assert result["status"] == "blocked"
     assert result["confirmed"] is False
+
+
+def test_retrieval_service_evidence_maps_to_canonical_interpretation_relation() -> None:
+    from services.document_interpretation import DocumentInterpretationService
+    from services.retrieval_service import RetrievalService
+    class Provider:
+        def search(self, query):
+            return ({"id":"contract-001","document_type":"contract","parties":{"buyer":{"tax_id":"913100001234567890","name":"Buyer"}},"facts":{"contract_code":"HT-2026-001"}},)
+    response = _valid_response(evidence=[{"kind":"business_context","candidate_id":"contract-001","field":"buyer.tax_id"}], relations=[{"relation_type":"invoice_contract","target_candidate_id":"contract-001"}])
+    service = DocumentInterpretationService(RetrievalService(Provider(), None), CapturingInterpreter(response))
+    result = service.interpret({"parse_artifact_ref":"artifact:parsed:1","document_type_hint":"invoice","candidate_fields":{"buyer":{"tax_id":"913100001234567890","name":"Buyer"},"contract_code":"HT-2026-001"},"text_segments":[]})
+    assert result["status"] == "needs_review"
+    assert result["confirmed"] is False

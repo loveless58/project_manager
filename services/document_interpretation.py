@@ -58,10 +58,10 @@ def _document(raw:object)->dict[str,Any]:
  for seg in segs:
   if type(seg) is not dict or set(seg)-{"id","text"} or not _text(seg.get("id")) or type(seg.get("text")) is not str or len(seg["text"])>4096: raise DocumentInterpretationSchemaError("segment")
   clean_segs.append({"id":seg["id"],"text":seg["text"]})
- return {"document_type_hint":hint,"candidate_fields":clean,"text_segments":clean_segs}
+ return {"document_type_hint":hint,"candidate_fields":fields,"llm_candidate_fields":clean,"text_segments":clean_segs}
 
 def _request(ref:str,doc:dict[str,Any],ctx:BusinessContextEvidence)->dict[str,Any]:
- return {"schema_version":"document_interpretation_evidence_pack.v1","parse_artifact_ref":ref,"document":doc,"business_context":{
+ return {"schema_version":"document_interpretation_evidence_pack.v1","parse_artifact_ref":ref,"document":{"document_type_hint":doc["document_type_hint"],"candidate_fields":doc["llm_candidate_fields"],"text_segments":doc["text_segments"]},"business_context":{
   "status":ctx.status if type(ctx.status) is str and len(ctx.status)<=64 else "unknown",
   "candidates":[_candidate(x) for x in ctx.candidates if type(x) is dict],
   "evidence":[_evidence(x) for x in ctx.evidence_refs if type(x) is dict],

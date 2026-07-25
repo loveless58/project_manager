@@ -16,7 +16,7 @@ _FIELD_TYPES = {
  "project_code":str,"project_name":str,"contract_code":str,"contract_name":str,
 }
 _RELATION_TYPES = {"invoice_contract","invoice_project","contract_project"}
-_EVIDENCE_FIELDS = {"contract_code","project_code","buyer_tax_id","seller_tax_id","buyer_name","seller_name","invoice_number"}
+_EVIDENCE_FIELDS = {"buyer.tax_id","seller.tax_id","buyer.name","seller.name","contract_code","project_code","amount","date"}
 _ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 class DocumentInterpretationSchemaError(ValueError):
