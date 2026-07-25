@@ -1,4 +1,4 @@
-# SynologyDrive 文件识别与归档前置加固设计
+# 多业务文件源识别与归档前置加固设计
 
 ## 1. 背景与目标
 
@@ -41,7 +41,7 @@
 - 发票专用字段 Schema 与字段策略；
 - 规则候选、RetrievalService、PageIndex 和 LLM 结构化裁决组成的文件解释与
   业务归属链路；
-- 运行工作区、业务根和归档根解耦；
+- 运行工作区、多业务文件源和多个候选归档目标解耦；
 - 项目治理文档统一分类；
 - 反馈项统一规范化和验证 verdict 修复；
 - LibreOffice Headless 旧版 `.doc` 安全转换；
@@ -53,7 +53,7 @@
 - 不把 EasyOCR 卸载，只有显式配置允许时才可作为非默认 Provider；
 - 不执行 `execute_archive_plan(..., confirmed=True)`；
 - 不移动、重命名、覆盖或删除 SynologyDrive 原文件；
-- 不递归扫描整个 SynologyDrive；
+- 不递归扫描任何完整业务文件源；本轮只处理已批准的 SynologyDrive 样本；
 - 不实现 PostgreSQL、SQLite 业务表或业务 Repository；
 - 不实现多 Agent handoff；
 - 不把新能力接入或扩展探索性的 `LoopEngine`；
@@ -66,8 +66,9 @@
    负责结合检索证据进行文件类型和业务关系裁决。
 2. **候选与权威分离**：本轮所有识别结果、LLM 关系和归档位置都是候选，必须
    经过复核与确认。
-3. **物理位置解耦**：运行态只写节点本机非同步目录；原文件和最终归档位置由
-   DocumentStore 与 ArchiveTargetResolver 决定。
+3. **物理位置解耦**：运行态只写节点本机非同步目录；系统允许一个节点配置多个
+   业务文件源和多个候选归档目标。原文件和最终归档位置由 StorageBinding、
+   DocumentStoreRouter 与 ArchiveTargetResolver 决定，不存在全局唯一业务根。
 4. **Provider 显式选择**：每次处理记录尝试顺序、选中 Provider、版本、阻断
    原因和策略版本，不静默改变语义。
 5. **证据优先**：LLM 判断必须返回 `evidence_refs`、冲突、置信度和模型/策略
@@ -80,7 +81,7 @@
 ## 4. 总体处理链路
 
 ```text
-DocumentStore 读取原文件
+DocumentStoreRouter 按 StorageBinding 读取原文件
   -> ContentProfiler 判断文字层、扫描件、格式和复杂度
   -> ProcessingPlanner 选择原生解析、OCR 或 MinerU
   -> DocumentParser 生成标准内容与页级证据
@@ -240,7 +241,7 @@ class RetrievalService(Protocol):
 2. 对候选长合同使用 `StructureIndex`；
 3. `StructureIndex` 由配置选择 PageIndex 或 disabled Provider；
 4. 返回合同主体、金额、付款节点、开票条件的章节和页码证据；
-5. 禁止对整个 SynologyDrive 无筛选地执行全量 PageIndex。
+5. 禁止对任何业务绑定或全部业务绑定无筛选地执行全量 PageIndex。
 
 未来 SQL 上线后，候选召回顺序变为 SQL 元数据/FTS，再由 PageIndex 做文档内定位，
 业务接口保持不变。
@@ -308,31 +309,109 @@ class RetrievalService(Protocol):
 收票人与合同甲方一致是重要证据，但不是唯一依据。若同一甲方存在多个项目、主体
 关系不明确、金额无法对应或角色方向冲突，必须进入人工复核。
 
-## 9. 路径与存储解耦
+## 9. 多业务文件源、路径与存储绑定
 
-正式运行继续使用现有 `AppSettings` 和 `WorkspaceConfig`：
+SynologyDrive 只是当前试运行使用的一个业务文件源，不是领域模型中的唯一业务根。
+同一节点可以同时访问本机目录、多个 SynologyDrive 目录、SMB/NFS 挂载、外接盘、
+临时导入目录或其他受控 DocumentStore；不同执行节点也可以对同一逻辑存储使用
+不同物理路径。
+
+### 9.1 StorageBinding
+
+新增可版本化的 `StorageBinding`：
+
+```json
+{
+  "binding_id": "synology-office-primary",
+  "provider": "local_filesystem",
+  "node_id": "windows-office-01",
+  "logical_root": "business://office-primary/",
+  "physical_root": "E:\\SynologyDrive",
+  "roles": ["source", "archive_target"],
+  "readable": true,
+  "writable": true,
+  "trust_level": "trusted",
+  "enabled": true
+}
+```
+
+`physical_root` 只存在于节点本地配置，不写入可移植业务事实。业务产物引用：
+
+- `binding_id`；
+- `logical_uri`；
+- 文档 ID/版本 ID；
+- 内容哈希；
+- 必要时记录执行时解析出的物理路径作为审计证据。
+
+同一逻辑文档可以拥有多个位置绑定，不能把盘符、挂载点或文件名当作文档身份。
+
+本轮实现节点本地、静态配置驱动的多 binding registry，用于先消除单根假设；
+StorageBinding 的集中持久化、跨节点同步和 SQL 管理接口留待后续，不在本轮引入新的
+权威状态源。
+
+### 9.2 多绑定路由
+
+新增 `StorageBindingRegistry` 和按绑定路由的 DocumentStore：
+
+```python
+class StorageBindingRegistry(Protocol):
+    def get(self, binding_id: str) -> StorageBinding: ...
+    def list_enabled(self, role: str = "") -> list[StorageBinding]: ...
+
+class DocumentStoreRouter(Protocol):
+    def stat(self, ref: DocumentRef) -> ObjectStat: ...
+    def open_read(self, ref: DocumentRef): ...
+```
+
+文件整理请求必须显式携带 `DocumentRef` 或可解析为 DocumentRef 的输入，不依赖
+唯一 `business_root`。首次兼容阶段允许把绝对路径映射到唯一匹配的 binding；
+没有匹配或同时匹配多个 binding 时返回 `blocked`，不猜测来源。
+
+### 9.3 归档目标独立解析
+
+源绑定和目标绑定可以相同，也可以不同。归档首先生成逻辑 `ArchiveIntent`：
+
+```json
+{
+  "source_ref": {
+    "binding_id": "synology-office-primary",
+    "logical_uri": "business://office-primary/incoming/invoice.pdf"
+  },
+  "destination_status": "unresolved",
+  "candidate_target_binding_ids": [],
+  "project_id": "",
+  "archive_phase": "",
+  "content_hash": ""
+}
+```
+
+`ArchiveTargetResolver` 根据项目、文档类型、节点写权限、存储策略和人工选择解析
+目标 binding 与逻辑路径。没有唯一合法目标时保持
+`destination_status=unresolved` 并进入复核，不能默认使用 SynologyDrive，也不能
+默认使用源文件所在根。
+
+### 9.4 运行态保持节点本地
+
+所有 StorageBinding 都与节点本地运行态分离：
 
 ```text
-business_root          = E:\SynologyDrive
-runtime_workspace      = 节点本机非同步目录
-data_cleaning_workspace= <runtime_workspace>\数据清洗工作台
-project_files_dir      = <business_root>\项目文件
+storage_bindings[]
+  = 多个业务文件源/归档目标
+
+runtime_workspace
+  = 当前执行节点本机非同步目录
+
+data_cleaning_workspace
+  = <runtime_workspace>\数据清洗工作台
 ```
 
-`DataCleaningTools` 提供显式正式构造入口，例如：
+`DataCleaningTools` 的正式构造入口接收完整 Settings、Binding Registry、
+DocumentStore Router 和 ArchiveTargetResolver。测试保留隔离 binding 与临时运行
+目录，不访问真实业务存储。
 
-```python
-DataCleaningTools.from_app_settings(settings)
-```
-
-测试保留隔离构造：
-
-```python
-DataCleaningTools(workspace_dir=temp_dir)
-```
-
-正式入口不得仅把 `data_cleaning_workspace` 作为 `workspace_dir` 传入后重新推导
-归档根。归档动作必须保存逻辑目标和解析后的物理目标；本轮仍只生成计划。
+现有单值 `business_root` 仅作为兼容配置：加载时转换为一个显式 legacy binding，
+新领域对象和新接口不得继续把它当作唯一业务根。归档动作必须保存逻辑目标和执行时
+解析的物理目标；本轮仍只生成计划。
 
 ## 10. 项目治理文档分类
 
@@ -422,16 +501,19 @@ run artifact，不移动文件。
 8. RetrievalService 使用候选项目后才查询 PageIndex；
 9. LLM 裁决必须包含 Schema、证据、置信度和版本；
 10. LLM/PageIndex 缺失时归档动作不能为 `ready`；
-11. 正式 Settings 同时解析本机运行目录和 SynologyDrive 归档根；
-12. 临时测试构造不访问真实业务根；
-13. 项目 PRD 在解析和归档阶段统一为项目治理文档；
-14. 验证异常反馈项具有非空 ID、问题和决策；
-15. `overall_verdict` 正确进入 feedback form；
-16. LibreOffice 转换只写本机临时目录并在完成后清理；
-17. `.doc` 解析证据仍指向原文件；
-18. 转换器缺失、失败、超时和输出缺失返回稳定 blocked；
-19. `confirmed=False` 不生成 `archive_result.json`；
-20. 既有工具契约、归档门、治理和完整测试保持通过。
+11. Settings 支持多个 source/archive StorageBinding，并保持运行目录节点本地；
+12. legacy business_root 只生成兼容 binding，不成为唯一业务根；
+13. 绝对路径只能映射到唯一 binding，零匹配或多匹配返回 blocked；
+14. 源 binding 与目标 binding 独立，目标不唯一时保持 unresolved；
+15. 临时测试构造不访问任何真实业务绑定；
+16. 项目 PRD 在解析和归档阶段统一为项目治理文档；
+17. 验证异常反馈项具有非空 ID、问题和决策；
+18. `overall_verdict` 正确进入 feedback form；
+19. LibreOffice 转换只写本机临时目录并在完成后清理；
+20. `.doc` 解析证据仍指向原文件；
+21. 转换器缺失、失败、超时和输出缺失返回稳定 blocked；
+22. `confirmed=False` 不生成 `archive_result.json`；
+23. 既有工具契约、归档门、治理和完整测试保持通过。
 
 ### 14.2 真实样本只读回归
 
@@ -454,13 +536,14 @@ run artifact，不移动文件。
 - 旧版 DOC 经 LibreOffice 临时转换后进入标准解析；
 - 项目 PRD 始终为项目治理文档；
 - 反馈表没有空白项目；
-- runtime artifact 位于本机，归档候选根来自 SynologyDrive 配置；
+- runtime artifact 位于本机；样本来源绑定为 SynologyDrive，但归档目标由独立
+  ArchiveTargetResolver 解析，不假设 SynologyDrive 是唯一或默认目标；
 - 所有候选动作保持 `needs_review` 或 `blocked`；
 - 不生成实际归档结果，不移动文件。
 
 ## 15. 实施顺序
 
-1. 路径解耦与正式构造入口；
+1. 多 StorageBinding、路径解耦、DocumentStore 路由与正式构造入口；
 2. 统一 OCR Port、Registry、选择策略与 EasyOCR 默认禁用；
 3. PaddleOCR/RapidOCR Provider 探测和独立运行时边界；
 4. MinerU DocumentParser Provider 与 ProcessingPlanner；
@@ -483,6 +566,7 @@ run artifact，不移动文件。
 - EasyOCR 不再隐式执行；
 - 文件类型和业务归属不是纯函数最终决定，而是带检索证据的结构化裁决；
 - 发票语义不会污染项目字段；
+- SynologyDrive 仅作为可替换的 StorageBinding，不存在全局唯一业务根；
 - 路径、转换和反馈问题被自动化测试覆盖；
 - 相同真实样本只读回归满足第 14.2 节；
 - 所有真实物理归档仍停在人工确认门前。
