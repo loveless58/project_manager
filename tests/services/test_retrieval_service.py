@@ -113,3 +113,146 @@ def test_invoice_line_items_do_not_create_project_match_or_index_request(tmp_pat
     assert result.status == "needs_review"
     assert result.candidates == ()
     assert index.requests == []
+
+
+def test_path_hint_alone_needs_review_and_never_indexes(tmp_path):
+    index = RecordingIndex()
+    candidate = {
+        "id": "candidate-1",
+        "parties": {"buyer": {}, "seller": {}},
+        "facts": {},
+        "path_hints": ["contracts/acme"],
+        "documents": [{
+            "path": str(tmp_path / "contract.pdf"),
+            "document_version_id": "contract-v1",
+            "content_hash": "a" * 64,
+            "media_type": "application/pdf",
+            "page_count": 30,
+        }],
+    }
+
+    result = RetrievalService(
+        StaticContext([candidate]), index
+    ).find_business_candidates(
+        BusinessContextQuery("invoice", {"path_hint": "contracts/acme"}, ())
+    )
+
+    assert result.status == "needs_review"
+    assert result.candidates == ()
+    assert index.requests == []
+
+
+def test_duplicate_document_identity_is_indexed_once_at_service_boundary(tmp_path):
+    index = RecordingIndex()
+    document = {
+        "path": str(tmp_path / "contract.pdf"),
+        "document_version_id": "shared-version-v1",
+        "content_hash": "a" * 64,
+        "media_type": "application/pdf",
+        "page_count": 30,
+    }
+    candidates = [
+        {
+            "id": "candidate-1",
+            "parties": {"buyer": {"tax_id": "91310001"}, "seller": {}},
+            "facts": {},
+            "documents": [document],
+        },
+        {
+            "id": "candidate-2",
+            "parties": {"buyer": {"tax_id": "91310001"}, "seller": {}},
+            "facts": {},
+            "documents": [dict(document)],
+        },
+    ]
+
+    result = RetrievalService(
+        StaticContext(candidates), index
+    ).find_business_candidates(
+        BusinessContextQuery("invoice", {"buyer": {"tax_id": "91310001"}}, ())
+    )
+
+    assert result.status == "matched"
+    assert [request.document_version_id for request in index.requests] == [
+        "shared-version-v1"
+    ]
+
+
+def test_tax_id_conflict_requires_review_and_never_indexes(tmp_path):
+    index = RecordingIndex()
+    candidate = {
+        "id": "candidate-1",
+        "parties": {
+            "buyer": {"name": "Acme Limited", "tax_id": "91310001"},
+            "seller": {},
+        },
+        "facts": {},
+        "documents": [{
+            "path": str(tmp_path / "contract.pdf"),
+            "document_version_id": "contract-v1",
+            "content_hash": "a" * 64,
+            "media_type": "application/pdf",
+            "page_count": 30,
+        }],
+    }
+
+    result = RetrievalService(
+        StaticContext([candidate]), index
+    ).find_business_candidates(
+        BusinessContextQuery(
+            "invoice",
+            {"buyer": {"name": "Acme Limited", "tax_id": "99990000"}},
+            (),
+        )
+    )
+
+    assert result.status == "needs_review"
+    assert result.candidates == ()
+    assert result.conflicts[0]["field"] == "buyer.tax_id"
+    assert result.conflicts[0]["code"] == "BUSINESS_CONTEXT.CONFLICT"
+    assert "91310001" not in str(result.conflicts)
+    assert "99990000" not in str(result.conflicts)
+    assert index.requests == []
+
+
+def test_blocked_structure_index_is_diagnostic_not_evidence(tmp_path):
+    class BlockedIndex(RecordingIndex):
+        def index(self, request):
+            self.requests.append(request)
+            return StructureIndexResult(
+                "blocked",
+                "recording",
+                "",
+                (),
+                "INDEX.PROVIDER_UNAVAILABLE",
+                "hidden provider detail",
+            )
+
+    index = BlockedIndex()
+    candidate = {
+        "id": "candidate-1",
+        "parties": {"buyer": {"tax_id": "91310001"}, "seller": {}},
+        "facts": {},
+        "documents": [{
+            "path": str(tmp_path / "contract.pdf"),
+            "document_version_id": "contract-v1",
+            "content_hash": "a" * 64,
+            "media_type": "application/pdf",
+            "page_count": 30,
+        }],
+    }
+
+    result = RetrievalService(
+        StaticContext([candidate]), index
+    ).find_business_candidates(
+        BusinessContextQuery("invoice", {"buyer": {"tax_id": "91310001"}}, ())
+    )
+
+    assert not any(ref.get("kind") == "structure_index" for ref in result.evidence_refs)
+    assert result.diagnostics[-1] == {
+        "code": "BUSINESS_CONTEXT.STRUCTURE_INDEX_FAILED",
+        "candidate_id": "candidate-1",
+        "provider": "recording",
+        "status": "blocked",
+        "error_code": "INDEX.PROVIDER_UNAVAILABLE",
+    }

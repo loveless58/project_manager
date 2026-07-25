@@ -97,3 +97,24 @@ def test_provider_rejects_invalid_catalog_with_stable_error(tmp_path, mutate):
         JsonBusinessContextProvider(_write_catalog(tmp_path, payload), registry)
 
     assert exc_info.value.code == "BUSINESS_CONTEXT.CATALOG_INVALID"
+
+
+def test_provider_rejects_duplicate_document_version_identity(tmp_path):
+    from integrations.business_context.json_provider import (
+        BusinessContextCatalogError,
+        JsonBusinessContextProvider,
+    )
+
+    business_root, registry = _registry(tmp_path)
+    document = business_root / "contract.pdf"
+    document.touch()
+    payload = _catalog(document)
+    duplicate = dict(payload["records"][0])
+    duplicate["id"] = "contract-002"
+    duplicate["documents"] = [dict(payload["records"][0]["documents"][0])]
+    payload["records"].append(duplicate)
+
+    with pytest.raises(BusinessContextCatalogError) as exc_info:
+        JsonBusinessContextProvider(_write_catalog(tmp_path, payload), registry)
+
+    assert exc_info.value.code == "BUSINESS_CONTEXT.CATALOG_INVALID"

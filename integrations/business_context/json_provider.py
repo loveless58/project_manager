@@ -63,6 +63,7 @@ class JsonBusinessContextProvider:
             raise BusinessContextCatalogError()
         records: list[dict[str, Any]] = []
         seen: set[str] = set()
+        seen_document_versions: set[str] = set()
         for raw_record in catalog["records"]:
             record = _mapping(raw_record)
             _only(record, _RECORD_FIELDS)
@@ -72,7 +73,7 @@ class JsonBusinessContextProvider:
             seen.add(record_id)
             parties = self._parties(record.get("parties"))
             facts = self._facts(record.get("facts"))
-            documents = self._documents(record.get("documents"))
+            documents = self._documents(record.get("documents"), seen_document_versions)
             hints = record.get("path_hints", [])
             if not isinstance(hints, list) or not all(_string(hint) for hint in hints):
                 raise BusinessContextCatalogError()
@@ -108,15 +109,21 @@ class JsonBusinessContextProvider:
             raise BusinessContextCatalogError()
         return dict(facts)
 
-    def _documents(self, raw: object) -> list[dict[str, Any]]:
+    def _documents(
+        self, raw: object, seen_document_versions: set[str]
+    ) -> list[dict[str, Any]]:
         if not isinstance(raw, list) or not raw:
             raise BusinessContextCatalogError()
         result: list[dict[str, Any]] = []
         for item in raw:
             document = _mapping(item)
             _only(document, _DOCUMENT_FIELDS)
-            if not _string(document.get("path")) or not _string(document.get("document_version_id")):
+            document_version_id = document.get("document_version_id")
+            if not _string(document.get("path")) or not _string(document_version_id):
                 raise BusinessContextCatalogError()
+            if document_version_id in seen_document_versions:
+                raise BusinessContextCatalogError()
+            seen_document_versions.add(document_version_id)
             digest = document.get("content_hash")
             if not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None:
                 raise BusinessContextCatalogError()
