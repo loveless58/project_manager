@@ -410,6 +410,29 @@ def test_concurrent_cache_writes_preserve_each_provider_identity(
     monkeypatch.setattr(kb, "KB_DOC_PATH", str(kb_document))
     cache_path = tmp_path / "cache" / "kb.json"
     rendezvous = threading.Barrier(2)
+    marker_published = threading.Event()
+    marker_call_lock = threading.Lock()
+    marker_calls = 0
+    original_replace = kb.os.replace
+
+    def replace_with_concurrent_loser(source, destination):
+        nonlocal marker_calls
+        if Path(destination) != cache_path:
+            return original_replace(source, destination)
+
+        with marker_call_lock:
+            marker_calls += 1
+            call_number = marker_calls
+        if call_number == 1:
+            try:
+                return original_replace(source, destination)
+            finally:
+                marker_published.set()
+
+        assert marker_published.wait(timeout=5)
+        raise PermissionError(13, "synthetic concurrent marker replace conflict")
+
+    monkeypatch.setattr(kb.os, "replace", replace_with_concurrent_loser)
 
     class ConcurrentStructureIndex:
         name = "recording"
@@ -472,6 +495,7 @@ def test_concurrent_cache_writes_preserve_each_provider_identity(
         first_future.result(timeout=10)
         second_future.result(timeout=10)
 
+    assert marker_calls == 2
     assert len(first.requests) == len(second.requests) == 1
 
     kb.get_kb_structure(structure_index=first, cache_path=cache_path, managed_cache_root=cache_path.parent)

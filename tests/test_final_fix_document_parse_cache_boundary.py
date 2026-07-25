@@ -193,3 +193,41 @@ def test_clear_cache_rejects_business_file_and_preserves_it(
         kb.clear_cache(app_settings=settings, cache_path=business_file)
 
     assert business_file.read_text(encoding="utf-8") == "customer data"
+
+
+@pytest.mark.parametrize("existing_matches", [True, False])
+def test_atomic_cache_publish_handles_idempotent_replace_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_matches: bool,
+) -> None:
+    target = tmp_path / "cache" / "kb.json"
+    target.parent.mkdir(parents=True)
+    payload = {
+        "schema_version": "document_parse_kb_cache.v3",
+        "layout": "per-key-v1",
+    }
+    existing = payload if existing_matches else {
+        "schema_version": "document_parse_kb_cache.v2",
+        "layout": "legacy",
+    }
+    target.write_text(
+        json.dumps(existing, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    def lose_concurrent_replace(source: Path, destination: Path) -> None:
+        raise PermissionError(13, "synthetic concurrent replace conflict")
+
+    monkeypatch.setattr(kb.os, "replace", lose_concurrent_replace)
+
+    if existing_matches:
+        kb._write_json_atomic(target, payload, provider="recording")
+        assert json.loads(target.read_text(encoding="utf-8")) == payload
+    else:
+        with pytest.raises(kb.KnowledgeBaseUnavailable) as exc_info:
+            kb._write_json_atomic(target, payload, provider="recording")
+        assert exc_info.value.error_code == "DOCUMENT_PARSE.KB.CACHE_WRITE_FAILED"
+        assert json.loads(target.read_text(encoding="utf-8")) == existing
+
+    assert not list(target.parent.glob(".*.tmp"))

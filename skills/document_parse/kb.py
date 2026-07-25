@@ -238,6 +238,17 @@ def _load_cache_entry(cache_path: Path, key: str) -> Optional[Dict[str, Any]]:
     return result if isinstance(result, dict) else None
 
 
+def _json_file_matches(target: Path, payload: Dict[str, Any]) -> bool:
+    """Confirm that a concurrent publisher already achieved our exact state."""
+
+    try:
+        with target.open("r", encoding="utf-8") as source:
+            existing = json.load(source)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return existing == payload
+
+
 def _write_json_atomic(
     target: Path,
     payload: Dict[str, Any],
@@ -258,7 +269,19 @@ def _write_json_atomic(
             destination.flush()
             os.fsync(destination.fileno())
         os.replace(temporary, target)
-    except (OSError, TypeError, ValueError):
+    except OSError:
+        # Windows can reject one of two simultaneous replaces of the same
+        # marker.  Treat the loser as successful only when the winner wrote
+        # byte-semantically equivalent JSON; divergent state still fails
+        # closed.
+        if _json_file_matches(target, payload):
+            return
+        raise KnowledgeBaseUnavailable(
+            "DOCUMENT_PARSE.KB.CACHE_WRITE_FAILED",
+            provider,
+            "Knowledge-base cache could not be updated.",
+        ) from None
+    except (TypeError, ValueError):
         raise KnowledgeBaseUnavailable(
             "DOCUMENT_PARSE.KB.CACHE_WRITE_FAILED",
             provider,
