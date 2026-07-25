@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
+import stat
 import unicodedata
 from typing import Any
 
@@ -18,7 +20,10 @@ MAX_BYTES = 128 * 1024
 MAX_DEPTH = 24
 MAX_NODES = 4096
 MAX_COLLECTION = 256
-MAX_STRING_BYTES = 8192
+MAX_STRING_BYTES = 64 * 1024
+MAX_SCALAR_BYTES = 2048
+MAX_INPUT_FILE_BYTES = MAX_BYTES
+MAX_INTEGER_ABS = 10**18
 _ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _CODE = re.compile(r"^[A-Z][A-Z0-9_.]{1,127}$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
@@ -58,16 +63,39 @@ class ArchiveRunArtifactError(ValueError):
 
 
 def strict_json_load(path: str) -> dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as stream:
-        value = json.load(
-            stream,
-            object_pairs_hook=_unique_pairs,
-            parse_constant=lambda value: _reject_constant(value),
+    try:
+        before = os.lstat(path)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or getattr(before, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        ):
+            raise ArchiveRunArtifactError("JSON input is not a regular file")
+        if before.st_size > MAX_INPUT_FILE_BYTES:
+            raise ArchiveRunArtifactError("JSON input exceeds byte limit")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            current = os.fstat(descriptor)
+            if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+                raise ArchiveRunArtifactError("JSON input changed during open")
+            raw = os.read(descriptor, MAX_INPUT_FILE_BYTES + 1)
+            if os.read(descriptor, 1) or len(raw) > MAX_INPUT_FILE_BYTES:
+                raise ArchiveRunArtifactError("JSON input exceeds byte limit")
+        finally:
+            os.close(descriptor)
+        value = json.loads(
+            raw.decode("utf-8", "strict"), object_pairs_hook=_unique_pairs,
+            parse_constant=lambda item: _reject_constant(item),
         )
-    validate_json_tree(value, inspect_sensitive=False)
-    if type(value) is not dict:
-        raise ArchiveRunArtifactError("JSON root must be an object")
-    return value
+        validate_json_tree(value, inspect_sensitive=False)
+        if type(value) is not dict:
+            raise ArchiveRunArtifactError("JSON root must be an object")
+        return value
+    except ArchiveRunArtifactError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
+        raise ArchiveRunArtifactError("invalid JSON artifact") from None
 
 
 def validate_json_tree(value: object, *, inspect_sensitive: bool = True) -> None:
@@ -105,6 +133,330 @@ def validate_json_tree(value: object, *, inspect_sensitive: bool = True) -> None
             raise ArchiveRunArtifactError("non-JSON value")
         if encoded_bytes > MAX_BYTES:
             raise ArchiveRunArtifactError("JSON artifact exceeds size limit")
+
+
+
+def validate_archive_execution_plan(payload: dict[str, Any], run_id: str) -> None:
+    validate_json_tree(payload, inspect_sensitive=False)
+    if set(payload) not in (
+        {"schema_version", "run_id", "actions"},
+        {"schema_version", "run_id", "actions", "archive_intent_required"},
+    ):
+        raise ArchiveRunArtifactError("archive plan fields")
+    if payload.get("schema_version") != "archive_plan.v1":
+        raise ArchiveRunArtifactError("archive plan version")
+    if payload.get("run_id") != run_id:
+        raise ArchiveRunArtifactError("archive plan run identity")
+    if "archive_intent_required" in payload and type(payload["archive_intent_required"]) is not bool:
+        raise ArchiveRunArtifactError("archive plan intent flag")
+    actions = payload.get("actions")
+    if type(actions) is not list or len(actions) > MAX_COLLECTION:
+        raise ArchiveRunArtifactError("archive actions")
+    for action in actions:
+        _validate_legacy_archive_action(action, run_id)
+
+
+def _validate_legacy_archive_action(action: object, run_id: str) -> None:
+    if type(action) is not dict or set(action) - _ACTION_KEYS:
+        raise ArchiveRunArtifactError("archive action fields")
+    required = {"status", "source_file", "target_path", "blockers"}
+    if not required <= set(action):
+        raise ArchiveRunArtifactError("archive action required fields")
+    if action.get("schema_version", "archive_action.v1") != "archive_action.v1":
+        raise ArchiveRunArtifactError("archive action version")
+    if action.get("run_id", run_id) != run_id:
+        raise ArchiveRunArtifactError("archive action run identity")
+    if action.get("status") not in {"ready", "needs_review", "already_archived"}:
+        raise ArchiveRunArtifactError("archive action status")
+    if type(action.get("source_file")) is not str:
+        raise ArchiveRunArtifactError("archive action source")
+    if action.get("target_path") is not None and type(action.get("target_path")) is not str:
+        raise ArchiveRunArtifactError("archive action target")
+    blockers = action.get("blockers")
+    if type(blockers) is not list or any(type(item) is not str for item in blockers):
+        raise ArchiveRunArtifactError("archive action blockers")
+    if "confirmed" in action and type(action["confirmed"]) is not bool:
+        raise ArchiveRunArtifactError("archive action confirmation")
+    source_ref = action.get("source_ref")
+    if source_ref is not None:
+        if type(source_ref) is not dict or set(source_ref) != _REF_KEYS:
+            raise ArchiveRunArtifactError("archive action source ref")
+        _validate_ref(source_ref)
+    intent = action.get("archive_intent")
+    if intent is not None:
+        if type(intent) is not dict:
+            raise ArchiveRunArtifactError("archive action intent")
+        # A legacy unresolved intent marker is accepted only as non-executable data;
+        # complete Task5 intents must satisfy the full contract.
+        if set(intent) == {"schema_version", "destination_status"}:
+            if intent != {"schema_version": "archive_intent.v1", "destination_status": "unresolved"}:
+                raise ArchiveRunArtifactError("archive action intent marker")
+        else:
+            validate_archive_intent(intent, run_id)
+    decision = action.get("archive_decision")
+    if decision is not None and type(decision) is not dict:
+        raise ArchiveRunArtifactError("archive action decision")
+    for key in ("project_name", "document_type", "proposed_name", "target_dir", "archive_intent_ref"):
+        if key in action and action[key] is not None and type(action[key]) is not str:
+            raise ArchiveRunArtifactError("archive action text field")
+
+
+def validate_audit_review(payload: dict[str, Any], run_id: str) -> None:
+    validate_json_tree(payload, inspect_sensitive=False)
+    allowed = {
+        "schema_version", "run_id", "agent_role", "status", "timestamp",
+        "audit_verdict", "missing_artifacts", "policy_violations",
+        "human_confirmation_required", "human_feedback_required",
+        "required_feedback_items", "next_actions", "artifact_paths",
+        "loop_trace_summary", "artifact_path",
+    }
+    if set(payload) - allowed or not {"schema_version", "run_id"} <= set(payload):
+        raise ArchiveRunArtifactError("audit review fields")
+    if payload.get("schema_version") != "audit_review.v1":
+        raise ArchiveRunArtifactError("audit review version")
+    if payload.get("run_id") != run_id:
+        raise ArchiveRunArtifactError("audit review run identity")
+    for key in ("human_confirmation_required", "human_feedback_required"):
+        if key in payload and type(payload[key]) is not bool:
+            raise ArchiveRunArtifactError("audit review boolean")
+    for key in ("missing_artifacts", "required_feedback_items", "next_actions"):
+        if key in payload and (type(payload[key]) is not list or any(type(item) is not str for item in payload[key])):
+            raise ArchiveRunArtifactError("audit review list")
+    for key in ("agent_role", "status", "timestamp", "audit_verdict", "artifact_path"):
+        if key in payload and type(payload[key]) is not str:
+            raise ArchiveRunArtifactError("audit review text")
+    if "agent_role" in payload and payload["agent_role"] != "audit_agent":
+        raise ArchiveRunArtifactError("audit agent role")
+    if "status" in payload and payload["status"] not in {"success", "blocked", "failed"}:
+        raise ArchiveRunArtifactError("audit status")
+    if "audit_verdict" in payload and payload["audit_verdict"] not in {
+        "acceptable", "acceptable_with_warnings", "blocked",
+        "needs_human_review", "needs_human_feedback",
+    }:
+        raise ArchiveRunArtifactError("audit verdict")
+    if "artifact_paths" in payload:
+        paths = payload["artifact_paths"]
+        if type(paths) is not dict or any(type(key) is not str or type(value) is not str for key, value in paths.items()):
+            raise ArchiveRunArtifactError("audit artifact paths")
+    if "loop_trace_summary" in payload:
+        summary = payload["loop_trace_summary"]
+        if type(summary) is not dict or set(summary) != {"trace_id", "status", "round_count"}:
+            raise ArchiveRunArtifactError("audit trace summary")
+        if type(summary["trace_id"]) is not str or type(summary["status"]) is not str or type(summary["round_count"]) is not int or summary["round_count"] < 0:
+            raise ArchiveRunArtifactError("audit trace summary types")
+    if "policy_violations" in payload:
+        violations = payload["policy_violations"]
+        if type(violations) is not list:
+            raise ArchiveRunArtifactError("audit policy violations")
+        for violation in violations:
+            if type(violation) is not dict or set(violation) != {"id", "severity", "rule", "message"} or any(type(value) is not str for value in violation.values()):
+                raise ArchiveRunArtifactError("audit policy violation")
+
+
+def validate_review_queue(payload: dict[str, Any], run_id: str) -> None:
+    validate_json_tree(payload, inspect_sensitive=False)
+    required = {"schema_version", "run_id", "status", "items"}
+    if not required <= set(payload) or set(payload) - (required | {"feedback_summary"}):
+        raise ArchiveRunArtifactError("review queue fields")
+    if payload.get("schema_version") != "review_queue.v2":
+        raise ArchiveRunArtifactError("review queue version")
+    if payload.get("run_id") != run_id:
+        raise ArchiveRunArtifactError("review queue run identity")
+    if payload.get("status") not in {"clear", "needs_review", "reviewed"}:
+        raise ArchiveRunArtifactError("review queue status")
+    items = payload.get("items")
+    if type(items) is not list or len(items) > MAX_COLLECTION:
+        raise ArchiveRunArtifactError("review queue items")
+    allowed = {
+        "id", "item_id", "run_id", "type", "severity", "risk", "question",
+        "feedback_type", "allowed_decisions", "recommended_decision", "evidence",
+        "feedback_status", "feedback_ids", "feedback_decisions", "source_ref",
+        "blockers", "recommended_action", "project_name", "source_file",
+        "target_path", "missing_fields", "risk_reasons", "recommended_actions",
+        "project_overview_md", "file", "reason", "message", "verdict",
+        "block_reason", "low_confidence_items", "verification_path",
+        "feedback_updated_at",
+    }
+    for item in items:
+        if type(item) is not dict or set(item) - allowed:
+            raise ArchiveRunArtifactError("review queue item fields")
+        if "run_id" in item and item["run_id"] != run_id:
+            raise ArchiveRunArtifactError("review queue item run identity")
+        identifier = item.get("id", item.get("item_id"))
+        if identifier is not None and type(identifier) is not str:
+            raise ArchiveRunArtifactError("review queue item identity")
+        for key in ("allowed_decisions", "feedback_ids", "feedback_decisions", "blockers", "missing_fields", "risk_reasons", "recommended_actions"):
+            if key in item and (type(item[key]) is not list or any(type(value) is not str for value in item[key])):
+                raise ArchiveRunArtifactError("review queue item list")
+        if "evidence" in item and type(item["evidence"]) is not list:
+            raise ArchiveRunArtifactError("review queue evidence")
+        if "source_ref" in item:
+            source_ref = item["source_ref"]
+            if type(source_ref) is not dict or set(source_ref) != _REF_KEYS:
+                raise ArchiveRunArtifactError("review queue source ref")
+            _validate_ref(source_ref)
+        if "feedback_status" in item and item["feedback_status"] not in {"pending", "feedback_received"}:
+            raise ArchiveRunArtifactError("review queue feedback status")
+        if "low_confidence_items" in item and type(item["low_confidence_items"]) is not list:
+            raise ArchiveRunArtifactError("review queue low confidence items")
+        for key, value in item.items():
+            if key not in {"evidence", "source_ref", "feedback_decisions", "allowed_decisions", "feedback_ids", "blockers", "missing_fields", "risk_reasons", "recommended_actions", "low_confidence_items"} and value is not None and type(value) is not str:
+                raise ArchiveRunArtifactError("review queue item scalar")
+    if "feedback_summary" in payload:
+        summary = payload["feedback_summary"]
+        if type(summary) is not dict or set(summary) != {"updated", "pending", "updated_at"}:
+            raise ArchiveRunArtifactError("review feedback summary")
+        if type(summary["updated"]) is not int or summary["updated"] < 0:
+            raise ArchiveRunArtifactError("review feedback count")
+        if type(summary["pending"]) is not list or any(type(item) is not str for item in summary["pending"]):
+            raise ArchiveRunArtifactError("review feedback pending")
+        if type(summary["updated_at"]) is not str:
+            raise ArchiveRunArtifactError("review feedback timestamp")
+
+def normalize_native_parse_output(value: object) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise ArchiveRunArtifactError("native parse root")
+    if "schema_version" in value and value.get("schema_version") != "document.extract.v1":
+        raise ArchiveRunArtifactError("native parse version")
+    document_type = value.get("document_type") or "other"
+    fields = value.get("fields") or {}
+    classification = value.get("classification")
+    extracted_text = value.get("extracted_text", value.get("text", ""))
+    boundary = {
+        "document_type": document_type,
+        "fields": fields,
+        "classification": classification,
+        "extracted_text": extracted_text,
+    }
+    validate_json_tree(boundary)
+    _serialized_bytes(boundary)
+    if not _bounded_text(document_type, 128):
+        raise ArchiveRunArtifactError("native document type")
+    if type(fields) is not dict or type(extracted_text) is not str:
+        raise ArchiveRunArtifactError("native parse types")
+    candidate_fields = _scalar_candidate_fields(fields)
+    return {
+        "document_type": document_type,
+        "classification": classification,
+        "candidate_fields": candidate_fields,
+        "text": extracted_text,
+    }
+
+
+def validate_extracted_document_artifact(
+    payload: dict[str, Any], run_id: str,
+) -> None:
+    validate_json_tree(payload)
+    _serialized_bytes(payload)
+    expected = {
+        "schema_version", "run_id", "parse_artifact_ref", "source_ref",
+        "content_hash", "document_type", "classification", "candidate_fields",
+        "text_length",
+    }
+    if type(payload) is not dict or set(payload) != expected:
+        raise ArchiveRunArtifactError("extracted artifact fields")
+    if payload.get("schema_version") != "file_organization.extracted_document.v1":
+        raise ArchiveRunArtifactError("extracted artifact version")
+    _run_hash_ref(payload, run_id)
+    if payload.get("parse_artifact_ref") != f"artifact:parsed:{payload['content_hash'][:24]}":
+        raise ArchiveRunArtifactError("extracted parse identity")
+    if not _bounded_text(payload.get("document_type"), 128):
+        raise ArchiveRunArtifactError("extracted document type")
+    fields = payload.get("candidate_fields")
+    if type(fields) is not dict or fields != _scalar_candidate_fields(fields):
+        raise ArchiveRunArtifactError("extracted candidate fields")
+    _validate_classification(payload.get("classification"))
+    text_length = payload.get("text_length")
+    if type(text_length) is not int or not 0 <= text_length <= MAX_STRING_BYTES:
+        raise ArchiveRunArtifactError("extracted text length")
+
+
+def _scalar_candidate_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    direct = {
+        "invoice_number", "invoice_date", "amount", "tax_amount", "total_amount",
+        "buyer_name", "buyer_tax_id", "seller_name", "seller_tax_id",
+        "project_code", "project_name", "contract_code", "contract_name", "date",
+    }
+    result: dict[str, Any] = {}
+    for key, item in fields.items():
+        if key in direct:
+            if item is None:
+                continue
+            if type(item) is str:
+                if not _bounded_text(item, MAX_SCALAR_BYTES):
+                    raise ArchiveRunArtifactError("candidate scalar")
+                result[key] = item
+            elif type(item) in (int, float):
+                if type(item) is float and not math.isfinite(item):
+                    raise ArchiveRunArtifactError("candidate number")
+                if abs(item) > 10**15:
+                    raise ArchiveRunArtifactError("candidate number range")
+                result[key] = item
+            else:
+                raise ArchiveRunArtifactError("candidate scalar type")
+        elif key in {"buyer", "seller"}:
+            if item is None:
+                continue
+            if type(item) is not dict or set(item) - {"name", "tax_id"}:
+                raise ArchiveRunArtifactError("candidate party")
+            for nested_key, nested_value in item.items():
+                if not _bounded_text(nested_value, MAX_SCALAR_BYTES):
+                    raise ArchiveRunArtifactError("candidate party scalar")
+                result[f"{key}_{nested_key}"] = nested_value
+        elif key == "line_items":
+            if type(item) is not list:
+                raise ArchiveRunArtifactError("line items")
+            # Detail rows are intentionally excluded from the persisted/interpreter summary.
+    return result
+
+
+def _validate_classification(value: object) -> None:
+    base_fields = {
+        "document_type", "business_domain", "project_phase", "archive_phase",
+        "confidence", "evidence", "requires_review",
+    }
+    if type(value) is not dict or set(value) not in {
+        frozenset(base_fields), frozenset(base_fields | {"validation_errors"}),
+    }:
+        raise ArchiveRunArtifactError("classification fields")
+    for key in ("document_type", "business_domain"):
+        if not _bounded_text(value.get(key), 128):
+            raise ArchiveRunArtifactError("classification text")
+    for key in ("project_phase", "archive_phase"):
+        if value.get(key) is not None and not _bounded_text(value.get(key), 128):
+            raise ArchiveRunArtifactError("classification phase")
+    confidence = value.get("confidence")
+    if type(confidence) not in (int, float) or not math.isfinite(confidence) or not 0 <= confidence <= 1:
+        raise ArchiveRunArtifactError("classification confidence")
+    if type(value.get("requires_review")) is not bool:
+        raise ArchiveRunArtifactError("classification review flag")
+    for key in ("evidence", "validation_errors"):
+        if key not in value:
+            continue
+        items = value[key]
+        if type(items) is not list or any(not _bounded_text(item, 512) for item in items):
+            raise ArchiveRunArtifactError("classification list")
+
+
+def _bounded_text(value: object, limit: int) -> bool:
+    return (
+        type(value) is str
+        and value == value.strip()
+        and len(value.encode("utf-8")) <= limit
+        and not _contains_sensitive(value)
+    )
+
+
+def _serialized_bytes(value: object) -> bytes:
+    try:
+        encoded = json.dumps(
+            value, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        raise ArchiveRunArtifactError("JSON serialization") from None
+    if len(encoded) > MAX_BYTES:
+        raise ArchiveRunArtifactError("serialized artifact size")
+    return encoded
 
 
 def normalize_business_context(
@@ -307,16 +659,7 @@ def validate_archive_intent(intent: dict[str, Any], run_id: str) -> None:
         raise ArchiveRunArtifactError("archive destination status")
     if intent.get("intent_id") != f"archive-intent:{intent['content_hash'][:24]}":
         raise ArchiveRunArtifactError("archive intent identity")
-    classification = intent.get("classification")
-    classification_fields = {
-        "document_type", "business_domain", "project_phase", "archive_phase",
-        "confidence", "evidence", "requires_review",
-    }
-    if type(classification) is not dict or set(classification) not in {
-        frozenset(classification_fields),
-        frozenset(classification_fields | {"validation_errors"}),
-    }:
-        raise ArchiveRunArtifactError("classification fields")
+    _validate_classification(intent.get("classification"))
 
 
 def validate_archive_action(action: dict[str, Any], run_id: str) -> None:
@@ -340,9 +683,13 @@ def _run_hash_ref(value: dict[str, Any], run_id: str) -> None:
     digest = value.get("content_hash")
     if type(digest) is not str or not _HASH.fullmatch(digest):
         raise ArchiveRunArtifactError("content hash")
-    ref = value.get("source_ref")
+    _validate_ref(value.get("source_ref"))
+
+
+def _validate_ref(ref: object) -> None:
     if type(ref) is not dict or set(ref) != _REF_KEYS or any(
-        type(item) is not str or not item or item != item.strip() for item in ref.values()
+        type(item) is not str or not item or item != item.strip() or _contains_sensitive(item)
+        for item in ref.values()
     ):
         raise ArchiveRunArtifactError("source ref")
 
@@ -391,7 +738,10 @@ def _reject_constant(value: str) -> None:
 
 __all__ = [
     "ArchiveRunArtifactError", "normalize_business_context",
+    "validate_archive_execution_plan", "validate_audit_review", "validate_review_queue",
+    "normalize_native_parse_output",
     "normalize_interpretation_output", "strict_json_load", "validate_archive_action",
     "validate_archive_intent", "validate_candidate_interpretation",
-    "validate_json_tree", "validate_task5_collection_artifact",
+    "validate_extracted_document_artifact", "validate_json_tree",
+    "validate_task5_collection_artifact",
 ]

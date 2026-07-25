@@ -42,10 +42,15 @@ from contracts.archive_intent import ArchiveIntent
 from contracts.archive_run_artifacts import (
     normalize_business_context,
     normalize_interpretation_output,
+    normalize_native_parse_output,
     strict_json_load,
     validate_archive_action,
+    validate_archive_execution_plan,
+    validate_audit_review,
+    validate_review_queue,
     validate_archive_intent,
     validate_candidate_interpretation,
+    validate_extracted_document_artifact,
     validate_task5_collection_artifact,
 )
 from contracts.feedback_schema import (
@@ -1629,34 +1634,46 @@ class DataCleaningTools:
                 trace.append({"stage": "native_parse", "source_ref": ref_payload, "status": "blocked", "blocked_reason": code})
                 continue
 
+            parse_ref = f"artifact:parsed:{content_hash[:24]}"
+            try:
+                native_summary = normalize_native_parse_output(extracted)
+                classification = normalize_document_classification(
+                    native_summary["classification"],
+                    fallback_document_type=native_summary["document_type"],
+                )
+                fields = native_summary["candidate_fields"]
+                text = native_summary["text"]
+                extracted_payload = {
+                    "schema_version": "file_organization.extracted_document.v1",
+                    "run_id": run_id,
+                    "parse_artifact_ref": parse_ref,
+                    "source_ref": ref_payload,
+                    "content_hash": content_hash,
+                    "document_type": native_summary["document_type"],
+                    "classification": classification,
+                    "candidate_fields": fields,
+                    "text_length": len(text),
+                }
+                validate_extracted_document_artifact(extracted_payload, run_id)
+            except (TypeError, ValueError):
+                code = "DOCUMENT_PARSE.SCHEMA_INVALID"
+                failures.append({"source_ref": ref_payload, "stage": "native_parse", "status": "blocked", "blocked_reason": code})
+                archive_actions.append(self._review_only_archive_action(run_id, source_ref, [code]))
+                trace.append({"stage": "native_parse", "source_ref": ref_payload, "status": "blocked", "blocked_reason": code})
+                continue
+
             manifest_files.append({
                 "run_id": run_id, "source_ref": ref_payload,
                 "name": os.path.basename(path), "content_hash": content_hash,
             })
-            parse_ref = f"artifact:parsed:{content_hash[:24]}"
-            classification = normalize_document_classification(
-                extracted.get("classification"),
-                fallback_document_type=extracted.get("document_type") or "未分类",
-            )
-            fields = self._interpretation_fields(dict(extracted.get("fields") or {}))
-            text = str(extracted.get("extracted_text") or extracted.get("text") or "")
             evidence_pack = {
                 "parse_artifact_ref": parse_ref,
-                "document_type_hint": self._interpretation_document_type(str(extracted.get("document_type") or "other")),
+                "document_type_hint": self._interpretation_document_type(native_summary["document_type"]),
                 "candidate_fields": fields,
                 "text_segments": ([{"id": "text-0", "text": text[:4000]}] if text else []),
             }
             extracted_path = os.path.join(extracted_dir, f"{content_hash[:24]}_extracted.json")
-            self._save_structured_json(extracted_path, {
-                "schema_version": "file_organization.extracted_document.v1",
-                "parse_artifact_ref": parse_ref,
-                "source_ref": ref_payload,
-                "content_hash": content_hash,
-                "document_type": extracted.get("document_type", ""),
-                "classification": classification,
-                "candidate_fields": fields,
-                "text_length": len(text),
-            })
+            self._save_structured_json(extracted_path, extracted_payload)
             structured_outputs.append(extracted_path)
 
             if self.retrieval_service is None:
@@ -1689,7 +1706,7 @@ class DataCleaningTools:
             candidate_interpretations.append(interpretation_entry)
 
             relations = interpretation.get("relations") if isinstance(interpretation.get("relations"), list) else []
-            explicit_ids = tuple(
+            business_candidate_ids = tuple(
                 relation.get("target_candidate_id")
                 for relation in relations
                 if isinstance(relation, dict) and isinstance(relation.get("target_candidate_id"), str)
@@ -1699,8 +1716,10 @@ class DataCleaningTools:
                     "unresolved", (), "", ("ARCHIVE_TARGET.CAPABILITY_DISABLED", "ARCHIVE_TARGET.UNRESOLVED"),
                 )
             else:
-                resolution = self.archive_target_resolver.resolve(source_ref, explicit_ids)
-            project_id = explicit_ids[0] if len(explicit_ids) == 1 else ""
+                # A business candidate identity is not a storage-binding selection.
+                # Task5 has no trusted mapping or explicit target-selection input.
+                resolution = self.archive_target_resolver.resolve(source_ref, ())
+            project_id = business_candidate_ids[0] if len(business_candidate_ids) == 1 else ""
             intent = ArchiveIntent(
                 source_ref=source_ref,
                 destination_status=resolution.destination_status,
@@ -2783,15 +2802,19 @@ class DataCleaningTools:
             return self._blocked_archive_execution(run_id, "archive_plan_not_found")
         try:
             plan = self._load_json_file(plan_path)
+            validate_archive_execution_plan(plan, run_id)
+            actions = plan["actions"]
+            audit_path = os.path.join(run_dir, "audit_review.json")
+            review_queue_path = os.path.join(run_dir, "review_queue.json")
+            audit_review = self._load_json_file(audit_path) if os.path.exists(audit_path) else {}
+            review_queue = self._load_json_file(review_queue_path) if os.path.exists(review_queue_path) else {}
+            if audit_review:
+                validate_audit_review(audit_review, run_id)
+            if review_queue:
+                validate_review_queue(review_queue, run_id)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
-            return self._blocked_archive_execution(run_id, "archive_plan_invalid", str(exc))
-        actions = plan.get("actions")
-        if plan.get("run_id") != run_id or not isinstance(actions, list) or any(
-            not isinstance(action, dict)
-            or ("run_id" in action and action.get("run_id") != run_id)
-            for action in actions
-        ):
-            return self._blocked_archive_execution(run_id, "archive_plan_run_id_mismatch")
+            blocker = "artifact_run_id_mismatch" if "run identity" in str(exc) else "archive_plan_invalid"
+            return self._blocked_archive_execution(run_id, blocker, str(exc))
 
         registered_intent_run = self._is_registered_archive_intent_run(run_id)
         if re.fullmatch(r"run_[0-9a-f]{32}", run_id) and not registered_intent_run:
@@ -2813,7 +2836,10 @@ class DataCleaningTools:
                 "message": "Archive plan prepared but not executed. Call with confirmed=True to move files.",
             }
 
-        gate = self._evaluate_archive_execution_gate(run_id=run_id, run_dir=run_dir, confirmed=confirmed)
+        gate = self._evaluate_archive_execution_gate(
+            run_id=run_id, run_dir=run_dir, confirmed=confirmed,
+            audit_review=audit_review, review_queue=review_queue,
+        )
         if gate["status"] != "passed":
             return {
                 "schema_version": "archive_plan.execute.v1",
@@ -2936,22 +2962,10 @@ class DataCleaningTools:
             "artifacts": artifacts,
         }
 
-    def _evaluate_archive_execution_gate(self, run_id: str, run_dir: str, confirmed: bool) -> Dict[str, Any]:
-        audit_path = os.path.join(run_dir, "audit_review.json")
-        review_queue_path = os.path.join(run_dir, "review_queue.json")
-        audit_review = self._load_json_file(audit_path) if os.path.exists(audit_path) else {}
-        review_queue = self._load_json_file(review_queue_path) if os.path.exists(review_queue_path) else {}
-        if any(
-            payload and payload.get("run_id") != run_id
-            for payload in (audit_review, review_queue)
-        ):
-            return {
-                "schema_version": "archive_execution_gate.v1",
-                "status": "blocked",
-                "run_id": run_id,
-                "blockers": ["artifact_run_id_mismatch"],
-                "pending_required_feedback_items": [],
-            }
+    def _evaluate_archive_execution_gate(
+        self, run_id: str, run_dir: str, confirmed: bool,
+        audit_review: Dict[str, Any], review_queue: Dict[str, Any],
+    ) -> Dict[str, Any]:
         gate = evaluate_archive_execution_gate(
             run_id=run_id,
             confirmed=confirmed,

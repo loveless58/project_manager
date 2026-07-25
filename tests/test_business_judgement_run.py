@@ -429,6 +429,96 @@ def test_atomic_json_publish_rejects_nan_without_overwriting_existing_file(tmp_p
     assert not list(tmp_path.glob(".artifact-*"))
 
 
+def test_business_candidate_id_matching_archive_binding_is_not_a_storage_selection(tmp_path: Path) -> None:
+    from integrations.document_store import DocumentStoreRouter, LocalDocumentStore
+    from services.archive_targets import ArchiveTargetResolver
+    from services.document_interpretation import DocumentInterpretationService
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = source_root / "contract.md"
+    source.write_text(f"合同\n合同编号：{CONTRACT_CODE}", encoding="utf-8")
+    registry = StorageBindingRegistry([
+        _binding("source", source_root, ("source",)),
+        _binding(CANDIDATE_ID, tmp_path / "archive", ("archive_target",), readable=False, writable=True),
+    ])
+    retrieval = StaticRetrieval(_matched_context())
+    tools = DataCleaningTools(
+        workspace_dir=str(tmp_path / "runtime"),
+        storage_binding_registry=registry,
+        document_store_router=DocumentStoreRouter(registry, {"source": LocalDocumentStore(source_root)}),
+        retrieval_service=retrieval,
+        interpretation_service=DocumentInterpretationService(retrieval, SchemaValidInterpreter()),
+        archive_target_resolver=ArchiveTargetResolver(registry),
+    )
+
+    result = tools.prepare_file_organization_run([str(source)])
+
+    intent = result["archive_intents"][0]
+    assert intent["project_id"] == CANDIDATE_ID
+    assert intent["destination_status"] == "unresolved"
+    assert intent["candidate_target_binding_ids"] == []
+    assert "ARCHIVE_TARGET.UNRESOLVED" in intent["blockers"]
+
+
+@pytest.mark.parametrize("malicious_kind", ["path", "credential", "deep", "oversized", "nan"])
+def test_malicious_native_parse_is_rejected_before_extracted_artifact_persistence(
+    tmp_path: Path, malicious_kind: str,
+) -> None:
+    tools, source, retrieval, _ = _configured_tools(
+        tmp_path, interpretation=CountingInterpretation(),
+    )
+    unsafe_value = ""
+    fields: dict[str, object] = {"contract_code": CONTRACT_CODE}
+    text_value = "合同"
+    if malicious_kind == "path":
+        unsafe_value = str((tmp_path / "physical-source").resolve())
+        fields["contract_name"] = unsafe_value
+    elif malicious_kind == "credential":
+        unsafe_value = "Bearer" + " " + "-".join(("synthetic", "credential"))
+        fields["contract_name"] = unsafe_value
+    elif malicious_kind == "deep":
+        nested: dict[str, object] = {}
+        cursor = nested
+        for _ in range(40):
+            child: dict[str, object] = {}
+            cursor["child"] = child
+            cursor = child
+        fields["line_items"] = [nested]
+        unsafe_value = "child"
+    elif malicious_kind == "oversized":
+        unsafe_value = "Z" * 200_000
+        text_value = unsafe_value
+    else:
+        fields["amount"] = float("nan")
+    parser_result = {
+        "schema_version": "document.extract.v1",
+        "document_type": "合同",
+        "classification": None,
+        "fields": fields,
+        "extracted_text": text_value,
+    }
+
+    with patch.object(tools, "extract_document", return_value=parser_result):
+        result = tools.prepare_file_organization_run([str(source)])
+
+    run_dir = Path(result["artifacts"]["run_dir"])
+    persisted = "\n".join(
+        artifact.read_text(encoding="utf-8") for artifact in run_dir.glob("*.json")
+    )
+    assert result["status"] == "failed"
+    assert result["failures"][0]["blocked_reason"] == "DOCUMENT_PARSE.SCHEMA_INVALID"
+    assert result["structured_outputs"] == []
+    assert not list((run_dir / "extracted").glob("*_extracted.json"))
+    assert result["candidate_interpretations"] == []
+    assert result["archive_intents"] == []
+    assert retrieval.calls == 0
+    if unsafe_value and len(unsafe_value) < 10_000:
+        assert unsafe_value not in persisted
+    assert "NaN" not in persisted
+
+
 @pytest.mark.parametrize(
     ("candidate_ids", "binding_options", "expected_status"),
     [

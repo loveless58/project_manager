@@ -354,6 +354,106 @@ class ArchiveExecutionGateTests(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(run_dir, "archive_execution_gate.json")))
             self.assertFalse(os.path.exists(os.path.join(run_dir, "archive_result.json")))
 
+    def test_execute_archive_plan_rejects_invalid_legacy_artifact_schemas_without_side_effects(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        cases = (
+            ("plan_unknown", "plan", {"unexpected": True}),
+            ("plan_version", "plan", {"schema_version": "archive_plan.v0"}),
+            ("action_unknown", "action", {"unexpected": True}),
+            ("action_blockers", "action", {"blockers": None}),
+            ("audit_unknown", "audit", {"unexpected": True}),
+            ("audit_version", "audit", {"schema_version": "audit_review.v0"}),
+            ("audit_type", "audit", {"human_feedback_required": "yes"}),
+            ("queue_unknown", "queue", {"unexpected": True}),
+            ("queue_version", "queue", {"schema_version": "review_queue.v1"}),
+            ("queue_items_type", "queue", {"items": {}}),
+            ("queue_item_unknown", "queue_item", {"unexpected": True}),
+        )
+        for name, artifact_kind, changes in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                run_id = f"run_schema_{name}"
+                run_dir = Path(td) / "runs" / run_id
+                run_dir.mkdir(parents=True)
+                source = Path(td) / "source.docx"
+                target = Path(td) / "archive" / "source.docx"
+                source.write_text("source", encoding="utf-8")
+                action = {
+                    "status": "ready", "source_file": str(source),
+                    "target_path": str(target), "blockers": [],
+                }
+                plan = {"schema_version": "archive_plan.v1", "run_id": run_id, "actions": [action]}
+                audit = {
+                    "schema_version": "audit_review.v1", "run_id": run_id,
+                    "audit_verdict": "acceptable", "human_feedback_required": False,
+                    "required_feedback_items": [],
+                }
+                queue = {
+                    "schema_version": "review_queue.v2", "run_id": run_id,
+                    "status": "clear", "items": [],
+                }
+                if artifact_kind == "plan":
+                    plan.update(changes)
+                elif artifact_kind == "action":
+                    action.update(changes)
+                elif artifact_kind == "audit":
+                    audit.update(changes)
+                elif artifact_kind == "queue":
+                    queue.update(changes)
+                else:
+                    queue["status"] = "needs_review"
+                    queue["items"] = [{
+                        "id": "R001", "run_id": run_id, "risk": "P1",
+                        "recommended_decision": "defer", "feedback_status": "pending",
+                        **changes,
+                    }]
+                self._write_json(str(run_dir / "planned_archive_actions.json"), plan)
+                self._write_json(str(run_dir / "audit_review.json"), audit)
+                self._write_json(str(run_dir / "review_queue.json"), queue)
+
+                result = DataCleaningTools(workspace_dir=td).execute_archive_plan(run_id, confirmed=True)
+
+                self.assertEqual(result["status"], "blocked")
+                self.assertEqual(result["moved"], 0)
+                self.assertTrue(source.exists())
+                self.assertFalse(target.exists())
+                self.assertFalse((run_dir / "archive_execution_gate.json").exists())
+                self.assertFalse((run_dir / "archive_result.json").exists())
+
+    def test_execute_archive_plan_rejects_oversized_json_and_huge_integer_before_gate(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        for name in ("oversized_bytes", "huge_integer"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as td:
+                run_id = f"run_{name}"
+                run_dir = Path(td) / "runs" / run_id
+                run_dir.mkdir(parents=True)
+                source = Path(td) / "source.docx"
+                target = Path(td) / "archive" / "source.docx"
+                source.write_text("source", encoding="utf-8")
+                if name == "oversized_bytes":
+                    raw = (
+                        '{"schema_version":"archive_plan.v1","run_id":"' + run_id
+                        + '","actions":[' + " " * 300_000 + ']} '
+                    ).encode("utf-8")
+                else:
+                    raw = (
+                        '{"schema_version":"archive_plan.v1","run_id":"' + run_id
+                        + '","actions":[{"status":"ready","source_file":'
+                        + json.dumps(str(source)) + ',"target_path":' + json.dumps(str(target))
+                        + ',"blockers":[],"confirmed":' + "9" * 4_000 + '}]} '
+                    ).encode("utf-8")
+                (run_dir / "planned_archive_actions.json").write_bytes(raw)
+
+                result = DataCleaningTools(workspace_dir=td).execute_archive_plan(run_id, confirmed=True)
+
+                self.assertEqual(result["status"], "blocked")
+                self.assertEqual(result["moved"], 0)
+                self.assertTrue(source.exists())
+                self.assertFalse(target.exists())
+                self.assertFalse((run_dir / "archive_execution_gate.json").exists())
+                self.assertFalse((run_dir / "archive_result.json").exists())
+
     def test_archive_execution_gate_contract_blocks_pending_required_items(self):
         from contracts.archive_gate_schema import evaluate_archive_execution_gate
 
