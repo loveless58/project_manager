@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Any, Dict, List
 
 
@@ -67,10 +68,6 @@ TYPE_DEFAULTS = {
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _CONTENT_HASH = re.compile(r"^[0-9a-f]{64}$")
-_CREDENTIAL = re.compile(
-    r"(?<!\w)(?:(?:authorization|token|api[_-]?(?:key|token)|password)\s*[:=]\s*\S|bearer\s+\S)",
-    re.IGNORECASE,
-)
 _BACKSLASH = chr(92)
 _FORWARD_SLASH = chr(47)
 _FILE_URI_PREFIX = "file:" + _FORWARD_SLASH * 3
@@ -79,6 +76,17 @@ _ABSOLUTE_PATH = re.compile(
     rf"{re.escape(_BACKSLASH * 2)}|{re.escape(_FORWARD_SLASH * 2)}|"
     rf"{re.escape(_FORWARD_SLASH)}|{re.escape(_FILE_URI_PREFIX)})",
     re.IGNORECASE,
+)
+_EMBEDDED_PATH = re.compile(
+    rf"(?:(?:^|[^a-z0-9])[a-z]:[{re.escape(_BACKSLASH + _FORWARD_SLASH)}]|"
+    rf"{re.escape(_BACKSLASH * 2)}[^\s{re.escape(_BACKSLASH)}]+{re.escape(_BACKSLASH)}|"
+    rf"file:\s*{re.escape(_FORWARD_SLASH)}{{2,}}|"
+    rf"(?:^|[\s\"'=:(]){re.escape(_FORWARD_SLASH)}(?!{re.escape(_FORWARD_SLASH)})[^\s]+)",
+    re.IGNORECASE,
+)
+_CREDENTIAL_MARKERS = (
+    "author" + "ization", "bear" + "er", "to" + "ken", "api_key",
+    "api-key", "password", "x-amz-credential", "x-amz-signature",
 )
 _TRACE_TEXT_FIELDS = {
     "project_name", "reason", "recommended_action", "verdict", "block_reason",
@@ -130,16 +138,12 @@ def normalize_review_queue_item(run_id: str, raw_item: Dict[str, Any], index: in
     identifier = raw_item.get("id")
     if not _safe_text(identifier) or not _IDENTIFIER.fullmatch(identifier):
         identifier = f"R{index:03d}"
-    allowed = _safe_string_list(raw_item.get("allowed_decisions"), identifiers=True)
-    recommended = raw_item.get("recommended_decision")
-    if not _safe_text(recommended) or recommended not in (allowed or defaults["allowed_decisions"]):
-        recommended = defaults["recommended_decision"]
+    allowed = list(defaults["allowed_decisions"])
+    recommended = defaults["recommended_decision"]
     question = raw_item.get("question")
     if not _safe_text(question):
         question = _question_for_item(projected | {"type": item_type}, defaults["question"])
-    feedback_type = raw_item.get("feedback_type")
-    if not _safe_text(feedback_type):
-        feedback_type = defaults["feedback_type"]
+    feedback_type = defaults["feedback_type"]
     risk = raw_item.get("risk")
     if not _safe_text(risk):
         risk = SEVERITY_TO_RISK.get(severity, "P2")
@@ -152,7 +156,7 @@ def normalize_review_queue_item(run_id: str, raw_item: Dict[str, Any], index: in
         "risk": risk,
         "question": question,
         "feedback_type": feedback_type,
-        "allowed_decisions": allowed or list(defaults["allowed_decisions"]),
+        "allowed_decisions": allowed,
         "recommended_decision": recommended,
     }
     normalized["evidence"] = projected.get("evidence") or _evidence_for_item(normalized)
@@ -278,10 +282,39 @@ def _safe_string_list(value: Any, *, identifiers: bool = False) -> List[str]:
     return result
 
 
+def review_value_contains_sensitive_text(value: Any) -> bool:
+    if type(value) is str:
+        normalized = unicodedata.normalize("NFKC", value).casefold()
+        if _EMBEDDED_PATH.search(normalized):
+            return True
+        for marker in _CREDENTIAL_MARKERS:
+            position = normalized.find(marker)
+            while position >= 0:
+                before = normalized[position - 1] if position else ""
+                end = position + len(marker)
+                after = normalized[end] if end < len(normalized) else ""
+                if (not before.isalnum()) and (
+                    marker in {"bear" + "er", "author" + "ization"}
+                    or after in {"", " ", "\t", ":", "=", "?", "&"}
+                ):
+                    return True
+                position = normalized.find(marker, position + 1)
+        return False
+    if type(value) is dict:
+        return any(
+            review_value_contains_sensitive_text(key)
+            or review_value_contains_sensitive_text(item)
+            for key, item in value.items()
+        )
+    if type(value) in {list, tuple}:
+        return any(review_value_contains_sensitive_text(item) for item in value)
+    return False
+
+
 def _safe_text(value: Any, *, allow_path_like: bool = False) -> bool:
     if type(value) is not str or not value or value != value.strip():
         return False
-    if len(value.encode("utf-8")) > 2048 or _CREDENTIAL.search(value):
+    if len(value.encode("utf-8")) > 2048 or review_value_contains_sensitive_text(value):
         return False
     return allow_path_like or not _ABSOLUTE_PATH.search(value)
 
@@ -303,4 +336,5 @@ def _validate_raw_item(value: Any) -> None:
 __all__ = [
     "MAX_REVIEW_BYTES", "TYPE_DEFAULTS", "normalize_review_queue",
     "normalize_review_queue_item", "review_trace_projection",
+    "review_value_contains_sensitive_text",
 ]

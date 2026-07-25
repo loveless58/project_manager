@@ -10,6 +10,25 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
+def _register_archive_intent_run(workspace: str | Path, run_id: str) -> None:
+    registry = Path(workspace) / "runs" / ".archive_intent_registry"
+    registry.mkdir(parents=True, exist_ok=True)
+    (registry / f"{run_id}.json").write_text(json.dumps({
+        "schema_version": "archive_intent_run_registration.v1",
+        "run_id": run_id,
+    }), encoding="utf-8")
+
+
+def _review_item_hash(workspace: str | Path, run_id: str, item_id: str) -> str:
+    from contracts.feedback_form_schema import review_item_snapshot_hash
+
+    queue = json.loads(
+        (Path(workspace) / "runs" / run_id / "review_queue.json").read_text(encoding="utf-8")
+    )
+    item = next(item for item in queue["items"] if item.get("id") == item_id)
+    return review_item_snapshot_hash(queue, item)
+
+
 class FeedbackFormTests(unittest.TestCase):
     def test_feedback_reads_verdict_with_explicit_precedence(self):
         from contracts.feedback_form_schema import build_feedback_form
@@ -102,6 +121,7 @@ class FeedbackFormTests(unittest.TestCase):
             run_id = "run_form"
             run_dir = os.path.join(td, "runs", run_id)
             os.makedirs(run_dir)
+            _register_archive_intent_run(td, run_id)
             self._write_json(os.path.join(run_dir, "review_queue.json"), {
                 "schema_version": "review_queue.v2",
                 "run_id": run_id,
@@ -160,6 +180,7 @@ class FeedbackFormTests(unittest.TestCase):
             run_id = "run_apply_form"
             run_dir = os.path.join(td, "runs", run_id)
             os.makedirs(run_dir)
+            _register_archive_intent_run(td, run_id)
             self._write_json(os.path.join(run_dir, "review_queue.json"), {
                 "schema_version": "review_queue.v2",
                 "run_id": run_id,
@@ -184,6 +205,7 @@ class FeedbackFormTests(unittest.TestCase):
                         "item_id": "R001",
                         "feedback_type": "archive_decision",
                         "risk_level": "P1",
+                        "review_item_hash": _review_item_hash(td, run_id, "R001"),
                         "source_file": "source.docx",
                         "target_path": "archive/source.docx",
                         "response": {
@@ -231,6 +253,7 @@ class FeedbackFormTests(unittest.TestCase):
             run_id = "run_script_form"
             run_dir = os.path.join(td, "runs", run_id)
             os.makedirs(run_dir)
+            _register_archive_intent_run(td, run_id)
             self._write_json(os.path.join(run_dir, "review_queue.json"), {
                 "schema_version": "review_queue.v2",
                 "run_id": run_id,
@@ -260,6 +283,47 @@ class FeedbackFormTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             self.assertTrue(os.path.exists(os.path.join(run_dir, "feedback_form.json")))
             self.assertIn("feedback_form_json", completed.stdout)
+
+    def test_apply_feedback_form_requires_strict_review_item_hash(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        for supplied_hash in (None, "", "not-a-sha256", "A" * 64):
+            with self.subTest(review_item_hash=supplied_hash), tempfile.TemporaryDirectory() as td:
+                run_id = "run-form-hash"
+                run_dir = Path(td) / "runs" / run_id
+                run_dir.mkdir(parents=True)
+                _register_archive_intent_run(td, run_id)
+                self._write_json(str(run_dir / "review_queue.json"), {
+                    "schema_version": "review_queue.v2",
+                    "run_id": run_id,
+                    "status": "needs_review",
+                    "items": [{
+                        "id": "R001",
+                        "run_id": run_id,
+                        "feedback_type": "archive_decision",
+                        "allowed_decisions": ["approve", "reject", "edit_target", "defer"],
+                    }],
+                })
+                item = {
+                    "item_id": "R001",
+                    "feedback_type": "archive_decision",
+                    "response": {"decision": "approve"},
+                }
+                if supplied_hash is not None:
+                    item["review_item_hash"] = supplied_hash
+                result = DataCleaningTools(workspace_dir=td).apply_feedback_form(
+                    run_id,
+                    feedback_form={
+                        "schema_version": "feedback_form.v1",
+                        "run_id": run_id,
+                        "items": [item],
+                    },
+                    generate_tests=False,
+                )
+
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["error"], "invalid_feedback_form")
+                self.assertFalse((run_dir / "human_feedback_decisions.json").exists())
 
     @staticmethod
     def _write_json(path: str, payload: dict) -> None:

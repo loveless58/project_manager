@@ -16,6 +16,7 @@ Data Cleaning Tools — 数据清洗工具层
   ├── 01-OCR输出（待清洗）
   └── 02-已清洗（结构化数据）
 """
+from contextlib import contextmanager
 import os
 import json
 import shutil
@@ -25,6 +26,7 @@ import stat
 import tempfile
 import uuid
 import html
+import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Callable, Dict, List, Any, Optional
@@ -75,6 +77,7 @@ from contracts.review_queue_schema import (
     MAX_REVIEW_BYTES,
     normalize_review_queue,
     review_trace_projection,
+    review_value_contains_sensitive_text,
 )
 from contracts.test_candidate_schema import (
     build_candidate_test_manifest,
@@ -129,6 +132,46 @@ CLASSIFICATION_KEYWORDS = {
     "项目执行": ["合同", "验收", "交付", "实施", "变更", "中标", "通知", "开工", "付款", "发票"],
     "项目丢标": ["弃标", "流标", "归档", "结算", "结项", "未中标"],
 }
+
+_FEEDBACK_LOCKS_GUARD = threading.Lock()
+_FEEDBACK_LOCKS: Dict[str, threading.RLock] = {}
+
+
+def _feedback_thread_lock(run_dir: str) -> threading.RLock:
+    key = os.path.normcase(os.path.realpath(run_dir))
+    with _FEEDBACK_LOCKS_GUARD:
+        lock = _FEEDBACK_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _FEEDBACK_LOCKS[key] = lock
+        return lock
+
+
+@contextmanager
+def _feedback_process_lock(run_dir: str):
+    lock_path = os.path.join(run_dir, ".feedback.lock")
+    with open(lock_path, "a+b") as stream:
+        stream.seek(0, os.SEEK_END)
+        if stream.tell() == 0:
+            stream.write(b"0")
+            stream.flush()
+            os.fsync(stream.fileno())
+        stream.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 class DataCleaningTools:
@@ -2210,18 +2253,15 @@ class DataCleaningTools:
 
     def prepare_feedback_form(self, run_id: str) -> Dict[str, Any]:
         """Write a human-editable feedback form for a prepared run package."""
-        run_dir = os.path.join(self.workspace_dir, "runs", run_id)
-        if not os.path.isdir(run_dir):
-            return {
-                "schema_version": "feedback_form.prepare.v1",
-                "status": "failed",
-                "run_id": run_id,
-                "error": f"Run directory not found: {run_dir}",
-            }
+        try:
+            run_dir = self._resolve_feedback_run_dir(run_id)
+        except (ArchiveRunArtifactError, OSError, ValueError):
+            return self._feedback_boundary_error("feedback_form.prepare.v1", run_id)
 
-        review_queue = self._load_json_file(os.path.join(run_dir, "review_queue.json")) if os.path.exists(os.path.join(run_dir, "review_queue.json")) else {}
+        review_queue = self._load_json_file(os.path.join(run_dir, "review_queue.json"))
         audit_review = self._load_json_file(os.path.join(run_dir, "audit_review.json")) if os.path.exists(os.path.join(run_dir, "audit_review.json")) else {}
         adversarial_verification = self._load_json_file(os.path.join(run_dir, "adversarial_verification.json")) if os.path.exists(os.path.join(run_dir, "adversarial_verification.json")) else {}
+        validate_review_queue(review_queue, run_id)
         form = build_feedback_form(
             run_id=run_id,
             review_queue=review_queue,
@@ -2259,16 +2299,17 @@ class DataCleaningTools:
         generate_tests: bool = True,
     ) -> Dict[str, Any]:
         """Apply a filled feedback_form.v1 and optionally generate candidate tests."""
-        run_dir = os.path.join(self.workspace_dir, "runs", run_id)
-        if not os.path.isdir(run_dir):
-            return {
-                "schema_version": "feedback_form.apply.v1",
-                "status": "failed",
-                "run_id": run_id,
-                "error": f"Run directory not found: {run_dir}",
-            }
+        try:
+            run_dir = self._resolve_feedback_run_dir(run_id)
+        except (ArchiveRunArtifactError, OSError, ValueError):
+            return self._feedback_boundary_error("feedback_form.apply.v1", run_id)
         if feedback_form is None:
-            form_path = feedback_form_path or os.path.join(run_dir, "feedback_form.json")
+            try:
+                form_path = self._resolve_feedback_form_path(
+                    run_dir, feedback_form_path or os.path.join(run_dir, "feedback_form.json"),
+                )
+            except ValueError:
+                return self._feedback_boundary_error("feedback_form.apply.v1", run_id)
             if not os.path.exists(form_path):
                 return {
                     "schema_version": "feedback_form.apply.v1",
@@ -2322,7 +2363,31 @@ class DataCleaningTools:
             },
         }
 
-    def apply_feedback_decisions(self, run_id: str, feedback_decisions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def apply_feedback_decisions(
+        self, run_id: str, feedback_decisions: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        try:
+            run_dir = self._resolve_feedback_run_dir(run_id)
+        except (ArchiveRunArtifactError, OSError, ValueError):
+            return self._feedback_apply_result(run_id, [], [{
+                "index": 0,
+                "error": "invalid_feedback_run_boundary",
+                "message": "feedback run boundary is invalid",
+            }], error="invalid_feedback_run_boundary")
+        try:
+            with _feedback_thread_lock(run_dir):
+                with _feedback_process_lock(run_dir):
+                    return self._apply_feedback_decisions_locked(
+                        run_id, feedback_decisions,
+                    )
+        except OSError:
+            return self._feedback_apply_result(run_id, [], [{
+                "index": 0,
+                "error": "feedback_transaction_failed",
+                "message": "feedback transaction could not be committed",
+            }], error="feedback_transaction_failed")
+
+    def _apply_feedback_decisions_locked(self, run_id: str, feedback_decisions: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Persist structured human feedback for later rule/test authoring.
 
         This does not move files, write business ledgers, or modify source artifacts.
@@ -2331,9 +2396,15 @@ class DataCleaningTools:
             feedback_decisions = [feedback_decisions]
         if type(feedback_decisions) is not list or len(feedback_decisions) > 256:
             feedback_decisions = []
-        run_dir = os.path.join(self.workspace_dir, "runs", run_id)
+        try:
+            run_dir = self._resolve_feedback_run_dir(run_id)
+        except (ArchiveRunArtifactError, OSError, ValueError):
+            return self._feedback_apply_result(run_id, [], [{
+                "index": 0, "error": "invalid_feedback_run_boundary",
+                "message": "feedback run boundary is invalid",
+            }], error="invalid_feedback_run_boundary")
         review_queue_path = os.path.join(run_dir, "review_queue.json")
-        if not os.path.isdir(run_dir) or not os.path.isfile(review_queue_path):
+        if not os.path.isfile(review_queue_path):
             return self._feedback_apply_result(
                 run_id, [], [{
                     "index": 0,
@@ -2363,6 +2434,13 @@ class DataCleaningTools:
                     index,
                     self._normalize_bound_feedback(
                         raw, run_id=run_id, index=index, queue_items=queue_items,
+                        review_queue=review_queue,
+                        accepted_snapshot_hashes={
+                            entry["review_item_hash"]
+                            for entry in existing
+                            if entry.get("item_id") == raw.get("item_id")
+                            and type(entry.get("review_item_hash")) is str
+                        },
                     ),
                 ))
             except FeedbackValidationError as exc:
@@ -2454,20 +2532,22 @@ class DataCleaningTools:
             }
             for payload in (decisions_payload, rule_payload, parser_payload):
                 self._validate_feedback_artifact(payload)
-            self._save_structured_json(artifacts["human_feedback_decisions"], decisions_payload)
-            self._save_structured_json(artifacts["rule_candidates"], rule_payload)
-            self._save_structured_json(artifacts["parser_test_candidates"], parser_payload)
-            with open(artifacts["feedback_events"], "a", encoding="utf-8") as stream:
-                for decision in accepted:
-                    stream.write(json.dumps(
-                        feedback_event(decision),
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        allow_nan=False,
-                    ) + "\n")
-            review_queue_updates = self._apply_feedback_to_review_queue(run_dir, accepted)
-            if review_queue_updates.get("artifact"):
-                artifacts["review_queue"] = review_queue_updates["artifact"]
+            review_queue_updates = self._apply_feedback_to_review_queue(
+                run_dir, accepted, persist=False,
+            )
+            review_queue_payload = review_queue_updates.pop("_payload")
+            artifacts["review_queue"] = review_queue_updates["artifact"]
+            event_bytes = self._feedback_events_bytes(
+                artifacts["feedback_events"], accepted,
+            )
+            transaction_payloads = {
+                artifacts["human_feedback_decisions"]: self._encode_feedback_json(decisions_payload),
+                artifacts["feedback_events"]: event_bytes,
+                artifacts["rule_candidates"]: self._encode_feedback_json(rule_payload),
+                artifacts["parser_test_candidates"]: self._encode_feedback_json(parser_payload),
+                artifacts["review_queue"]: self._encode_feedback_json(review_queue_payload),
+            }
+            self._commit_feedback_transaction(run_dir, transaction_payloads)
         else:
             artifacts = {
                 name: path for name, path in artifacts.items() if os.path.exists(path)
@@ -2501,8 +2581,10 @@ class DataCleaningTools:
         run_id: str,
         decisions: List[Dict[str, Any]],
         errors: List[Dict[str, Any]],
+        *,
+        error: str = "",
     ) -> Dict[str, Any]:
-        return {
+        result = {
             "schema_version": "human_feedback.apply.v1",
             "status": "failed",
             "run_id": run_id,
@@ -2523,6 +2605,9 @@ class DataCleaningTools:
                 "archive_plan_executed": False,
             },
         }
+        if error:
+            result["error"] = error
+        return result
 
     @staticmethod
     def _feedback_queue_items(
@@ -2560,6 +2645,20 @@ class DataCleaningTools:
             raise FeedbackValidationError("invalid_feedback_value", "feedback contains a non-JSON value") from None
         if len(encoded) > MAX_REVIEW_BYTES:
             raise FeedbackValidationError("feedback_size_limit", "feedback exceeds the byte limit")
+        for scalar_field in ("new_value", "expected_value"):
+            if scalar_field not in raw or raw[scalar_field] is None:
+                continue
+            scalar_value = raw[scalar_field]
+            if type(scalar_value) not in (str, int, float, bool):
+                raise FeedbackValidationError(
+                    "invalid_feedback_scalar",
+                    f"{scalar_field} must be a bounded JSON scalar",
+                )
+            if review_value_contains_sensitive_text(scalar_value):
+                raise FeedbackValidationError(
+                    "unsafe_feedback_value",
+                    "feedback contains an unsafe value",
+                )
         try:
             validate_json_tree(raw)
         except ArchiveRunArtifactError as exc:
@@ -2572,7 +2671,9 @@ class DataCleaningTools:
         *,
         run_id: str,
         index: int,
+        review_queue: Dict[str, Any],
         queue_items: Dict[str, Dict[str, Any]],
+        accepted_snapshot_hashes: Optional[set[str]] = None,
     ) -> Dict[str, Any]:
         self._validate_feedback_input(raw)
         if raw.get("run_id") not in (None, "", run_id):
@@ -2585,9 +2686,13 @@ class DataCleaningTools:
             raise FeedbackValidationError("feedback_type_mismatch", "feedback type does not match review item")
         if normalized["decision"] not in item["allowed_decisions"]:
             raise FeedbackValidationError("decision_not_allowed", "decision is not allowed for the review item")
-        expected_hash = review_item_snapshot_hash(item, run_id=run_id)
         supplied_hash = raw.get("review_item_hash")
-        if supplied_hash and supplied_hash != expected_hash:
+        if supplied_hash is None or supplied_hash == "":
+            raise FeedbackValidationError("feedback_snapshot_hash_required", "review item snapshot hash is required")
+        if type(supplied_hash) is not str or re.fullmatch(r"[0-9a-f]{64}", supplied_hash) is None:
+            raise FeedbackValidationError("invalid_feedback_snapshot_hash", "review item snapshot hash is invalid")
+        expected_hash = review_item_snapshot_hash(review_queue, item)
+        if supplied_hash != expected_hash and supplied_hash not in (accepted_snapshot_hashes or set()):
             raise FeedbackValidationError("feedback_snapshot_mismatch", "review item snapshot changed")
 
         trace = review_trace_projection(item)
@@ -2595,7 +2700,7 @@ class DataCleaningTools:
         normalized["target_path"] = trace.get("target_path", "")
         normalized.update(trace)
         normalized["risk_level"] = item.get("risk", item.get("risk_level", normalized["risk_level"]))
-        normalized["review_item_hash"] = expected_hash
+        normalized["review_item_hash"] = supplied_hash
         normalized["confirmed"] = False
         actor = raw.get("actor")
         if type(actor) is str and actor:
@@ -2686,16 +2791,121 @@ class DataCleaningTools:
             if type(item_id) is not str or not item_id or item_id in item_ids:
                 raise FeedbackValidationError("invalid_feedback_form", "feedback form item identity is invalid")
             item_ids.add(item_id)
+            item_hash = item.get("review_item_hash")
+            if type(item_hash) is not str or re.fullmatch(r"[0-9a-f]{64}", item_hash) is None:
+                raise FeedbackValidationError(
+                    "invalid_feedback_form", "feedback form snapshot hash is invalid",
+                )
             if item.get("run_id", run_id) != run_id:
                 raise FeedbackValidationError("feedback_run_mismatch", "feedback form item run mismatch")
             response = item.get("response", {})
             if type(response) is not dict or set(response) - _FEEDBACK_RESPONSE_FIELDS:
                 raise FeedbackValidationError("invalid_feedback_form", "feedback response is invalid")
 
+    @staticmethod
+    def _encode_feedback_json(payload: Dict[str, Any]) -> bytes:
+        return json.dumps(
+            payload, ensure_ascii=False, indent=2, allow_nan=False,
+        ).encode("utf-8")
+
+    @staticmethod
+    def _feedback_events_bytes(
+        path: str, accepted: List[Dict[str, Any]],
+    ) -> bytes:
+        current = b""
+        if os.path.exists(path):
+            with open(path, "rb") as stream:
+                current = stream.read(MAX_REVIEW_BYTES + 1)
+            if len(current) > MAX_REVIEW_BYTES:
+                raise FeedbackValidationError(
+                    "feedback_size_limit", "feedback events exceed byte limit",
+                )
+            if current and not current.endswith(b"\n"):
+                current += b"\n"
+        lines = []
+        for decision in accepted:
+            event = feedback_event(decision)
+            validate_json_tree(event)
+            lines.append(json.dumps(
+                event, ensure_ascii=False, sort_keys=True, allow_nan=False,
+            ).encode("utf-8") + b"\n")
+        encoded = current + b"".join(lines)
+        if len(encoded) > MAX_REVIEW_BYTES:
+            raise FeedbackValidationError(
+                "feedback_size_limit", "feedback events exceed byte limit",
+            )
+        return encoded
+
+    @staticmethod
+    def _commit_feedback_transaction(
+        run_dir: str, payloads: Dict[str, bytes],
+    ) -> None:
+        originals: Dict[str, Optional[bytes]] = {}
+        staged: Dict[str, str] = {}
+        replaced: List[str] = []
+        try:
+            for target, encoded in payloads.items():
+                originals[target] = Path(target).read_bytes() if os.path.exists(target) else None
+                descriptor, temporary = tempfile.mkstemp(
+                    prefix=".feedback-txn-", dir=run_dir,
+                )
+                staged[target] = temporary
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(encoded)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            for target, temporary in staged.items():
+                os.replace(temporary, target)
+                replaced.append(target)
+            DataCleaningTools._fsync_feedback_directory(run_dir)
+        except Exception:
+            rollback_error = None
+            for target in reversed(replaced):
+                original = originals[target]
+                try:
+                    if original is None:
+                        if os.path.exists(target):
+                            os.unlink(target)
+                    else:
+                        descriptor, rollback = tempfile.mkstemp(
+                            prefix=".feedback-txn-", dir=run_dir,
+                        )
+                        staged[f"rollback:{target}"] = rollback
+                        with os.fdopen(descriptor, "wb") as stream:
+                            stream.write(original)
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                        os.replace(rollback, target)
+                    DataCleaningTools._fsync_feedback_directory(run_dir)
+                except Exception as exc:
+                    rollback_error = rollback_error or exc
+            if rollback_error is not None:
+                raise OSError("feedback transaction rollback failed") from rollback_error
+            raise
+        finally:
+            for temporary in staged.values():
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+
+    @staticmethod
+    def _fsync_feedback_directory(run_dir: str) -> None:
+        try:
+            descriptor = os.open(run_dir, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            pass
+        finally:
+            os.close(descriptor)
+
+
     def _apply_feedback_to_review_queue(
         self,
         run_dir: str,
         feedback_decisions: List[Dict[str, Any]],
+        *, persist: bool = True,
     ) -> Dict[str, Any]:
         review_queue_path = os.path.join(run_dir, "review_queue.json")
         if not os.path.exists(review_queue_path):
@@ -2754,13 +2964,17 @@ class DataCleaningTools:
             "updated_at": now,
         }
         validate_review_queue(queue, str(queue.get("run_id") or ""))
-        self._save_structured_json(review_queue_path, queue)
-        return {
+        if persist:
+            self._save_structured_json(review_queue_path, queue)
+        result = {
             "status": "updated",
             "updated": updated,
             "pending": pending,
             "artifact": review_queue_path,
         }
+        if not persist:
+            result["_payload"] = queue
+        return result
 
     def generate_candidate_tests(self, run_id: str) -> Dict[str, Any]:
         """Generate runnable test-draft artifacts from feedback candidates.
@@ -2768,14 +2982,10 @@ class DataCleaningTools:
         The generated files stay inside the run package. They are review inputs,
         not automatically promoted repository tests.
         """
-        run_dir = os.path.join(self.workspace_dir, "runs", run_id)
-        if not os.path.isdir(run_dir):
-            return {
-                "schema_version": "candidate_test_generation.v1",
-                "status": "failed",
-                "run_id": run_id,
-                "error": f"Run directory not found: {run_dir}",
-            }
+        try:
+            run_dir = self._resolve_feedback_run_dir(run_id)
+        except (ArchiveRunArtifactError, OSError, ValueError):
+            return self._feedback_boundary_error("candidate_test_generation.v1", run_id)
 
         parser_candidates = self._load_candidate_items(os.path.join(run_dir, "parser_test_candidates.json"))
         rule_candidates = self._load_candidate_items(os.path.join(run_dir, "rule_candidates.json"))
@@ -3148,6 +3358,61 @@ class DataCleaningTools:
 
     def _runs_root(self) -> Path:
         return Path(self.workspace_dir).expanduser().resolve() / "runs"
+
+    @staticmethod
+    def _feedback_boundary_error(schema_version: str, run_id: Any) -> Dict[str, Any]:
+        return {
+            "schema_version": schema_version,
+            "status": "failed",
+            "run_id": str(run_id),
+            "error": "invalid_feedback_run_boundary",
+        }
+
+    def _resolve_feedback_run_dir(self, run_id: str) -> str:
+        run_dir = Path(self._resolve_archive_run_dir(run_id))
+        if not run_dir.is_dir() or self._is_reparse_point(str(run_dir)):
+            raise ValueError("feedback run directory is invalid")
+        marker = self._intent_registry_path(run_id)
+        registry = marker.parent
+        if (
+            not registry.is_dir()
+            or self._is_reparse_point(str(registry))
+            or not marker.is_file()
+            or self._is_reparse_point(str(marker))
+        ):
+            raise ValueError("feedback run registration is invalid")
+        try:
+            registration = strict_json_load(str(marker))
+        except (ArchiveRunArtifactError, OSError, ValueError) as exc:
+            raise ValueError("feedback run registration is invalid") from exc
+        if registration != {
+            "schema_version": "archive_intent_run_registration.v1",
+            "run_id": run_id,
+        }:
+            raise ValueError("feedback run registration is invalid")
+        known_artifacts = (
+            "review_queue.json", "audit_review.json", "adversarial_verification.json",
+            "feedback_form.json", "feedback_form.md", "human_feedback_decisions.json",
+            "feedback_events.jsonl", "rule_candidates.json",
+            "parser_test_candidates.json", "generated_tests", ".feedback.lock",
+        )
+        for name in known_artifacts:
+            path = run_dir / name
+            if path.exists() and self._is_reparse_point(str(path)):
+                raise ValueError("feedback artifact must not be a reparse point")
+        review_queue_path = run_dir / "review_queue.json"
+        if not review_queue_path.is_file():
+            raise ValueError("feedback review queue is missing")
+        return str(run_dir)
+
+    def _resolve_feedback_form_path(self, run_dir: str, value: str) -> str:
+        if not isinstance(value, str) or not value:
+            raise ValueError("feedback form path is invalid")
+        root = Path(run_dir).resolve()
+        candidate = Path(value).expanduser().resolve()
+        if candidate.parent != root or self._is_reparse_point(str(candidate)):
+            raise ValueError("feedback form path escapes run directory")
+        return str(candidate)
 
     def _resolve_archive_run_dir(self, run_id: str) -> str:
         if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", run_id):

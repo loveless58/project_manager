@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -10,6 +11,87 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class ReviewQueueContractTests(unittest.TestCase):
+    def test_known_and_unknown_review_types_cannot_override_decision_policy(self):
+        from contracts.review_queue_schema import normalize_review_queue
+
+        cases = (
+            (
+                "adversarial_verification_error",
+                "rule_exception",
+                ["retry_verification", "defer", "accept_risk"],
+                "retry_verification",
+            ),
+            (
+                "business_relation_review",
+                "field_correction",
+                ["approve", "reject", "correct_relation", "defer"],
+                "defer",
+            ),
+            (
+                "archive_target_review",
+                "archive_decision",
+                ["approve", "reject", "edit_target", "defer"],
+                "defer",
+            ),
+            (
+                "future_review_type",
+                "rule_exception",
+                ["accept", "reject", "defer"],
+                "defer",
+            ),
+        )
+        for item_type, feedback_type, allowed, recommended in cases:
+            with self.subTest(item_type=item_type):
+                item = normalize_review_queue("run-fixed-policy", [{
+                    "type": item_type,
+                    "feedback_type": "human_confirmation",
+                    "allowed_decisions": ["force_ready"],
+                    "recommended_decision": "force_ready",
+                }])["items"][0]
+
+                self.assertEqual(item["feedback_type"], feedback_type)
+                self.assertEqual(item["allowed_decisions"], allowed)
+                self.assertEqual(item["recommended_decision"], recommended)
+                self.assertNotIn("force_ready", item["allowed_decisions"])
+
+    def test_review_projection_recursively_drops_embedded_sensitive_text(self):
+        from contracts.review_queue_schema import normalize_review_queue
+
+        slash = chr(47)
+        backslash = chr(92)
+        credential_name = "X-Amz-" + "Credential"
+        signature_name = "X-Amz-" + "Signature"
+        auth_name = "Author" + "ization"
+        fullwidth_auth = "".join(
+            chr(ord(char) + 0xFEE0) if "!" <= char <= "~" else char
+            for char in auth_name + ":"
+        )
+        sensitive_values = (
+            "prefix " + slash + "etc" + slash + "private.conf suffix",
+            "prefix C:" + backslash + "private" + backslash + "source.md suffix",
+            "prefix " + backslash * 2 + "server" + backslash + "share suffix",
+            "prefix file:" + slash * 3 + "private" + slash + "source.md suffix",
+            "prefix " + auth_name + ": Bear" + "er synthetic-value suffix",
+            "prefix " + credential_name + "=synthetic-value suffix",
+            "prefix " + signature_name + "=synthetic-value suffix",
+            "prefix " + fullwidth_auth + " synthetic-value suffix",
+        )
+        for index, sensitive in enumerate(sensitive_values, 1):
+            with self.subTest(index=index):
+                item = normalize_review_queue("run-sensitive", [{
+                    "type": "business_relation_review",
+                    "reason": sensitive,
+                    "source_ref": {
+                        "storage_provider": "local",
+                        "object_key": sensitive,
+                        "logical_uri": "business://source/inbox/item.md",
+                        "binding_id": "source",
+                    },
+                    "evidence": [{"kind": "note", "value": sensitive}],
+                }])["items"][0]
+
+                self.assertNotIn(sensitive, json.dumps(item, ensure_ascii=False))
+
     def test_adversarial_error_is_actionable(self):
         from contracts.review_queue_schema import normalize_review_queue
 

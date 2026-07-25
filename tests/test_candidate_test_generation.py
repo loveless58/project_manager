@@ -18,6 +18,18 @@ class CandidateTestGenerationTests(unittest.TestCase):
             run_id = "run_l36"
             run_dir = os.path.join(td, "runs", run_id)
             os.makedirs(run_dir)
+            registry = Path(td) / "runs" / ".archive_intent_registry"
+            registry.mkdir(parents=True)
+            (registry / f"{run_id}.json").write_text(json.dumps({
+                "schema_version": "archive_intent_run_registration.v1",
+                "run_id": run_id,
+            }), encoding="utf-8")
+            (Path(run_dir) / "review_queue.json").write_text(json.dumps({
+                "schema_version": "review_queue.v2",
+                "run_id": run_id,
+                "status": "clear",
+                "items": [],
+            }), encoding="utf-8")
             parser_candidates_path = os.path.join(run_dir, "parser_test_candidates.json")
             rule_candidates_path = os.path.join(run_dir, "rule_candidates.json")
             with open(parser_candidates_path, "w", encoding="utf-8") as f:

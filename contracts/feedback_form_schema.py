@@ -7,6 +7,11 @@ from typing import Any, Dict, List
 
 from contracts.review_queue_schema import review_trace_projection
 
+_MUTABLE_REVIEW_ITEM_FIELDS = {
+    "feedback_status", "feedback_ids", "feedback_decisions", "feedback_updated_at",
+}
+
+
 
 def build_feedback_form(
     *,
@@ -22,17 +27,6 @@ def build_feedback_form(
             continue
         item_id = str(raw_item.get("id") or raw_item.get("item_id") or "")
         trace = review_trace_projection(raw_item)
-        snapshot = {
-            "item_id": item_id,
-            "run_id": run_id,
-            "type": raw_item.get("type", ""),
-            "risk": raw_item.get("risk") or raw_item.get("risk_level", "P2"),
-            "question": raw_item.get("question", ""),
-            "feedback_type": raw_item.get("feedback_type", "rule_exception"),
-            "allowed_decisions": raw_item.get("allowed_decisions") or ["accept", "reject", "defer"],
-            "recommended_decision": raw_item.get("recommended_decision", "defer"),
-            **trace,
-        }
         items.append({
             "item_id": item_id,
             "run_id": run_id,
@@ -49,7 +43,7 @@ def build_feedback_form(
             "expected_field": trace.get("expected_field", trace.get("field", "")),
             "evidence": trace.get("evidence", []),
             "confirmed": False,
-            "review_item_hash": _snapshot_hash(snapshot),
+            "review_item_hash": review_item_snapshot_hash(review_queue, raw_item),
             "response": {
                 "decision": "",
                 "new_value": "",
@@ -145,19 +139,22 @@ def feedback_decisions_from_form(form: Dict[str, Any]) -> List[Dict[str, Any]]:
     return decisions
 
 
-def review_item_snapshot_hash(item: Dict[str, Any], *, run_id: str) -> str:
-    item_id = str(item.get("id") or item.get("item_id") or "")
-    trace = review_trace_projection(item)
+def review_item_snapshot_hash(
+    review_queue: Dict[str, Any], item: Dict[str, Any],
+) -> str:
+    if type(review_queue) is not dict or type(item) is not dict:
+        raise ValueError("invalid review snapshot")
+    immutable_item = {
+        key: value for key, value in item.items()
+        if key not in _MUTABLE_REVIEW_ITEM_FIELDS
+    }
     snapshot = {
-        "item_id": item_id,
-        "run_id": run_id,
-        "type": item.get("type", ""),
-        "risk": item.get("risk") or item.get("risk_level", "P2"),
-        "question": item.get("question", ""),
-        "feedback_type": item.get("feedback_type", "rule_exception"),
-        "allowed_decisions": item.get("allowed_decisions") or ["accept", "reject", "defer"],
-        "recommended_decision": item.get("recommended_decision", "defer"),
-        **trace,
+        "queue": {
+            "schema_version": review_queue.get("schema_version"),
+            "run_id": review_queue.get("run_id"),
+            "status": review_queue.get("status"),
+        },
+        "item": immutable_item,
     }
     return _snapshot_hash(snapshot)
 
