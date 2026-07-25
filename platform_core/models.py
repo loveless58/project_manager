@@ -48,6 +48,26 @@ class StructureIndexResult:
 
 
 @dataclass(frozen=True)
+class BusinessContextQuery:
+    """Evidence supplied by a caller for controlled business-context lookup."""
+
+    document_type: str
+    candidate_fields: Mapping[str, Any]
+    text_segments: Sequence[Mapping[str, str]]
+
+
+@dataclass(frozen=True)
+class BusinessContextEvidence:
+    """Candidate business context and the evidence used to rank it."""
+
+    status: str
+    candidates: Sequence[Mapping[str, Any]]
+    evidence_refs: Sequence[Mapping[str, Any]]
+    conflicts: Sequence[Mapping[str, Any]]
+    diagnostics: Sequence[Mapping[str, Any]]
+
+
+@dataclass(frozen=True)
 class ProjectionRequest:
     projection_type: str
     relative_path: str

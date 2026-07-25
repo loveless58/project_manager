@@ -1,4 +1,6 @@
 from .models import (
+    BusinessContextEvidence,
+    BusinessContextQuery,
     CapabilityReport,
     DocumentRef,
     ObjectStat,
@@ -14,7 +16,14 @@ from .storage_bindings import (
     StorageBindingNotFoundError,
     StorageBindingRegistry,
 )
-from .ports import DocumentStore, ProjectionWriter, Repository, StructureIndex, UnitOfWork
+from .ports import (
+    BusinessContextProvider,
+    DocumentStore,
+    ProjectionWriter,
+    Repository,
+    StructureIndex,
+    UnitOfWork,
+)
 from .registry import AdapterKind, AdapterRegistry, AdapterRegistryError
 
 from .settings import (
@@ -32,6 +41,9 @@ __all__ = [
     "AdapterRegistryError",
     "AppSettings",
     "AmbiguousStorageBindingError",
+    "BusinessContextEvidence",
+    "BusinessContextProvider",
+    "BusinessContextQuery",
     "StorageBinding",
     "StorageBindingError",
     "StorageBindingNotFoundError",
