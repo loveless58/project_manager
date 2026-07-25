@@ -456,3 +456,39 @@ def test_main_scanner_rejects_decoded_json_unc_object_key(tmp_path):
     report = _scan_bytes(tmp_path, "config/provider.json", encoded_json.encode())
 
     assert "REPO-BUSINESS-ABSOLUTE-PATH" in _finding_ids(report)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "content"),
+    [
+        (
+            "config/provider.js",
+            'export const servicePassword = "production-value-0123456789" as const;',
+        ),
+        (
+            "deploy/provider.yaml",
+            "env:\n  - name: SERVICE_PASSWORD\n    value: production,value-0123456789\n",
+        ),
+        (
+            "deploy/provider.yaml",
+            "env:\n  - value: production value 0123456789\n    name: SERVICE_PASSWORD\n",
+        ),
+    ],
+)
+def test_main_scanner_rejects_js_suffix_and_yaml_plain_scalars(
+    tmp_path, relative_path, content
+):
+    report = _scan_bytes(tmp_path, relative_path, content.encode())
+
+    assert "REPO-HARDCODED-CREDENTIAL" in _finding_ids(report), content
+
+
+def test_main_scanner_allows_dynamic_javascript_template_literal(tmp_path):
+    content = (
+        "export const service"
+        + "Password = `${process.env.SERVICE_PASSWORD}`;"
+    )
+
+    report = _scan_bytes(tmp_path, "config/provider.js", content.encode())
+
+    assert report.errors == 0, report.findings

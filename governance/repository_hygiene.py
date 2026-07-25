@@ -109,8 +109,13 @@ _JS_LITERAL_BINDING = re.compile(
     r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)"
     r"(?:\s*:\s*[^=;\r\n]+)?\s*=\s*"
     r"(?P<quote>[\"'`])(?P<value>[^\r\n]*?)(?P=quote)"
+    r"(?:\s+(?:as\s+const|satisfies\s+[A-Za-z_$][^;\r\n]*))?"
     r"\s*;?\s*(?://.*)?$",
     re.MULTILINE,
+)
+_JS_ENV_TEMPLATE = re.compile(
+    r"\$\{\s*(?:process|import\.meta)\.env\."
+    r"[A-Za-z_$][A-Za-z0-9_$]*\s*\}"
 )
 _CREDENTIAL_TERMINALS = {
     "token",
@@ -509,7 +514,7 @@ _YAML_ENV_ITEM_FIELD = re.compile(
     r"^(?P<indent>[ \t]*)(?P<dash>-\s+)?"
     r"(?P<field>name|value)\s*:\s*(?:"
     r"(?P<quote>[\"'])(?P<quoted>[^\"'\r\n]+)(?P=quote)"
-    r"|(?P<bare>[^\s#;,]+))\s*(?:#.*)?$",
+    r"|(?P<bare>[^\r\n]+?))\s*(?:#.*)?$",
     re.IGNORECASE,
 )
 
@@ -549,7 +554,9 @@ def _contains_yaml_env_credential(text: str) -> bool:
                 item = None
             continue
 
-        scalar = field_match.group("quoted") or field_match.group("bare") or ""
+        scalar = (
+            field_match.group("quoted") or field_match.group("bare") or ""
+        ).strip()
         if field_match.group("field").casefold() == "name":
             item["names"].append(scalar)
         else:
@@ -726,6 +733,10 @@ def _contains_hardcoded_credential(text: str) -> bool:
         return True
 
     for match in _JS_LITERAL_BINDING.finditer(text):
+        if match.group("quote") == "`" and _JS_ENV_TEMPLATE.fullmatch(
+            match.group("value").strip()
+        ):
+            continue
         if _binding_contains_credential(
             match.group("name"), match.group("value"), quoted=True
         ):

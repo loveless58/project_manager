@@ -151,8 +151,13 @@ _INDEPENDENT_JS_LITERAL_BINDING = re.compile(
     r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)"
     r"(?:\s*:\s*[^=;\r\n]+)?\s*=\s*"
     r"(?P<quote>[\"'`])(?P<value>[^\r\n]*?)(?P=quote)"
+    r"(?:\s+(?:as\s+const|satisfies\s+[A-Za-z_$][^;\r\n]*))?"
     r"\s*;?\s*(?://.*)?$",
     re.MULTILINE,
+)
+_INDEPENDENT_JS_ENV_TEMPLATE = re.compile(
+    r"\$\{\s*(?:process|import\.meta)\.env\."
+    r"[A-Za-z_$][A-Za-z0-9_$]*\s*\}"
 )
 _UNC_PATH = re.compile(
     r"(?<![A-Za-z0-9:/\\])(?:"
@@ -506,7 +511,7 @@ _INDEPENDENT_YAML_ENV_FIELD = re.compile(
     r"^(?P<indent>[ \t]*)(?P<dash>-\s+)?"
     r"(?P<field>name|value)\s*:\s*(?:"
     r"(?P<quote>[\"'])(?P<quoted>[^\"'\r\n]+)(?P=quote)"
-    r"|(?P<bare>[^\s#;,]+))\s*(?:#.*)?$",
+    r"|(?P<bare>[^\r\n]+?))\s*(?:#.*)?$",
     re.IGNORECASE,
 )
 
@@ -551,7 +556,9 @@ def _independent_yaml_env_credentials(relative_path: str, text: str) -> list[str
                 item = None
             continue
 
-        scalar = field_match.group("quoted") or field_match.group("bare") or ""
+        scalar = (
+            field_match.group("quoted") or field_match.group("bare") or ""
+        ).strip()
         if field_match.group("field").casefold() == "name":
             item["names"].append(scalar)
         else:
@@ -573,6 +580,10 @@ def _independent_credential_violations(
     violations.extend(_independent_yaml_env_credentials(relative_path, text))
 
     for match in _INDEPENDENT_JS_LITERAL_BINDING.finditer(text):
+        if match.group("quote") == "`" and _INDEPENDENT_JS_ENV_TEMPLATE.fullmatch(
+            match.group("value").strip()
+        ):
+            continue
         if _binding_is_credential(match.group("name"), match.group("value")):
             line_number = text.count("\n", 0, match.start()) + 1
             violations.append(
@@ -1083,6 +1094,38 @@ def test_independent_rejects_decoded_json_unc_object_key():
     )
 
     assert _independent_unc_violations("config/provider.json", encoded_json)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "content"),
+    [
+        (
+            "config/provider.js",
+            'export const servicePassword = "production-value-0123456789" as const;',
+        ),
+        (
+            "deploy/provider.yaml",
+            "env:\n  - name: SERVICE_PASSWORD\n    value: production,value-0123456789\n",
+        ),
+        (
+            "deploy/provider.yaml",
+            "env:\n  - value: production value 0123456789\n    name: SERVICE_PASSWORD\n",
+        ),
+    ],
+)
+def test_independent_rejects_js_suffix_and_yaml_plain_scalars(
+    relative_path, content
+):
+    assert _independent_credential_violations(relative_path, content), content
+
+
+def test_independent_allows_dynamic_javascript_template_literal():
+    content = (
+        "export const service"
+        + "Password = `${process.env.SERVICE_PASSWORD}`;"
+    )
+
+    assert _independent_credential_violations("config/provider.js", content) == []
 
 
 def test_all_tracked_files_match_independent_default_deny_contract():
