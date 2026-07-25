@@ -482,6 +482,14 @@ def test_repository_hygiene_allows_single_synthetic_business_value(
         "source_" + 'kind = "real"',
         'record = {"source_' + 'kind": "real"}',
         "project_" + 'name = "Customer合成Migration"',
+        "self.project_" + 'name = "Commercial Delivery"',
+        'record["project_' + 'name"] = "Commercial Delivery"',
+        "Fixture(project_" + 'name="Commercial Delivery")',
+        "project_" + 'name = "Commercial " + "Delivery"',
+        "self.source_" + 'kind = "real"',
+        'record["source_' + 'kind"] = "real"',
+        "Fixture(source_" + 'kind="real")',
+        "source_" + 'kind = "re" + "al"',
     ],
 )
 def test_repository_hygiene_rejects_python_literal_business_bindings(
@@ -509,6 +517,14 @@ def test_repository_hygiene_rejects_python_literal_business_bindings(
         "project_name = Field(default=None)",
         'project_name = "合成项目Alpha"',
         'source_kind = "synthetic"',
+        "self.project_name = record.project_name",
+        'record["project_name"] = payload[field_name]',
+        'Fixture(project_name=f"{prefix}-{suffix}")',
+        "Fixture(project_name=build_project_name())",
+        "self.source_kind = metadata.source_kind",
+        'record["source_kind"] = metadata[kind_key]',
+        'Fixture(source_kind=f"{kind}")',
+        "Fixture(source_kind=detect_source_kind())",
     ],
 )
 def test_repository_hygiene_allows_python_dynamic_or_synthetic_bindings(

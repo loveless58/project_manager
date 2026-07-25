@@ -504,30 +504,64 @@ def _is_allowed_business_value(value: str) -> bool:
     return bool(_SYNTHETIC_BUSINESS_VALUE.match(normalized))
 
 
+def _static_python_string(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _static_python_string(node.left)
+        right = _static_python_string(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _python_binding_field(target: ast.AST) -> str | None:
+    if isinstance(target, ast.Name):
+        return target.id.casefold()
+    if isinstance(target, ast.Attribute):
+        return target.attr.casefold()
+    if isinstance(target, ast.Subscript):
+        key = _static_python_string(target.slice)
+        if key is not None:
+            return key.casefold()
+    return None
+
+
 def _python_literal_business_bindings(node: ast.AST) -> list[tuple[str, str]]:
     if isinstance(node, ast.Assign):
-        if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
+        value = _static_python_string(node.value)
+        if value is None:
             return []
         return [
-            (target.id.casefold(), node.value.value)
+            (field, value)
             for target in node.targets
-            if isinstance(target, ast.Name)
+            if (field := _python_binding_field(target)) is not None
         ]
     if isinstance(node, ast.AnnAssign):
-        if not isinstance(node.target, ast.Name):
+        field = _python_binding_field(node.target)
+        value = _static_python_string(node.value) if node.value is not None else None
+        if field is None or value is None:
             return []
-        if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
-            return []
-        return [(node.target.id.casefold(), node.value.value)]
+        return [(field, value)]
     if isinstance(node, ast.Dict):
-        return [
-            (key.value.casefold(), value.value)
-            for key, value in zip(node.keys, node.values)
-            if isinstance(key, ast.Constant)
-            and isinstance(key.value, str)
-            and isinstance(value, ast.Constant)
-            and isinstance(value.value, str)
-        ]
+        bindings: list[tuple[str, str]] = []
+        for key_node, value_node in zip(node.keys, node.values):
+            if key_node is None:
+                continue
+            field = _static_python_string(key_node)
+            value = _static_python_string(value_node)
+            if field is not None and value is not None:
+                bindings.append((field.casefold(), value))
+        return bindings
+    if isinstance(node, ast.Call):
+        bindings = []
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                continue
+            value = _static_python_string(keyword.value)
+            if value is not None:
+                bindings.append((keyword.arg.casefold(), value))
+        return bindings
     return []
 
 

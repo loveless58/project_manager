@@ -148,6 +148,68 @@ def _string_categories(value: str) -> set[str]:
     return categories
 
 
+def _static_string_value(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _static_string_value(node.left)
+        right = _static_string_value(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _assignment_field(target: ast.AST) -> str | None:
+    if isinstance(target, ast.Name):
+        return target.id.casefold()
+    if isinstance(target, ast.Attribute):
+        return target.attr.casefold()
+    if isinstance(target, ast.Subscript):
+        key = _static_string_value(target.slice)
+        if key is not None:
+            return key.casefold()
+    return None
+
+
+def _literal_bindings(node: ast.AST) -> list[tuple[str, ast.AST, str]]:
+    if isinstance(node, ast.Assign):
+        value = _static_string_value(node.value)
+        if value is None:
+            return []
+        bindings = []
+        for target in node.targets:
+            field = _assignment_field(target)
+            if field is not None:
+                bindings.append((field, node.value, value))
+        return bindings
+    if isinstance(node, ast.AnnAssign):
+        field = _assignment_field(node.target)
+        value = _static_string_value(node.value) if node.value is not None else None
+        if field is None or value is None or node.value is None:
+            return []
+        return [(field, node.value, value)]
+    if isinstance(node, ast.Dict):
+        bindings = []
+        for key_node, value_node in zip(node.keys, node.values):
+            if key_node is None:
+                continue
+            field = _static_string_value(key_node)
+            value = _static_string_value(value_node)
+            if field is not None and value is not None:
+                bindings.append((field.casefold(), value_node, value))
+        return bindings
+    if isinstance(node, ast.Call):
+        bindings = []
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                continue
+            value = _static_string_value(keyword.value)
+            if value is not None:
+                bindings.append((keyword.arg.casefold(), keyword.value, value))
+        return bindings
+    return []
+
+
 def _python_violations(relative_path: str, text: str) -> list[str]:
     violations: list[str] = []
     tree = ast.parse(text)
@@ -155,35 +217,12 @@ def _python_violations(relative_path: str, text: str) -> list[str]:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             for category in _string_categories(node.value):
                 violations.append(f"{relative_path}:{node.lineno}:{category}")
-        bindings: list[tuple[str, ast.Constant]] = []
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
-            bindings.extend(
-                (target.id.casefold(), node.value)
-                for target in node.targets
-                if isinstance(target, ast.Name)
-            )
-        elif (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and isinstance(node.value, ast.Constant)
-        ):
-            bindings.append((node.target.id.casefold(), node.value))
-        elif isinstance(node, ast.Dict):
-            bindings.extend(
-                (key.value.casefold(), value)
-                for key, value in zip(node.keys, node.values)
-                if isinstance(key, ast.Constant)
-                and isinstance(key.value, str)
-                and isinstance(value, ast.Constant)
-            )
-        for field, value_node in bindings:
-            if not isinstance(value_node.value, str):
-                continue
-            if field in BUSINESS_FIELDS and not _allowed(value_node.value):
+        for field, value_node, value in _literal_bindings(node):
+            if field in BUSINESS_FIELDS and not _allowed(value):
                 violations.append(
                     f"{relative_path}:{value_node.lineno}:field:{field}"
                 )
-            if field == "source_kind" and value_node.value.strip().casefold() == "real":
+            if field == "source_kind" and value.strip().casefold() == "real":
                 violations.append(
                     f"{relative_path}:{value_node.lineno}:real_source_binding"
                 )
@@ -248,9 +287,9 @@ def test_all_tracked_business_examples_are_independently_synthetic():
 
 
 def test_json_contract_rejects_plain_business_values_and_allows_synthetic():
-    plain = json.dumps({
-        "customer_" + "name": "Example Technology " + "Company"
-    })
+    plain = json.dumps(
+        {"customer_{}".format("name"): "Example Technology " + "Company"}
+    )
     synthetic = json.dumps({"customer_name": "合成机构001有限公司"})
 
     assert _json_violations("tests/fixture.json", plain) == [
@@ -268,6 +307,14 @@ def test_json_contract_rejects_plain_business_values_and_allows_synthetic():
         "source_" + 'kind = "real"',
         'record = {"source_' + 'kind": "real"}',
         "project_" + 'name = "Customer合成Migration"',
+        "self.project_" + 'name = "Commercial Delivery"',
+        'record["project_' + 'name"] = "Commercial Delivery"',
+        "Fixture(project_" + 'name="Commercial Delivery")',
+        "project_" + 'name = "Commercial " + "Delivery"',
+        "self.source_" + 'kind = "real"',
+        'record["source_' + 'kind"] = "real"',
+        "Fixture(source_" + 'kind="real")',
+        "source_" + 'kind = "re" + "al"',
     ],
 )
 def test_python_contract_rejects_literal_business_bindings(content):
@@ -287,6 +334,14 @@ def test_python_contract_rejects_literal_business_bindings(content):
         "project_name = Field(default=None)",
         'project_name = "合成项目Alpha"',
         'source_kind = "synthetic"',
+        "self.project_name = record.project_name",
+        'record["project_name"] = payload[field_name]',
+        'Fixture(project_name=f"{prefix}-{suffix}")',
+        "Fixture(project_name=build_project_name())",
+        "self.source_kind = metadata.source_kind",
+        'record["source_kind"] = metadata[kind_key]',
+        'Fixture(source_kind=f"{kind}")',
+        "Fixture(source_kind=detect_source_kind())",
     ],
 )
 def test_python_contract_allows_dynamic_or_synthetic_bindings(content):
