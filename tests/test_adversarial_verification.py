@@ -140,6 +140,41 @@ class AdversarialVerificationTests(unittest.TestCase):
             self.assertTrue(os.path.exists(result["artifact_path"]))
             self.assertFalse(os.path.exists(os.path.join(td, "runs", prepared["run_id"], "archive_result.json")))
 
+    def test_preparation_normalizes_and_redacts_verification_exceptions(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            source = os.path.join(td, "notice.md")
+            with open(source, "w", encoding="utf-8") as stream:
+                stream.write("synthetic notice")
+            physical_path = os.path.join(td, "private", "verification.log")
+            sensitive = "to" + "ken=" + "synthetic-sensitive-value"
+            tools = DataCleaningTools(workspace_dir=td)
+
+            with (
+                patch.object(tools, "_use_archive_metadata_passthrough", return_value=True),
+                patch(
+                    "tools.adversarial_verification.AdversarialVerification.run",
+                    side_effect=RuntimeError(f"{sensitive} at {physical_path}"),
+                ),
+            ):
+                result = tools.prepare_file_organization_run([source])
+
+            error_item = next(
+                item
+                for item in result["review_queue"]["items"]
+                if item["type"] == "adversarial_verification_error"
+            )
+            self.assertTrue(error_item["id"])
+            self.assertTrue(error_item["question"])
+            self.assertEqual(
+                error_item["allowed_decisions"],
+                ["retry_verification", "defer", "accept_risk"],
+            )
+            serialized = json.dumps(result["review_queue"], ensure_ascii=False)
+            self.assertNotIn(sensitive, serialized)
+            self.assertNotIn(physical_path, serialized)
+
 
 if __name__ == "__main__":
     unittest.main()

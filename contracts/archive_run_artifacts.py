@@ -304,6 +304,10 @@ def validate_review_queue(payload: dict[str, Any], run_id: str) -> None:
         "project_overview_md", "file", "reason", "message", "verdict",
         "block_reason", "low_confidence_items", "verification_path",
         "feedback_updated_at",
+        "candidate_ids", "candidate_target_binding_ids", "evidence_refs",
+        "conflicts", "destination_status", "content_hash",
+        "artifact_schema_version", "interpreter", "model", "prompt_version",
+        "policy_version", "confirmed", "field", "expected_field",
     }
     for item in items:
         if type(item) is not dict or set(item) - allowed:
@@ -313,9 +317,20 @@ def validate_review_queue(payload: dict[str, Any], run_id: str) -> None:
         identifier = item.get("id", item.get("item_id"))
         if identifier is not None and type(identifier) is not str:
             raise ArchiveRunArtifactError("review queue item identity")
-        for key in ("allowed_decisions", "feedback_ids", "feedback_decisions", "blockers", "missing_fields", "risk_reasons", "recommended_actions"):
+        for key in ("allowed_decisions", "feedback_ids", "feedback_decisions", "blockers", "missing_fields", "risk_reasons", "recommended_actions", "candidate_ids", "candidate_target_binding_ids"):
             if key in item and (type(item[key]) is not list or any(type(value) is not str for value in item[key])):
                 raise ArchiveRunArtifactError("review queue item list")
+        for key in ("evidence", "evidence_refs", "conflicts"):
+            if key in item and type(item[key]) is not list:
+                raise ArchiveRunArtifactError("review queue evidence")
+        if "confirmed" in item and item["confirmed"] is not False:
+            raise ArchiveRunArtifactError("review queue cannot confirm authority")
+        if "content_hash" in item and (
+            type(item["content_hash"]) is not str or not _HASH.fullmatch(item["content_hash"])
+        ):
+            raise ArchiveRunArtifactError("review queue content hash")
+        if "destination_status" in item and item["destination_status"] not in {"resolved", "unresolved"}:
+            raise ArchiveRunArtifactError("review queue destination status")
         if "evidence" in item and type(item["evidence"]) is not list:
             raise ArchiveRunArtifactError("review queue evidence")
         if "source_ref" in item:
@@ -328,7 +343,7 @@ def validate_review_queue(payload: dict[str, Any], run_id: str) -> None:
         if "low_confidence_items" in item and type(item["low_confidence_items"]) is not list:
             raise ArchiveRunArtifactError("review queue low confidence items")
         for key, value in item.items():
-            if key not in {"evidence", "source_ref", "feedback_decisions", "allowed_decisions", "feedback_ids", "blockers", "missing_fields", "risk_reasons", "recommended_actions", "low_confidence_items"} and value is not None and type(value) is not str:
+            if key not in {"evidence", "evidence_refs", "conflicts", "source_ref", "feedback_decisions", "allowed_decisions", "feedback_ids", "blockers", "missing_fields", "risk_reasons", "recommended_actions", "low_confidence_items", "candidate_ids", "candidate_target_binding_ids", "confirmed"} and value is not None and type(value) is not str:
                 raise ArchiveRunArtifactError("review queue item scalar")
     if "feedback_summary" in payload:
         summary = payload["feedback_summary"]

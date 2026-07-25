@@ -11,6 +11,90 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class FeedbackFormTests(unittest.TestCase):
+    def test_feedback_reads_verdict_with_explicit_precedence(self):
+        from contracts.feedback_form_schema import build_feedback_form
+
+        cases = [
+            (
+                {
+                    "verification_verdict": "explicit",
+                    "overall_verdict": "overall",
+                    "status": "status",
+                },
+                "explicit",
+            ),
+            ({"overall_verdict": "needs_human_review", "status": "success"}, "needs_human_review"),
+            ({"status": "blocked"}, "blocked"),
+            ({}, ""),
+        ]
+        for verification, expected in cases:
+            with self.subTest(verification=verification):
+                form = build_feedback_form(
+                    run_id="run-1",
+                    review_queue={"items": []},
+                    audit_review={},
+                    adversarial_verification=verification,
+                )
+                self.assertEqual(form["verification_verdict"], expected)
+
+    def test_feedback_form_preserves_review_trace_and_binds_snapshot_without_sensitive_paths(self):
+        from contracts.feedback_form_schema import build_feedback_form
+
+        physical_path = os.path.join(tempfile.gettempdir(), "private", "source.md")
+        review_queue = {
+            "schema_version": "review_queue.v2",
+            "run_id": "run-trace",
+            "status": "needs_review",
+            "items": [{
+                "id": "R007",
+                "run_id": "run-trace",
+                "type": "archive_target_review",
+                "risk": "P1",
+                "question": "Review unresolved candidate target?",
+                "feedback_type": "archive_decision",
+                "allowed_decisions": ["approve", "reject", "edit_target", "defer"],
+                "recommended_decision": "defer",
+                "source_ref": {
+                    "storage_provider": "local",
+                    "object_key": "inbox/source.md",
+                    "logical_uri": "business://source/inbox/source.md",
+                    "binding_id": "source",
+                },
+                "candidate_ids": ["candidate-001"],
+                "candidate_target_binding_ids": ["archive-candidate"],
+                "evidence_refs": [{"kind": "business_context", "candidate_id": "candidate-001", "field": "contract_code"}],
+                "conflicts": [{"code": "BUSINESS_CONTEXT.AMBIGUOUS"}],
+                "destination_status": "unresolved",
+                "content_hash": "b" * 64,
+                "artifact_schema_version": "archive_intent.v1",
+                "model": "model-v1",
+                "prompt_version": "prompt-v1",
+                "policy_version": "policy-v1",
+                "confirmed": False,
+                "source_file": physical_path,
+            }],
+        }
+
+        form = build_feedback_form(
+            run_id="run-trace",
+            review_queue=review_queue,
+            audit_review={"required_feedback_items": ["R007"]},
+            adversarial_verification={},
+        )
+
+        item = form["items"][0]
+        self.assertEqual(item["item_id"], "R007")
+        self.assertEqual(len(item["review_item_hash"]), 64)
+        for key in (
+            "source_ref", "candidate_ids", "candidate_target_binding_ids",
+            "evidence_refs", "conflicts", "destination_status", "content_hash",
+            "artifact_schema_version", "model", "prompt_version", "policy_version",
+        ):
+            self.assertEqual(item[key], review_queue["items"][0][key])
+        self.assertFalse(item["confirmed"])
+        self.assertEqual(item["source_file"], "")
+        self.assertNotIn(physical_path, json.dumps(form, ensure_ascii=False))
+
     def test_prepare_feedback_form_writes_json_and_markdown_without_side_effects(self):
         from tools.data_cleaning_tools import DataCleaningTools
 

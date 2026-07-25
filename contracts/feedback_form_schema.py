@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
+import json
 from typing import Any, Dict, List
+
+from contracts.review_queue_schema import review_trace_projection
 
 
 def build_feedback_form(
@@ -17,6 +21,18 @@ def build_feedback_form(
         if not isinstance(raw_item, dict):
             continue
         item_id = str(raw_item.get("id") or raw_item.get("item_id") or "")
+        trace = review_trace_projection(raw_item)
+        snapshot = {
+            "item_id": item_id,
+            "run_id": run_id,
+            "type": raw_item.get("type", ""),
+            "risk": raw_item.get("risk") or raw_item.get("risk_level", "P2"),
+            "question": raw_item.get("question", ""),
+            "feedback_type": raw_item.get("feedback_type", "rule_exception"),
+            "allowed_decisions": raw_item.get("allowed_decisions") or ["accept", "reject", "defer"],
+            "recommended_decision": raw_item.get("recommended_decision", "defer"),
+            **trace,
+        }
         items.append({
             "item_id": item_id,
             "run_id": run_id,
@@ -26,11 +42,14 @@ def build_feedback_form(
             "feedback_type": raw_item.get("feedback_type", "rule_exception"),
             "allowed_decisions": raw_item.get("allowed_decisions") or ["accept", "reject", "defer"],
             "recommended_decision": raw_item.get("recommended_decision", "defer"),
-            "source_file": raw_item.get("source_file", raw_item.get("file", "")),
-            "target_path": raw_item.get("target_path", ""),
-            "field": raw_item.get("field", ""),
-            "expected_field": raw_item.get("expected_field", raw_item.get("field", "")),
-            "evidence": raw_item.get("evidence", []),
+            **trace,
+            "source_file": trace.get("source_file", trace.get("file", "")),
+            "target_path": trace.get("target_path", ""),
+            "field": trace.get("field", ""),
+            "expected_field": trace.get("expected_field", trace.get("field", "")),
+            "evidence": trace.get("evidence", []),
+            "confirmed": False,
+            "review_item_hash": _snapshot_hash(snapshot),
             "response": {
                 "decision": "",
                 "new_value": "",
@@ -45,7 +64,12 @@ def build_feedback_form(
         "run_id": run_id,
         "created_at": datetime.now().isoformat(),
         "audit_verdict": audit_review.get("audit_verdict", ""),
-        "verification_verdict": adversarial_verification.get("verification_verdict", ""),
+        "verification_verdict": (
+            adversarial_verification.get("verification_verdict")
+            or adversarial_verification.get("overall_verdict")
+            or adversarial_verification.get("status")
+            or ""
+        ),
         "required_feedback_items": sorted(required_ids),
         "items": items,
         "instructions": [
@@ -114,5 +138,33 @@ def feedback_decisions_from_form(form: Dict[str, Any]) -> List[Dict[str, Any]]:
             "target_path": item.get("target_path", ""),
             "finding_id": item.get("finding_id", ""),
             "reason": response.get("reason", item.get("reason", "")),
+            "review_item_hash": item.get("review_item_hash", ""),
+            "actor": response.get("actor", item.get("actor", "")),
+            "created_at": item.get("created_at", ""),
         })
     return decisions
+
+
+def review_item_snapshot_hash(item: Dict[str, Any], *, run_id: str) -> str:
+    item_id = str(item.get("id") or item.get("item_id") or "")
+    trace = review_trace_projection(item)
+    snapshot = {
+        "item_id": item_id,
+        "run_id": run_id,
+        "type": item.get("type", ""),
+        "risk": item.get("risk") or item.get("risk_level", "P2"),
+        "question": item.get("question", ""),
+        "feedback_type": item.get("feedback_type", "rule_exception"),
+        "allowed_decisions": item.get("allowed_decisions") or ["accept", "reject", "defer"],
+        "recommended_decision": item.get("recommended_decision", "defer"),
+        **trace,
+    }
+    return _snapshot_hash(snapshot)
+
+
+def _snapshot_hash(value: Dict[str, Any]) -> str:
+    encoded = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
