@@ -17,7 +17,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
@@ -25,7 +24,10 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 from platform_core.models import StructureIndexRequest
 from platform_core.ports import StructureIndex
 from platform_core.settings import AppSettings
-from skills.document_parse.providers import resolve_document_parse_runtime
+from skills.document_parse.providers import (
+    resolve_document_parse_cache_path,
+    resolve_document_parse_runtime,
+)
 
 
 PathLike = Union[str, os.PathLike]
@@ -114,6 +116,10 @@ class KnowledgeBaseUnavailable(RuntimeError):
             "provider": self.provider,
             "message": self.public_message,
         }
+
+
+class DocumentParseCacheLayoutError(ValueError):
+    """A cache marker or entry is not an owned document-parse artifact."""
 
 
 def _safe_provider_name(value: Any) -> str:
@@ -299,6 +305,7 @@ def get_kb_structure(
     environ: Optional[Mapping[str, str]] = None,
     structure_index: Optional[StructureIndex] = None,
     cache_path: Optional[PathLike] = None,
+    managed_cache_root: Optional[PathLike] = None,
 ) -> Dict[str, Any]:
     """Get the KB hierarchy through the configured StructureIndex provider."""
     runtime = resolve_document_parse_runtime(
@@ -307,6 +314,7 @@ def get_kb_structure(
         environ=environ,
         structure_index=structure_index,
         cache_path=cache_path,
+        managed_cache_root=managed_cache_root,
     )
     provider, provider_version = _provider_identity(runtime.structure_index)
     if provider == "disabled":
@@ -495,6 +503,7 @@ def query_kb(
     environ: Optional[Mapping[str, str]] = None,
     structure_index: Optional[StructureIndex] = None,
     cache_path: Optional[PathLike] = None,
+    managed_cache_root: Optional[PathLike] = None,
     diagnostics: Optional[List[Dict[str, str]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Query the KB, returning None when the fallback chain should continue."""
@@ -506,6 +515,7 @@ def query_kb(
             environ=environ,
             structure_index=structure_index,
             cache_path=cache_path,
+            managed_cache_root=managed_cache_root,
         )
     except KnowledgeBaseUnavailable as exc:
         if diagnostics is not None:
@@ -564,6 +574,87 @@ def query_kb(
     }
 
 
+_CACHE_ENTRY_FILENAME = re.compile(r"^(?P<key>[0-9a-f]{64})\.json$")
+
+
+def _read_owned_cache_json(path: Path, artifact_name: str) -> Dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise DocumentParseCacheLayoutError(
+            f"{artifact_name} must be a regular managed file"
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise DocumentParseCacheLayoutError(
+            f"{artifact_name} is not valid managed JSON"
+        ) from None
+    if not isinstance(payload, dict):
+        raise DocumentParseCacheLayoutError(
+            f"{artifact_name} must contain a JSON object"
+        )
+    return payload
+
+
+def _verify_cache_layout(
+    cache_path: Path,
+) -> tuple[bool, bool, List[Path]]:
+    entries_dir = _cache_entries_dir(cache_path)
+    marker_present = cache_path.exists() or cache_path.is_symlink()
+    entries_present = entries_dir.exists() or entries_dir.is_symlink()
+    if not marker_present:
+        if entries_present:
+            raise DocumentParseCacheLayoutError(
+                "cache marker is required before cache entries can be removed"
+            )
+        return False, False, []
+
+    marker = _read_owned_cache_json(cache_path, "cache marker")
+    if marker != {
+        "schema_version": _CACHE_SCHEMA_VERSION,
+        "layout": "per-key-v1",
+    }:
+        raise DocumentParseCacheLayoutError(
+            "cache marker has an unrecognized schema or layout"
+        )
+
+    if not entries_present:
+        return True, False, []
+    if entries_dir.is_symlink() or not entries_dir.is_dir():
+        raise DocumentParseCacheLayoutError(
+            "cache entry directory must be a regular managed directory"
+        )
+    try:
+        candidates = sorted(entries_dir.iterdir(), key=lambda path: path.name)
+    except OSError:
+        raise DocumentParseCacheLayoutError(
+            "cache entry directory could not be verified"
+        ) from None
+
+    verified: List[Path] = []
+    for entry_path in candidates:
+        match = _CACHE_ENTRY_FILENAME.fullmatch(entry_path.name)
+        if match is None:
+            raise DocumentParseCacheLayoutError(
+                "cache entry has an unrecognized filename"
+            )
+        entry = _read_owned_cache_json(entry_path, "cache entry")
+        key = match.group("key")
+        if set(entry) != {"schema_version", "cache_key", "result"}:
+            raise DocumentParseCacheLayoutError(
+                "cache entry has an unrecognized schema"
+            )
+        if (
+            entry.get("schema_version") != _CACHE_SCHEMA_VERSION
+            or entry.get("cache_key") != key
+            or not _is_valid_structure(entry.get("result"))
+        ):
+            raise DocumentParseCacheLayoutError(
+                "cache entry failed ownership validation"
+            )
+        verified.append(entry_path)
+    return True, True, verified
+
+
 def clear_cache(
     *,
     app_settings: Optional[AppSettings] = None,
@@ -571,18 +662,25 @@ def clear_cache(
     environ: Optional[Mapping[str, str]] = None,
     structure_index: Optional[StructureIndex] = None,
     cache_path: Optional[PathLike] = None,
+    managed_cache_root: Optional[PathLike] = None,
 ) -> None:
-    """Remove only the configured document-parse runtime cache artifacts."""
-    if cache_path is not None:
-        resolved_cache_path = Path(cache_path).expanduser().resolve()
-    else:
-        runtime = resolve_document_parse_runtime(
-            app_settings=app_settings,
-            config_file=config_file,
-            environ=environ,
-            structure_index=structure_index,
-            cache_path=None,
-        )
-        resolved_cache_path = runtime.cache_path
-    resolved_cache_path.unlink(missing_ok=True)
-    shutil.rmtree(_cache_entries_dir(resolved_cache_path), ignore_errors=True)
+    """Remove only cache artifacts whose marker and entries are verified."""
+    del structure_index  # retained for backward-compatible call signatures
+    _, resolved_cache_path = resolve_document_parse_cache_path(
+        app_settings=app_settings,
+        config_file=config_file,
+        environ=environ,
+        cache_path=cache_path,
+        managed_cache_root=managed_cache_root,
+    )
+    marker_present, entries_present, entries = _verify_cache_layout(
+        resolved_cache_path
+    )
+    if not marker_present:
+        return
+
+    for entry_path in entries:
+        entry_path.unlink()
+    if entries_present:
+        _cache_entries_dir(resolved_cache_path).rmdir()
+    resolved_cache_path.unlink()

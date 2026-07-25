@@ -24,9 +24,9 @@
   "properties": {
     "schema_version": {"const": "document_parse.v1"},
     "run_id": {"type": "string", "minLength": 1},
-    "status": {"enum": ["success", "needs_review", "blocked"]},
+    "status": {"enum": ["success", "needs_review", "blocked", "failed"]},
     "source_type": {"enum": ["file", "url"]},
-    "source_path": {"type": "string", "minLength": 1},
+    "source_path": {"type": "string"},
     "file_type": {"type": "string"},
     "executor_used": {
       "enum": ["docx", "xlsx", "pdf", "wps", "url", "unknown"]
@@ -122,5 +122,18 @@
     },
     "elapsed_seconds": {"type": "number", "minimum": 0}
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"reason": {"const": "source_missing"}},
+        "required": ["reason"]
+      },
+      "else": {
+        "properties": {
+          "source_path": {"minLength": 1}
+        }
+      }
+    }
+  ],
   "additionalProperties": false
 }

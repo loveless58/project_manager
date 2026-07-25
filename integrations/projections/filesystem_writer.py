@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Union
 
 from platform_core.models import ProjectionRef, ProjectionRequest
+from platform_core.logical_paths import LogicalPathError, resolve_logical_path
 
 
 class ProjectionPathError(ValueError):
@@ -25,18 +26,18 @@ class FilesystemProjectionWriter:
     def __init__(self, root: Union[str, Path]) -> None:
         self.root = Path(root).expanduser().resolve()
 
-    def _resolve(self, relative_path: str) -> Path:
-        target = (self.root / relative_path).resolve()
+    def _resolve(self, relative_path: str) -> tuple[Path, str]:
         try:
-            target.relative_to(self.root)
-        except ValueError as exc:
-            raise ProjectionPathError("projection path resolves outside configured root") from exc
-        if target == self.root:
-            raise ProjectionPathError("projection path must name a file below configured root")
-        return target
+            target, canonical = resolve_logical_path(self.root, relative_path)
+        except LogicalPathError as exc:
+            raise ProjectionPathError(
+                "projection path must name a file below configured root; "
+                "non-canonical paths may resolve outside configured root"
+            ) from exc
+        return target, canonical.value
 
     def write(self, request: ProjectionRequest) -> ProjectionRef:
-        target = self._resolve(request.relative_path)
+        target, logical_path = self._resolve(request.relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         payload = request.content.encode("utf-8")
         temp_name = ""
@@ -54,10 +55,9 @@ class FilesystemProjectionWriter:
         finally:
             if temp_name and os.path.exists(temp_name):
                 os.unlink(temp_name)
-        normalized_path = target.relative_to(self.root).as_posix()
         return ProjectionRef(
             provider=self.name,
-            logical_uri=f"projection://{normalized_path}",
+            logical_uri=f"projection://{logical_path}",
             sha256=hashlib.sha256(payload).hexdigest(),
             size_bytes=len(payload),
         )

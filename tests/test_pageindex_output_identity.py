@@ -22,7 +22,10 @@ from platform_core.models import StructureIndexRequest
 
 
 def _install_fake_runtime(pageindex_dir: Path) -> PageIndexClient:
-    client = PageIndexClient(str(pageindex_dir))
+    client = PageIndexClient(
+        str(pageindex_dir),
+        workspace_root=str(pageindex_dir.parent / "runtime" / "pageindex"),
+    )
     Path(client.python_bin).parent.mkdir(parents=True)
     Path(client.python_bin).touch()
     Path(client.cli_script).touch()
@@ -62,7 +65,15 @@ def _fake_cli_runner(*, actual_cwds=None, rendezvous=None):
             json.dumps(
                 {
                     "doc_name": staged_source.name,
-                    "structure": [{"title": marker, "nodes": []}],
+                    "structure": [
+                        {
+                            "title": marker,
+                            "node_id": "0001",
+                            "start_index": 1,
+                            "end_index": 1,
+                            "nodes": [],
+                        }
+                    ],
                 }
             ),
             encoding="utf-8",
@@ -431,50 +442,48 @@ def test_indexed_pdf_keeps_private_source_for_page_content_helper(
 
 
 @pytest.mark.parametrize("replace_published_pdf", [False, True])
-def test_json_publish_failure_only_removes_operation_owned_pdf(
+def test_json_publish_failure_never_unlinks_deterministic_source_in_hot_path(
     tmp_path, monkeypatch, replace_published_pdf
 ):
     pageindex_dir = tmp_path / "pageindex"
     client = _install_fake_runtime(pageindex_dir)
-    client = PageIndexClient(
-        str(pageindex_dir),
-        workspace_root=str(tmp_path / "runtime"),
-    )
     source = tmp_path / "source.pdf"
     source.write_bytes(b"operation-owned-source")
     monkeypatch.setattr(subprocess, "run", _fake_cli_runner())
-    real_replace = os.replace
+    real_link = os.link
     published_pdf = []
 
-    def fail_json_publish(source_path, target_path):
+    def fail_json_publish(source_path, target_path, *args, **kwargs):
         target_path = Path(target_path)
         if target_path.suffix == ".pdf":
-            real_replace(source_path, target_path)
+            real_link(source_path, target_path, *args, **kwargs)
             published_pdf.append(target_path)
             if replace_published_pdf:
                 replacement = target_path.parent / "replacement.tmp"
                 replacement.write_bytes(b"replacement-not-owned-by-operation")
-                real_replace(replacement, target_path)
+                os.replace(replacement, target_path)
             return
         if target_path.suffix == ".json":
             assert published_pdf
             raise OSError("injected JSON artifact publication failure")
-        real_replace(source_path, target_path)
+        real_link(source_path, target_path, *args, **kwargs)
 
-    monkeypatch.setattr(os, "replace", fail_json_publish)
+    monkeypatch.setattr(os, "link", fail_json_publish)
 
     result = client.index_pdf(str(source))
 
     assert result["status"] == "failed"
     assert result["error_code"] == "PAGEINDEX.RESULT.PERSIST_FAILED"
     assert len(published_pdf) == 1
-    assert published_pdf[0].name.startswith("source-")
+    assert published_pdf[0].name == f"source-{build_operation_identity('standalone', _content_hash(source), client.provider_version)}.pdf"
+    assert published_pdf[0].is_file()
     if replace_published_pdf:
         assert published_pdf[0].read_bytes() == (
             b"replacement-not-owned-by-operation"
         )
     else:
-        assert not published_pdf[0].exists()
+        assert published_pdf[0].read_bytes() == source.read_bytes()
+    assert not list(published_pdf[0].parent.glob("*.json"))
 
 
 def test_concurrent_same_operation_failure_cannot_delete_committed_snapshot(
@@ -490,17 +499,20 @@ def test_concurrent_same_operation_failure_cannot_delete_committed_snapshot(
     source.write_bytes(b"same-operation-concurrency")
     content_hash = _content_hash(source)
     monkeypatch.setattr(subprocess, "run", _fake_cli_runner())
-    real_replace = os.replace
+    real_link = os.link
     json_barrier = threading.Barrier(2)
     order_lock = threading.Lock()
     json_publishers = []
     published_pdf_by_thread = {}
 
-    def interleaved_replace(source_path, target_path):
+    def interleaved_link(source_path, target_path, *args, **kwargs):
         thread_id = threading.get_ident()
         target_path = Path(target_path)
         if target_path.suffix == ".pdf":
-            real_replace(source_path, target_path)
+            try:
+                real_link(source_path, target_path, *args, **kwargs)
+            except FileExistsError:
+                pass
             published_pdf_by_thread[thread_id] = target_path
             return
         if target_path.suffix == ".json":
@@ -510,11 +522,11 @@ def test_concurrent_same_operation_failure_cannot_delete_committed_snapshot(
             json_barrier.wait(timeout=5)
             if json_publish_order == 0:
                 raise OSError("injected first-attempt JSON failure")
-            real_replace(source_path, target_path)
+            real_link(source_path, target_path, *args, **kwargs)
             return
-        real_replace(source_path, target_path)
+        real_link(source_path, target_path, *args, **kwargs)
 
-    monkeypatch.setattr(os, "replace", interleaved_replace)
+    monkeypatch.setattr(os, "link", interleaved_link)
 
     def index_once():
         thread_id = threading.get_ident()
@@ -534,9 +546,9 @@ def test_concurrent_same_operation_failure_cannot_delete_committed_snapshot(
     failed = next(item for item in attempts if item[1]["status"] == "failed")
     successful_source = published_pdf_by_thread[successful[0]]
     failed_source = published_pdf_by_thread[failed[0]]
-    assert successful_source != failed_source
+    assert successful_source == failed_source
     assert successful_source.is_file()
-    assert not failed_source.exists()
+    assert failed_source.is_file()
     artifact_path = Path(successful[1]["structure_json_path"])
     envelope = json.loads(artifact_path.read_text(encoding="utf-8"))
     assert envelope["source_artifact_name"] == successful_source.name
@@ -608,7 +620,15 @@ def test_pdf_staging_uses_fixed_extension_for_long_source_suffix(
             json.dumps(
                 {
                     "doc_name": staged_source.name,
-                    "structure": [{"title": "ok", "nodes": []}],
+                    "structure": [
+                        {
+                            "title": "ok",
+                            "node_id": "0001",
+                            "start_index": 1,
+                            "end_index": 1,
+                            "nodes": [],
+                        }
+                    ],
                 }
             ),
             encoding="utf-8",

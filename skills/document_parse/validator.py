@@ -82,7 +82,7 @@ def _validate_manual(result: Dict[str, Any]) -> Tuple[bool, List[str]]:
             f"got '{result.get('schema_version')}'"
         )
 
-    _check_enum(result, "status", ["success", "needs_review", "blocked"], errors)
+    _check_enum(result, "status", ["success", "needs_review", "blocked", "failed"], errors)
     _check_enum(result, "source_type", ["file", "url"], errors)
     _check_enum(
         result,
@@ -112,6 +112,12 @@ def _validate_manual(result: Dict[str, Any]) -> Tuple[bool, List[str]]:
         ],
         errors,
     )
+
+    source_path = result.get("source_path")
+    if not isinstance(source_path, str):
+        errors.append("source_path: must be a string")
+    elif not source_path and result.get("reason") != "source_missing":
+        errors.append("source_path: must not be empty unless source is missing")
 
     elapsed = result.get("elapsed_seconds")
     if elapsed is not None and (not isinstance(elapsed, (int, float)) or elapsed < 0):

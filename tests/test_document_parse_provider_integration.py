@@ -81,15 +81,21 @@ def _pageindex_runner(actual_cwds):
                         {
                             "title": "文档分类",
                             "node_id": "0000",
+                            "start_index": 1,
+                            "end_index": 3,
                             "nodes": [
                                 {
                                     "title": "招标公告",
                                     "node_id": "0001",
+                                    "start_index": 2,
+                                    "end_index": 2,
                                     "nodes": [],
                                 },
                                 {
                                     "title": "采购公告",
                                     "node_id": "0002",
+                                    "start_index": 3,
+                                    "end_index": 3,
                                     "nodes": [],
                                 },
                             ],
@@ -282,6 +288,7 @@ def test_injected_structure_index_receives_content_identity_and_cache_path(
         force_reindex=True,
         structure_index=adapter,
         cache_path=cache_path,
+        managed_cache_root=cache_path.parent,
         config_file=invalid_config,
         environ={
             "PROJECT_MANAGER_DEPLOYMENT_MODE": "central",
@@ -351,10 +358,12 @@ def test_kb_cache_identity_uses_content_hash_and_provider_version(
         force_reindex=True,
         structure_index=adapter,
         cache_path=cache_path,
+        managed_cache_root=cache_path.parent,
     )
     cached = kb.get_kb_structure(
         structure_index=adapter,
         cache_path=cache_path,
+        managed_cache_root=cache_path.parent,
     )
 
     assert first == cached
@@ -376,6 +385,7 @@ def test_kb_cache_identity_uses_content_hash_and_provider_version(
     kb.get_kb_structure(
         structure_index=adapter,
         cache_path=cache_path,
+        managed_cache_root=cache_path.parent,
     )
 
     assert len(adapter.requests) == 2
@@ -385,6 +395,7 @@ def test_kb_cache_identity_uses_content_hash_and_provider_version(
     kb.get_kb_structure(
         structure_index=adapter,
         cache_path=cache_path,
+        managed_cache_root=cache_path.parent,
     )
 
     assert len(adapter.requests) == 3
@@ -449,20 +460,22 @@ def test_concurrent_cache_writes_preserve_each_provider_identity(
             True,
             structure_index=first,
             cache_path=cache_path,
+            managed_cache_root=cache_path.parent,
         )
         second_future = pool.submit(
             kb.get_kb_structure,
             True,
             structure_index=second,
             cache_path=cache_path,
+            managed_cache_root=cache_path.parent,
         )
         first_future.result(timeout=10)
         second_future.result(timeout=10)
 
     assert len(first.requests) == len(second.requests) == 1
 
-    kb.get_kb_structure(structure_index=first, cache_path=cache_path)
-    kb.get_kb_structure(structure_index=second, cache_path=cache_path)
+    kb.get_kb_structure(structure_index=first, cache_path=cache_path, managed_cache_root=cache_path.parent)
+    kb.get_kb_structure(structure_index=second, cache_path=cache_path, managed_cache_root=cache_path.parent)
 
     assert len(first.requests) == len(second.requests) == 1
 
@@ -496,6 +509,7 @@ def test_missing_provider_version_falls_back_without_index_or_cache(
         {"raw_text": "普通文档"},
         structure_index=adapter,
         cache_path=cache_path,
+        managed_cache_root=cache_path.parent,
         diagnostics=diagnostics,
     )
 
@@ -537,6 +551,7 @@ def test_unreadable_pageindex_manifest_never_indexes_or_writes_kb_cache(
         {"raw_text": "普通文档"},
         structure_index=adapter,
         cache_path=cache_path,
+        managed_cache_root=cache_path.parent,
         diagnostics=diagnostics,
     )
 
@@ -593,6 +608,7 @@ def test_provider_version_change_during_index_is_not_cached(
         {"raw_text": "普通文档"},
         structure_index=adapter,
         cache_path=cache_path,
+        managed_cache_root=cache_path.parent,
         diagnostics=diagnostics,
     )
 

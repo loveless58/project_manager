@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import BinaryIO, Union
 
 from platform_core.models import DocumentRef, ObjectStat
+from platform_core.logical_paths import LogicalPathError, resolve_logical_path
 
 
 class DocumentStorePathError(ValueError):
@@ -28,11 +29,17 @@ class LocalDocumentStore:
             raise DocumentStorePathError(
                 f"provider mismatch: expected {self.name}, got {ref.storage_provider}"
             )
-        candidate = (self.root / ref.object_key).resolve()
         try:
-            candidate.relative_to(self.root)
-        except ValueError as exc:
-            raise DocumentStorePathError("object key resolves outside configured root") from exc
+            candidate, canonical = resolve_logical_path(self.root, ref.object_key)
+        except LogicalPathError as exc:
+            raise DocumentStorePathError(
+                "object key is non-canonical or resolves outside configured root"
+            ) from exc
+        expected_uri = f"local://{canonical.value}"
+        if ref.logical_uri != expected_uri:
+            raise DocumentStorePathError(
+                "logical URI does not match the canonical local object key"
+            )
         return candidate
 
     def stat(self, ref: DocumentRef) -> ObjectStat:

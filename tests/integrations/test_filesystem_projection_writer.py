@@ -76,19 +76,17 @@ def test_projection_writer_rejects_existing_symlink_to_outside_root(tmp_path: Pa
         FilesystemProjectionWriter(tmp_path).write(request)
 
 
-def test_projection_writer_uses_normalized_target_path_for_logical_uri(tmp_path: Path) -> None:
-    from integrations.projections.filesystem_writer import FilesystemProjectionWriter
+def test_projection_writer_rejects_noncanonical_path_instead_of_normalizing(
+    tmp_path: Path,
+) -> None:
+    from integrations.projections.filesystem_writer import FilesystemProjectionWriter, ProjectionPathError
 
     writer = FilesystemProjectionWriter(tmp_path)
-    nested_request = ProjectionRequest("json", "exports/../queue.json", "{}", "application/json")
-    direct_request = ProjectionRequest("json", "queue.json", "{}", "application/json")
+    request = ProjectionRequest("json", "exports/../queue.json", "{}", "application/json")
 
-    nested_result = writer.write(nested_request)
-    direct_result = writer.write(direct_request)
-
-    assert nested_result.logical_uri == "projection://queue.json"
-    assert direct_result.logical_uri == nested_result.logical_uri
-    assert (tmp_path / "queue.json").read_bytes() == b"{}"
+    with pytest.raises(ProjectionPathError):
+        writer.write(request)
+    assert not (tmp_path / "queue.json").exists()
 
 
 def test_projection_writer_is_idempotent_for_identical_utf8_json(tmp_path: Path) -> None:

@@ -412,6 +412,34 @@ class PageIndexClient:
                     round(time.time() - start, 2),
                 )
 
+            try:
+                committed = self._load_committed_artifact(
+                    operation_id=resolved_operation_id,
+                    document_version_id=canonical_document_version_id,
+                    content_hash=source_sha256,
+                    source_sha256=source_sha256,
+                    provider_version=pinned_provider_version,
+                    is_pdf=staged_suffix == ".pdf",
+                )
+            except _OperationFailure as exc:
+                return self._failed(exc.error_code, round(time.time() - start, 2))
+            if committed is not None:
+                current_provider_version = self.provider_version
+                if not current_provider_version:
+                    return self._failed(
+                        "PAGEINDEX.RUNTIME.VERSION_UNAVAILABLE",
+                        round(time.time() - start, 2),
+                    )
+                if current_provider_version != pinned_provider_version:
+                    return self._failed(
+                        "PAGEINDEX.RUNTIME.VERSION_CHANGED",
+                        round(time.time() - start, 2),
+                    )
+                return self._success_from_artifact(
+                    committed,
+                    elapsed=round(time.time() - start, 2),
+                )
+
             environment_failure = self._environment_failure()
             if environment_failure is not None:
                 return environment_failure
@@ -483,11 +511,16 @@ class PageIndexClient:
             except json.JSONDecodeError:
                 return self._failed("PAGEINDEX.RESULT.INVALID_JSON", elapsed)
 
-            if not self._has_valid_result_schema(data):
+            max_position = (
+                self._pdf_page_count(staged_source)
+                if staged_suffix == ".pdf"
+                else None
+            )
+            if not self._has_valid_result_schema(data, max_position=max_position):
                 return self._failed("PAGEINDEX.RESULT.INVALID_SCHEMA", elapsed)
 
             try:
-                artifact_path, source_artifact_path = self._persist_artifact(
+                artifact_path, committed = self._persist_artifact(
                     operation_id=resolved_operation_id,
                     document_version_id=canonical_document_version_id,
                     content_hash=source_sha256,
@@ -500,26 +533,47 @@ class PageIndexClient:
             except _OperationFailure as exc:
                 return self._failed(exc.error_code, elapsed)
 
-            result = {
-                "status": "success",
-                "engine": "pageindex",
-                "doc_name": os.path.basename(source_path),
-                "doc_id": resolved_operation_id,
-                "operation_id": resolved_operation_id,
-                "provider_version": pinned_provider_version,
-                "content_hash": source_sha256,
-                "source_sha256": source_sha256,
-                "structure": data.get("structure", []),
-                "structure_json_path": artifact_path,
-                "elapsed_seconds": elapsed,
-            }
-            if source_artifact_path:
-                result["source_artifact_path"] = source_artifact_path
-                result["source_artifact_name"] = Path(source_artifact_path).name
-            return result
+            return self._success_from_artifact(
+                committed,
+                artifact_path=artifact_path,
+                elapsed=elapsed,
+            )
         finally:
             if attempt_dir is not None:
                 shutil.rmtree(attempt_dir, ignore_errors=True)
+
+    def _success_from_artifact(
+        self,
+        envelope: Mapping[str, Any],
+        *,
+        artifact_path: Optional[str] = None,
+        elapsed: float,
+    ) -> Dict[str, Any]:
+        resolved_artifact_path = artifact_path or str(
+            Path(self.workspace_root)
+            / "artifacts"
+            / f"{envelope['operation_id']}.json"
+        )
+        result: Dict[str, Any] = {
+            "status": "success",
+            "engine": "pageindex",
+            "doc_name": envelope["doc_name"],
+            "doc_id": envelope["operation_id"],
+            "operation_id": envelope["operation_id"],
+            "provider_version": envelope["provider_version"],
+            "content_hash": envelope["content_hash"],
+            "source_sha256": envelope["source_sha256"],
+            "structure": envelope["structure"],
+            "structure_json_path": resolved_artifact_path,
+            "elapsed_seconds": elapsed,
+        }
+        source_artifact_name = envelope.get("source_artifact_name")
+        if isinstance(source_artifact_name, str) and source_artifact_name:
+            result["source_artifact_name"] = source_artifact_name
+            result["source_artifact_path"] = str(
+                Path(resolved_artifact_path).parent / source_artifact_name
+            )
+        return result
 
     def _stage_operation(
         self,
@@ -600,6 +654,34 @@ class PageIndexClient:
                 digest.update(block)
         return digest.hexdigest()
 
+    @staticmethod
+    def _pdf_page_count(path: Path) -> Optional[int]:
+        """Return a physical page upper bound when a local PDF reader can inspect it."""
+        try:
+            import fitz
+
+            document = fitz.open(path)
+            try:
+                page_count = int(document.page_count)
+            finally:
+                document.close()
+        except Exception:
+            try:
+                import PyPDF2
+
+                with path.open("rb") as source:
+                    page_count = len(PyPDF2.PdfReader(source).pages)
+            except Exception:
+                try:
+                    with path.open("rb") as source:
+                        header = source.read(5)
+                except OSError:
+                    return 0
+                # Preserve legacy non-PDF test doubles, but fail closed for
+                # real PDF syntax whose physical page count is unreadable.
+                return 0 if header == b"%PDF-" else None
+        return page_count if page_count > 0 else 0
+
     def _persist_artifact(
         self,
         *,
@@ -611,18 +693,16 @@ class PageIndexClient:
         doc_name: str,
         staged_source: Path,
         structure: List[Any],
-    ) -> tuple[str, str]:
+    ) -> tuple[str, Mapping[str, Any]]:
         artifact_root = Path(self.workspace_root) / "artifacts"
         target = artifact_root / f"{operation_id}.json"
         temporary = artifact_root / f".{uuid.uuid4().hex}.json.tmp"
         source_target: Optional[Path] = None
         source_temporary: Optional[Path] = None
-        published_source_identity: Optional[tuple[int, int, int, int]] = None
         if staged_source.suffix.lower() == ".pdf":
-            source_publication_id = uuid.uuid4().hex
-            source_target = artifact_root / f"source-{source_publication_id}.pdf"
+            source_target = artifact_root / f"source-{operation_id}.pdf"
             source_temporary = (
-                artifact_root / f".source-{source_publication_id}.pdf.tmp"
+                artifact_root / f".source-{uuid.uuid4().hex}.pdf.tmp"
             )
         paths_to_check = [target, temporary]
         if source_target is not None and source_temporary is not None:
@@ -652,10 +732,12 @@ class PageIndexClient:
                         shutil.copyfileobj(source, destination)
                         destination.flush()
                         os.fsync(destination.fileno())
-                published_source_identity = self._file_identity(
-                    source_temporary
-                )
-                os.replace(source_temporary, source_target)
+                try:
+                    os.link(source_temporary, source_target)
+                except FileExistsError:
+                    pass
+                if self._sha256_file(source_target) != source_sha256:
+                    raise OSError("committed source hash mismatch")
 
             with temporary.open("x", encoding="utf-8") as destination:
                 json.dump(
@@ -667,21 +749,22 @@ class PageIndexClient:
                 )
                 destination.flush()
                 os.fsync(destination.fileno())
-            os.replace(temporary, target)
-        except (OSError, TypeError, ValueError):
-            if (
-                source_target is not None
-                and published_source_identity is not None
-                and not self._artifact_references_source(
-                    target, source_target.name
+            try:
+                os.link(temporary, target)
+                committed: Mapping[str, Any] = envelope
+            except FileExistsError:
+                existing = self._load_committed_artifact(
+                    operation_id=operation_id,
+                    document_version_id=document_version_id,
+                    content_hash=content_hash,
+                    source_sha256=source_sha256,
+                    provider_version=provider_version,
+                    is_pdf=source_target is not None,
                 )
-                and self._file_identity(source_target)
-                == published_source_identity
-            ):
-                try:
-                    source_target.unlink()
-                except OSError:
-                    pass
+                if existing is None:
+                    raise OSError("commit marker disappeared")
+                committed = existing
+        except (OSError, TypeError, ValueError):
             raise _OperationFailure("PAGEINDEX.RESULT.PERSIST_FAILED") from None
         finally:
             for temporary_path in (temporary, source_temporary):
@@ -691,10 +774,61 @@ class PageIndexClient:
                     temporary_path.unlink(missing_ok=True)
                 except OSError:
                     pass
-        return (
-            str(target),
-            str(source_target) if source_target is not None else "",
-        )
+        return str(target), committed
+
+    def _load_committed_artifact(
+        self,
+        *,
+        operation_id: str,
+        document_version_id: str,
+        content_hash: str,
+        source_sha256: str,
+        provider_version: str,
+        is_pdf: bool,
+    ) -> Optional[Mapping[str, Any]]:
+        artifact_root = Path(self.workspace_root) / "artifacts"
+        target = artifact_root / f"{operation_id}.json"
+        if not target.exists():
+            return None
+        try:
+            with target.open("r", encoding="utf-8") as source:
+                payload = json.load(source)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            raise _OperationFailure("PAGEINDEX.RESULT.PERSIST_FAILED") from None
+        expected_source_name = f"source-{operation_id}.pdf" if is_pdf else None
+        expected_fields = {
+            "schema_version": "pageindex_artifact.v2",
+            "operation_id": operation_id,
+            "document_version_id": document_version_id,
+            "content_hash": content_hash,
+            "source_sha256": source_sha256,
+            "provider": "pageindex",
+            "provider_version": provider_version,
+            "source_artifact_name": expected_source_name,
+        }
+        if not isinstance(payload, Mapping) or any(
+            payload.get(key) != value for key, value in expected_fields.items()
+        ):
+            raise _OperationFailure("PAGEINDEX.RESULT.PERSIST_FAILED")
+        if not isinstance(payload.get("doc_name"), str) or not isinstance(
+            payload.get("structure"), list
+        ):
+            raise _OperationFailure("PAGEINDEX.RESULT.PERSIST_FAILED")
+        max_position: Optional[int] = None
+        if expected_source_name is not None:
+            source_target = artifact_root / expected_source_name
+            try:
+                if self._sha256_file(source_target) != source_sha256:
+                    raise _OperationFailure("PAGEINDEX.RESULT.PERSIST_FAILED")
+            except OSError:
+                raise _OperationFailure("PAGEINDEX.RESULT.PERSIST_FAILED") from None
+            max_position = self._pdf_page_count(source_target)
+        if not self._has_valid_nodes(
+            payload["structure"],
+            max_position=max_position,
+        ):
+            raise _OperationFailure("PAGEINDEX.RESULT.PERSIST_FAILED")
+        return payload
 
     @staticmethod
     def _file_identity(path: Path) -> Optional[tuple[int, int, int, int]]:
@@ -755,7 +889,10 @@ class PageIndexClient:
         cutoff = time.time() - grace_seconds
         removed = 0
         for candidate in artifact_root.glob("source-*.pdf"):
-            if not re.fullmatch(r"source-[0-9a-f]{32}\.pdf", candidate.name):
+            if not re.fullmatch(
+                r"source-(?:[0-9a-f]{32}|[0-9a-f]{64})\.pdf",
+                candidate.name,
+            ):
                 continue
             try:
                 if candidate.stat().st_mtime > cutoff:
@@ -795,7 +932,12 @@ class PageIndexClient:
         )
 
     @classmethod
-    def _has_valid_result_schema(cls, data: Any) -> bool:
+    def _has_valid_result_schema(
+        cls,
+        data: Any,
+        *,
+        max_position: Optional[int] = None,
+    ) -> bool:
         """Validate only the JSON fields consumed by the public client result."""
         if not isinstance(data, Mapping):
             return False
@@ -803,17 +945,41 @@ class PageIndexClient:
         if doc_name is not None and not isinstance(doc_name, str):
             return False
         structure = data.get("structure", [])
-        return isinstance(structure, list) and cls._has_valid_nodes(structure)
+        return isinstance(structure, list) and cls._has_valid_nodes(
+            structure,
+            max_position=max_position,
+        )
 
     @classmethod
-    def _has_valid_nodes(cls, nodes: List[Any]) -> bool:
+    def _has_valid_nodes(
+        cls,
+        nodes: List[Any],
+        *,
+        max_position: Optional[int] = None,
+    ) -> bool:
+        if max_position is not None and max_position < 1:
+            return False
         for node in nodes:
             if not isinstance(node, Mapping):
                 return False
-            if "nodes" in node:
-                children = node["nodes"]
-                if not isinstance(children, list) or not cls._has_valid_nodes(children):
-                    return False
+            if not isinstance(node.get("title"), str):
+                return False
+            if not isinstance(node.get("node_id"), str):
+                return False
+            start_index = node.get("start_index")
+            end_index = node.get("end_index")
+            if type(start_index) is not int or type(end_index) is not int:
+                return False
+            if start_index < 1 or end_index < 1 or start_index > end_index:
+                return False
+            if max_position is not None and end_index > max_position:
+                return False
+            children = node.get("nodes")
+            if not isinstance(children, list) or not cls._has_valid_nodes(
+                children,
+                max_position=max_position,
+            ):
+                return False
         return True
 
     def get_page_content(self, pdf_path: str, pages: str) -> List[Dict[str, Any]]:
@@ -878,12 +1044,17 @@ class PageIndexClient:
         pattern = re.compile(keyword, re.IGNORECASE)
         matches: List[Dict[str, Any]] = []
 
-        def traverse(nodes: List[Dict[str, Any]]) -> None:
+        def traverse(nodes: Any) -> None:
+            if not isinstance(nodes, list):
+                return
             for node in nodes:
-                if pattern.search(node.get("title", "")):
+                if not isinstance(node, Mapping):
+                    continue
+                title = node.get("title")
+                if isinstance(title, str) and pattern.search(title):
                     matches.append(
                         {
-                            "title": node.get("title"),
+                            "title": title,
                             "node_id": node.get("node_id"),
                             "start_index": node.get("start_index"),
                             "end_index": node.get("end_index"),
@@ -891,10 +1062,11 @@ class PageIndexClient:
                         }
                     )
                 children = node.get("nodes")
-                if children:
+                if isinstance(children, list):
                     traverse(children)
 
-        traverse(index_result.get("structure", []))
+        if isinstance(index_result, Mapping):
+            traverse(index_result.get("structure", []))
         return matches
 
     @staticmethod

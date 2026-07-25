@@ -172,13 +172,14 @@ def make_llm_extractor(
                 "llm_tokens_used": r["tokens"],
                 "llm_finish_reason": r["finish_reason"],
             }
-        except Exception as e:
+        except Exception:
             return {
                 "category": "其他",
                 "extracted_fields": {},
                 "confidence": "low",
                 "rule_source": "llm",
-                "llm_error": str(e),
+                "llm_error": "DOCUMENT_PARSE.LLM.REQUEST_FAILED",
+                "llm_error_message": "LLM request failed.",
             }
 
     return llm_extractor

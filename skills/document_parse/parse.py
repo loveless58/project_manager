@@ -25,6 +25,24 @@ from skills.document_parse.validator import validate
 
 SCHEMA_VERSION = "document_parse.v1"
 
+_REQUIRED_RESULT_FIELDS = (
+    "schema_version",
+    "run_id",
+    "status",
+    "source_type",
+    "source_path",
+    "file_type",
+    "executor_used",
+    "executor_implementation_status",
+    "parse_intent",
+    "extracted_data",
+    "business_judgement",
+    "validation",
+    "reason",
+    "knowledge_base_used",
+    "elapsed_seconds",
+)
+
 
 def parse(
     source: str,
@@ -38,6 +56,7 @@ def parse(
     environ: Optional[Mapping[str, str]] = None,
     structure_index: Optional[StructureIndex] = None,
     kb_cache_path: Any = None,
+    kb_managed_cache_root: Any = None,
     include_diagnostics: bool = False,
 ) -> Dict[str, Any]:
     """主入口。
@@ -51,9 +70,10 @@ def parse(
         app_settings: 已解析的统一应用配置；未提供完整显式依赖时使用。
         config_file: settings JSON 路径，仅在需要加载配置时读取。
         environ: settings 环境变量映射，仅在需要加载配置时读取。
-        structure_index: 显式注入的 StructureIndex；与 kb_cache_path 同时
-            提供时完全绕过 settings 加载。
+        structure_index: 显式注入的 StructureIndex；与 kb_cache_path、
+            kb_managed_cache_root 同时提供时完全绕过 settings 加载。
         kb_cache_path: 显式注入的节点本地 KB cache 路径。
+        kb_managed_cache_root: 无 settings 注入时必需的受管 cache 根目录。
         include_diagnostics: 是否附加脱敏的降级诊断。默认 False，确保
             document_parse.v1 的既有顶层返回形状不新增字段。
 
@@ -64,6 +84,21 @@ def parse(
     rid = run_id or f"run-{uuid.uuid4()}"
     diagnostics: List[Dict[str, str]] = []
     is_url = bool(source) and source.startswith(("http://", "https://"))
+
+    if not source:
+        return _build_blocked_result(
+            rid=rid,
+            source=source,
+            source_type="file",
+            file_type="unknown",
+            executor_used="unknown",
+            elapsed=time.time() - start,
+            reason="source_missing",
+            error="Source is required.",
+            impl_status="implemented",
+            parse_intent=parse_intent,
+            include_diagnostics=include_diagnostics,
+        )
 
     # Step 1: 路由
     try:
@@ -79,19 +114,51 @@ def parse(
             reason="parse_error",
             error=str(e),
             impl_status="implemented",
+            parse_intent=parse_intent,
             include_diagnostics=include_diagnostics,
         )
 
     source_type = "url" if file_type == "url" else "file"
 
     # Step 2: executor 提取
-    executor_result = executor.extract(source)
+    try:
+        executor_result = executor.extract(source)
+    except Exception:
+        return _build_blocked_result(
+            rid=rid,
+            source=source,
+            source_type=source_type,
+            file_type=file_type,
+            executor_used=executor.name,
+            elapsed=time.time() - start,
+            reason="parse_error",
+            error="Document executor failed.",
+            impl_status="implemented",
+            parse_intent=parse_intent,
+            status="failed",
+            include_diagnostics=include_diagnostics,
+        )
 
     # Step 3: 组装结果
     elapsed = time.time() - start
 
     if executor_result["status"] != "success":
         impl_status = executor_result.get("implementation_status", "implemented")
+        executor_status = executor_result.get("status")
+        source_missing = source_type == "file" and not os.path.exists(source)
+        if executor_status == "failed":
+            status = "failed"
+            reason = "parse_error"
+        elif source_missing:
+            status = "blocked"
+            reason = "source_missing"
+        else:
+            status = "blocked"
+            reason = (
+                "executor_not_implemented"
+                if impl_status == "stub"
+                else "parse_error"
+            )
         return _build_blocked_result(
             rid=rid,
             source=source,
@@ -99,9 +166,11 @@ def parse(
             file_type=file_type,
             executor_used=executor.name,
             elapsed=elapsed,
-            reason="executor_not_implemented" if impl_status == "stub" else "parse_error",
+            reason=reason,
             error=executor_result.get("error"),
             impl_status=impl_status,
+            parse_intent=parse_intent,
+            status=status,
             include_diagnostics=include_diagnostics,
         )
 
@@ -116,6 +185,7 @@ def parse(
         environ=environ,
         structure_index=structure_index,
         kb_cache_path=kb_cache_path,
+        kb_managed_cache_root=kb_managed_cache_root,
         diagnostics=diagnostics,
     )
 
@@ -133,8 +203,8 @@ def parse(
         "extracted_data": executor_result["raw_data"],
         "business_judgement": business_judgement,
         "validation": {
-            "schema_valid": True,  # 下面校验后会更新
-            "required_fields_present": True,
+            "schema_valid": False,
+            "required_fields_present": False,
             "missing_fields": [],
             "warnings": [],
         },
@@ -147,14 +217,7 @@ def parse(
         result["diagnostics"] = diagnostics
 
     # Step 6: schema 校验
-    is_valid, errors = validate(result)
-    result["validation"]["schema_valid"] = is_valid
-    if not is_valid:
-        result["validation"]["warnings"].extend(errors)
-        result["status"] = "blocked"
-        result["reason"] = "schema_invalid"
-
-    return result
+    return _finalize_result(result)
 
 
 def _apply_business_rules(
@@ -168,6 +231,7 @@ def _apply_business_rules(
     environ: Optional[Mapping[str, str]] = None,
     structure_index: Optional[StructureIndex] = None,
     kb_cache_path: Any = None,
+    kb_managed_cache_root: Any = None,
     diagnostics: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """3-layer fallback: 知识库(L1) → 硬编码(L2) → LLM(L3)。
@@ -188,6 +252,7 @@ def _apply_business_rules(
                 environ=environ,
                 structure_index=structure_index,
                 cache_path=kb_cache_path,
+                managed_cache_root=kb_managed_cache_root,
                 diagnostics=diagnostics,
             )
         elif callable(knowledge_base):
@@ -265,6 +330,8 @@ def _build_blocked_result(
     reason: str,
     error: Optional[str],
     impl_status: str,
+    parse_intent: str,
+    status: str = "blocked",
     include_diagnostics: bool = False,
 ) -> Dict[str, Any]:
     """构造 blocked 结果(确保 schema 有效)。"""
@@ -272,13 +339,13 @@ def _build_blocked_result(
     result = {
         "schema_version": SCHEMA_VERSION,
         "run_id": rid,
-        "status": "blocked",
+        "status": status,
         "source_type": source_type,
         "source_path": source,
         "file_type": file_type,
         "executor_used": executor_used,
         "executor_implementation_status": impl_status,
-        "parse_intent": "structured_business_fields",
+        "parse_intent": parse_intent,
         "extracted_data": {
             "paragraphs": [],
             "tables": [],
@@ -292,8 +359,8 @@ def _build_blocked_result(
             "rule_source": "none",
         },
         "validation": {
-            "schema_valid": True,
-            "required_fields_present": True,
+            "schema_valid": False,
+            "required_fields_present": False,
             "missing_fields": [],
             "warnings": warnings,
         },
@@ -304,4 +371,34 @@ def _build_blocked_result(
     }
     if include_diagnostics:
         result["diagnostics"] = []
+    return _finalize_result(result)
+
+
+def _finalize_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Finalize every terminal status with the authoritative validator."""
+    validation = result.setdefault(
+        "validation",
+        {
+            "schema_valid": False,
+            "required_fields_present": False,
+            "missing_fields": [],
+            "warnings": [],
+        },
+    )
+    missing_fields = [
+        field for field in _REQUIRED_RESULT_FIELDS if field not in result
+    ]
+    validation["schema_valid"] = False
+    validation["required_fields_present"] = not missing_fields
+    validation["missing_fields"] = missing_fields
+    validation.setdefault("warnings", [])
+
+    is_valid, errors = validate(result)
+    validation["schema_valid"] = is_valid
+    validation["warnings"].extend(
+        error for error in errors if error not in validation["warnings"]
+    )
+    if not is_valid:
+        result["status"] = "blocked"
+        result["reason"] = "schema_invalid"
     return result

@@ -136,7 +136,8 @@ class TestMakeLLMExtractor(unittest.TestCase):
             result = extractor({"raw_text": "test", "filename": "test.docx"})
             self.assertEqual(result["category"], "其他")
             self.assertEqual(result["confidence"], "low")
-            self.assertIn("network error", result["llm_error"])
+            self.assertEqual(result["llm_error"], "DOCUMENT_PARSE.LLM.REQUEST_FAILED")
+            self.assertEqual(result["llm_error_message"], "LLM request failed.")
         finally:
             le._call_llm = original_call
 
