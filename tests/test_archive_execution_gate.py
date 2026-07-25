@@ -10,6 +10,62 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class ArchiveExecutionGateTests(unittest.TestCase):
+    def test_unconfirmed_archive_intent_has_zero_side_effects(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            run_id = "run_unconfirmed_intent"
+            run_dir = os.path.join(td, "runs", run_id)
+            os.makedirs(run_dir)
+            source_path = os.path.join(td, "source.docx")
+            target_dir = os.path.join(td, "archive")
+            target_path = os.path.join(target_dir, "source.docx")
+            Path(source_path).write_text("source", encoding="utf-8")
+            self._write_json(os.path.join(run_dir, "planned_archive_actions.json"), {
+                "schema_version": "archive_plan.v1", "run_id": run_id,
+                "actions": [{
+                    "source_file": source_path, "target_path": target_path,
+                    "status": "needs_review", "confirmed": False,
+                    "archive_intent": {"schema_version": "archive_intent.v1", "destination_status": "unresolved"},
+                    "blockers": ["ARCHIVE_TARGET.UNRESOLVED"],
+                }],
+            })
+
+            result = DataCleaningTools(workspace_dir=td).execute_archive_plan(run_id, confirmed=False)
+
+            self.assertEqual(result["status"], "needs_confirmation")
+            self.assertTrue(os.path.exists(source_path))
+            self.assertFalse(os.path.exists(target_dir))
+            self.assertFalse(os.path.exists(os.path.join(run_dir, "archive_result.json")))
+
+    def test_confirmed_execution_rejects_unresolved_review_intent_without_result_artifact(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            run_id = "run_unresolved_intent"
+            run_dir = os.path.join(td, "runs", run_id)
+            os.makedirs(run_dir)
+            source_path = os.path.join(td, "source.docx")
+            target_path = os.path.join(td, "archive", "source.docx")
+            Path(source_path).write_text("source", encoding="utf-8")
+            self._write_json(os.path.join(run_dir, "planned_archive_actions.json"), {
+                "schema_version": "archive_plan.v1", "run_id": run_id,
+                "actions": [{
+                    "source_file": source_path, "target_path": target_path,
+                    "status": "needs_review", "confirmed": False,
+                    "archive_intent": {"schema_version": "archive_intent.v1", "destination_status": "unresolved"},
+                    "blockers": ["DOCUMENT_INTERPRETATION.NEEDS_REVIEW"],
+                }],
+            })
+
+            result = DataCleaningTools(workspace_dir=td).execute_archive_plan(run_id, confirmed=True)
+
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["moved"], 0)
+            self.assertTrue(os.path.exists(source_path))
+            self.assertFalse(os.path.exists(target_path))
+            self.assertFalse(os.path.exists(os.path.join(run_dir, "archive_result.json")))
+
     def test_execute_archive_plan_blocks_confirmed_run_with_pending_required_feedback(self):
         from tools.data_cleaning_tools import DataCleaningTools
 
@@ -31,6 +87,12 @@ class ArchiveExecutionGateTests(unittest.TestCase):
                             "target_path": target_path,
                             "project_name": "合成项目010",
                             "document_type": "contract",
+                            "status": "ready",
+                            "confirmed": True,
+                            "archive_intent": {
+                                "schema_version": "archive_intent.v1",
+                                "destination_status": "resolved",
+                            },
                             "blockers": [],
                         }
                     ],
@@ -99,6 +161,12 @@ class ArchiveExecutionGateTests(unittest.TestCase):
                             "target_path": target_path,
                             "project_name": "合成项目010",
                             "document_type": "contract",
+                            "status": "ready",
+                            "confirmed": True,
+                            "archive_intent": {
+                                "schema_version": "archive_intent.v1",
+                                "destination_status": "resolved",
+                            },
                             "blockers": [],
                         }
                     ],

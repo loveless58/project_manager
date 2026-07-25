@@ -19,6 +19,7 @@ Data Cleaning Tools — 数据清洗工具层
 import os
 import json
 import shutil
+import hashlib
 import re
 import html
 import xml.etree.ElementTree as ET
@@ -29,11 +30,12 @@ from datetime import datetime
 from common.file_readiness import probe_readable_file, probe_writable_dir
 from common.workspace_config import resolve_workspace_config
 from agents import AdversarialAgent, AuditAgent
-from business_rules.archive_decision import evaluate_archive_decision
+from business_rules.archive_decision import evaluate_archive_decision, review_only_archive_decision
 from business_rules.bid_project_rules import BidProjectRuleEngine
 from business_rules.field_quality import filter_business_facts
 from business_rules.invoice_fields import extract_invoice_fields
-from business_rules.semantic_document import DocumentClassification, apply_semantic_guardrail, normalize_semantic_response
+from business_rules.semantic_document import DocumentClassification, apply_semantic_guardrail, normalize_document_classification, normalize_semantic_response
+from contracts.archive_intent import ArchiveIntent
 from contracts.feedback_schema import (
     FeedbackValidationError,
     build_parser_test_candidates,
@@ -58,6 +60,13 @@ from contracts.test_candidate_schema import (
 from ledger import ProjectLedger
 from ocr import normalize_ocr_result
 from ocr import provider_registry
+from platform_core.models import BusinessContextEvidence, BusinessContextQuery
+from platform_core.storage_bindings import (
+    AmbiguousStorageBindingError,
+    StorageBindingNotFoundError,
+)
+from services.archive_targets import ArchiveTargetResolution
+from services.document_interpretation import DocumentInterpretationService
 
 
 # 工作目录在 DataCleaningTools 实例化时按实际路由解析。
@@ -192,6 +201,12 @@ class DataCleaningTools:
         workspace_dir: Optional[str] = None,
         ocr_adapter: Optional[Callable[[str], Dict[str, Any]]] = None,
         semantic_adapter: Optional[Callable[[Dict[str, Any]], Any]] = None,
+        *,
+        storage_binding_registry: Any = None,
+        document_store_router: Any = None,
+        retrieval_service: Any = None,
+        interpretation_service: Any = None,
+        archive_target_resolver: Any = None,
     ):
         if workspace_dir is None:
             config = resolve_workspace_config()
@@ -208,6 +223,19 @@ class DataCleaningTools:
         self.cleaned_dir = os.path.join(self.workspace_dir, "02-已清洗（结构化数据）")
         self.ocr_adapter = ocr_adapter
         self.semantic_adapter = semantic_adapter
+        self.storage_binding_registry = storage_binding_registry
+        self.document_store_router = document_store_router
+        self.retrieval_service = retrieval_service
+        self.interpretation_service = interpretation_service
+        self.archive_target_resolver = archive_target_resolver
+        if self.storage_binding_registry is not None:
+            workspace_path = Path(self.workspace_dir).expanduser().resolve()
+            for binding in self.storage_binding_registry.bindings:
+                try:
+                    workspace_path.relative_to(binding.physical_root)
+                except ValueError:
+                    continue
+                raise ValueError("runtime workspace must be outside storage bindings")
 
     def scan_raw_files(self, source_dir: Optional[str] = None) -> Dict:
         """扫描原始文件目录，返回文件列表"""
@@ -1356,10 +1384,327 @@ class DataCleaningTools:
             "boundary": payload["boundary"],
         }
 
+    @staticmethod
+    def _logical_ref_payload(ref: Any) -> Dict[str, str]:
+        return {
+            "storage_provider": ref.storage_provider,
+            "object_key": ref.object_key,
+            "logical_uri": ref.logical_uri,
+            "binding_id": ref.binding_id,
+        }
+
+    @staticmethod
+    def _interpretation_document_type(value: str) -> str:
+        return {
+            "发票": "invoice",
+            "合同": "contract",
+            "项目记录": "project",
+            "投标文件": "bid",
+            "采购公告": "tender",
+        }.get(value, value if value in {"invoice", "project", "contract", "bid", "tender", "other"} else "other")
+
+    @staticmethod
+    def _interpretation_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
+        allowed = {
+            "invoice_number", "invoice_date", "amount", "tax_amount", "total_amount",
+            "buyer_name", "buyer_tax_id", "seller_name", "seller_tax_id",
+            "project_code", "project_name", "contract_code", "contract_name",
+            "buyer", "seller", "date", "line_items",
+        }
+        return {key: value for key, value in fields.items() if key in allowed}
+
+    @staticmethod
+    def _retrieval_payload(context: BusinessContextEvidence) -> Dict[str, Any]:
+        return {
+            "status": context.status,
+            "candidate_ids": [str(item.get("id", "")) for item in context.candidates if isinstance(item, dict)],
+            "conflicts": list(context.conflicts),
+            "diagnostics": list(context.diagnostics),
+        }
+
+    @staticmethod
+    def _business_relation(interpretation: Dict[str, Any]) -> Dict[str, str]:
+        relation = next(iter(interpretation.get("relations") or []), {})
+        candidate_id = relation.get("target_candidate_id", "") if isinstance(relation, dict) else ""
+        relation_type = relation.get("relation_type", "") if isinstance(relation, dict) else ""
+        result = {"relation_type": relation_type}
+        if relation_type == "invoice_contract":
+            result["candidate_contract_id"] = candidate_id
+        elif relation_type in {"invoice_project", "contract_project"}:
+            # Keep the compatibility contract requested by the run package while
+            # retaining the canonical relation in ``relations``.
+            result["candidate_contract_id"] = candidate_id
+            result["candidate_project_id"] = candidate_id
+        return result
+
+    @staticmethod
+    def _fixed_context_interpretation(service: Any, evidence_pack: Dict[str, Any], context: BusinessContextEvidence) -> Dict[str, Any]:
+        class FixedRetrieval:
+            def find_business_candidates(self, query):
+                return context
+
+        if service is None:
+            return {
+                "status": "blocked",
+                "blocked_reason": "DOCUMENT_INTERPRETATION.CAPABILITY_DISABLED",
+                "parse_artifact_ref": evidence_pack["parse_artifact_ref"],
+                "confirmed": False,
+            }
+        if hasattr(service, "interpreter"):
+            return DocumentInterpretationService(FixedRetrieval(), service.interpreter).interpret(evidence_pack)
+        result = service.interpret(evidence_pack)
+        if not isinstance(result, dict):
+            return {
+                "status": "blocked",
+                "blocked_reason": "DOCUMENT_INTERPRETATION.SCHEMA_INVALID",
+                "parse_artifact_ref": evidence_pack["parse_artifact_ref"],
+                "confirmed": False,
+            }
+        result = dict(result)
+        result.setdefault("parse_artifact_ref", evidence_pack["parse_artifact_ref"])
+        result["confirmed"] = False
+        return result
+
+    @staticmethod
+    def _interpretation_blockers(
+        classification: Dict[str, Any],
+        context: BusinessContextEvidence,
+        interpretation: Dict[str, Any],
+        resolution: ArchiveTargetResolution,
+    ) -> List[str]:
+        blockers: List[str] = []
+        if context.status != "matched":
+            blockers.append("BUSINESS_CONTEXT.BLOCKED" if context.status == "blocked" else "BUSINESS_CONTEXT.NEEDS_REVIEW")
+        blockers.extend(
+            str(item.get("code"))
+            for item in context.diagnostics
+            if isinstance(item, dict) and item.get("code") != "BUSINESS_CONTEXT.CANDIDATES_FOUND"
+        )
+        blockers.extend(
+            str(item.get("code", "BUSINESS_CONTEXT.CONFLICT"))
+            for item in context.conflicts
+            if isinstance(item, dict)
+        )
+        status = interpretation.get("status")
+        if status == "blocked":
+            blockers.append(str(interpretation.get("blocked_reason") or "DOCUMENT_INTERPRETATION.BLOCKED"))
+        elif status == "needs_review" or interpretation.get("relations"):
+            blockers.append("DOCUMENT_INTERPRETATION.NEEDS_REVIEW")
+        if classification.get("requires_review"):
+            blockers.append("classification_requires_review")
+            blockers.extend(classification.get("validation_errors") or [])
+        blockers.extend(resolution.diagnostics)
+        return list(dict.fromkeys(blockers))
+
+    def _prepare_interpreted_file_organization_run(self, file_paths: List[str]) -> Dict[str, Any]:
+        run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")
+        run_dir = os.path.join(self.workspace_dir, "runs", run_id)
+        extracted_dir = os.path.join(run_dir, "extracted")
+        os.makedirs(extracted_dir, exist_ok=True)
+        candidate_interpretations: List[Dict[str, Any]] = []
+        archive_intents: List[Dict[str, Any]] = []
+        archive_actions: List[Dict[str, Any]] = []
+        structured_outputs: List[str] = []
+        failures: List[Dict[str, Any]] = []
+        trace: List[Dict[str, Any]] = []
+        manifest_files: List[Dict[str, Any]] = []
+
+        for path in file_paths:
+            try:
+                source_ref = self.storage_binding_registry.document_ref_from_path(path)
+            except AmbiguousStorageBindingError:
+                code = "STORAGE_BINDING.AMBIGUOUS"
+                failures.append({"source": os.path.basename(path), "stage": "storage_binding", "status": "blocked", "blocked_reason": code})
+                archive_actions.append(self._review_only_archive_action(run_id, None, [code]))
+                trace.append({"stage": "storage_binding", "source": os.path.basename(path), "status": "blocked", "blocked_reason": code})
+                continue
+            except StorageBindingNotFoundError:
+                code = "STORAGE_BINDING.NOT_FOUND"
+                failures.append({"source": os.path.basename(path), "stage": "storage_binding", "status": "blocked", "blocked_reason": code})
+                archive_actions.append(self._review_only_archive_action(run_id, None, [code]))
+                trace.append({"stage": "storage_binding", "source": os.path.basename(path), "status": "blocked", "blocked_reason": code})
+                continue
+
+            ref_payload = self._logical_ref_payload(source_ref)
+            manifest_files.append({"source_ref": ref_payload, "name": os.path.basename(path)})
+            extracted = self.extract_document(path)
+            if "error" in extracted or extracted.get("status") == "blocked":
+                code = str(extracted.get("blocked_reason") or "DOCUMENT_PARSE.FAILED")
+                failures.append({"source_ref": ref_payload, "stage": "native_parse", "status": "blocked", "blocked_reason": code})
+                archive_actions.append(self._review_only_archive_action(run_id, source_ref, [code]))
+                trace.append({"stage": "native_parse", "source_ref": ref_payload, "status": "blocked", "blocked_reason": code})
+                continue
+
+            with open(path, "rb") as source_stream:
+                content_hash = hashlib.sha256(source_stream.read()).hexdigest()
+            parse_ref = f"artifact:parsed:{content_hash[:24]}"
+            classification = normalize_document_classification(
+                extracted.get("classification"),
+                fallback_document_type=extracted.get("document_type") or "未分类",
+            )
+            fields = self._interpretation_fields(dict(extracted.get("fields") or {}))
+            text = str(extracted.get("extracted_text") or extracted.get("text") or "")
+            evidence_pack = {
+                "parse_artifact_ref": parse_ref,
+                "document_type_hint": self._interpretation_document_type(str(extracted.get("document_type") or "other")),
+                "candidate_fields": fields,
+                "text_segments": ([{"id": "text-0", "text": text[:4000]}] if text else []),
+            }
+            extracted_path = os.path.join(extracted_dir, f"{content_hash[:24]}_extracted.json")
+            self._save_structured_json(extracted_path, {
+                "schema_version": "file_organization.extracted_document.v1",
+                "parse_artifact_ref": parse_ref,
+                "source_ref": ref_payload,
+                "content_hash": content_hash,
+                "document_type": extracted.get("document_type", ""),
+                "classification": classification,
+                "candidate_fields": fields,
+                "text_length": len(text),
+            })
+            structured_outputs.append(extracted_path)
+
+            if self.retrieval_service is None:
+                context = BusinessContextEvidence(
+                    "blocked", (), (), (), ({"code": "BUSINESS_CONTEXT.NO_CANDIDATES"},),
+                )
+            else:
+                try:
+                    context = self.retrieval_service.find_business_candidates(
+                        BusinessContextQuery(evidence_pack["document_type_hint"], fields, evidence_pack["text_segments"])
+                    )
+                    if not isinstance(context, BusinessContextEvidence):
+                        raise TypeError("invalid business context")
+                except Exception:
+                    context = BusinessContextEvidence(
+                        "blocked", (), (), (), ({"code": "BUSINESS_CONTEXT.NO_CANDIDATES"},),
+                    )
+            interpretation = self._fixed_context_interpretation(self.interpretation_service, evidence_pack, context)
+            interpretation_entry = dict(interpretation)
+            interpretation_entry["source_ref"] = ref_payload
+            interpretation_entry["business_context"] = self._retrieval_payload(context)
+            interpretation_entry["business_relation"] = self._business_relation(interpretation)
+            candidate_interpretations.append(interpretation_entry)
+
+            relations = interpretation.get("relations") if isinstance(interpretation.get("relations"), list) else []
+            explicit_ids = tuple(
+                relation.get("target_candidate_id")
+                for relation in relations
+                if isinstance(relation, dict) and isinstance(relation.get("target_candidate_id"), str)
+            )
+            if self.archive_target_resolver is None:
+                resolution = ArchiveTargetResolution(
+                    "unresolved", (), "", ("ARCHIVE_TARGET.CAPABILITY_DISABLED", "ARCHIVE_TARGET.UNRESOLVED"),
+                )
+            else:
+                resolution = self.archive_target_resolver.resolve(source_ref, explicit_ids)
+            project_id = explicit_ids[0] if len(explicit_ids) == 1 else ""
+            intent = ArchiveIntent(
+                source_ref=source_ref,
+                destination_status=resolution.destination_status,
+                candidate_target_binding_ids=resolution.candidate_target_binding_ids,
+                project_id=project_id,
+                archive_phase=classification.get("archive_phase") or "",
+                content_hash=content_hash,
+            )
+            blockers = self._interpretation_blockers(classification, context, interpretation, resolution)
+            intent_payload = intent.payload()
+            intent_payload.update({
+                "intent_id": f"archive-intent:{content_hash[:24]}",
+                "normalized_status": "blocked" if context.status == "blocked" or interpretation.get("status") == "blocked" else "needs_review",
+                "blockers": blockers,
+                "classification": classification,
+            })
+            archive_intents.append(intent_payload)
+            archive_actions.append(self._review_only_archive_action(run_id, source_ref, blockers, intent_payload))
+            trace.extend([
+                {"stage": "native_parse", "source_ref": ref_payload, "status": "success", "parse_artifact_ref": parse_ref},
+                {"stage": "retrieval", "source_ref": ref_payload, "status": context.status},
+                {"stage": "interpretation", "source_ref": ref_payload, "status": interpretation.get("status", "blocked")},
+                {"stage": "archive_intent", "source_ref": ref_payload, "status": intent_payload["normalized_status"]},
+                {"stage": "stop", "source_ref": ref_payload, "status": "needs_review"},
+            ])
+
+        review_items = [
+            {
+                "type": "archive_intent_review",
+                "severity": "high" if action.get("normalized_status") == "blocked" else "medium",
+                "source_ref": action.get("source_ref"),
+                "blockers": action.get("blockers", []),
+                "recommended_action": "review business interpretation and explicitly resolve the archive target",
+            }
+            for action in archive_actions
+        ]
+        review_queue = normalize_review_queue(run_id=run_id, raw_items=review_items)
+        artifacts = {
+            "input_manifest": os.path.join(run_dir, "input_manifest.json"),
+            "candidate_interpretations": os.path.join(run_dir, "candidate_interpretations.json"),
+            "archive_intents": os.path.join(run_dir, "archive_intents.json"),
+            "review_queue": os.path.join(run_dir, "review_queue.json"),
+            "planned_archive_actions": os.path.join(run_dir, "planned_archive_actions.json"),
+            "trace": os.path.join(run_dir, "trace.json"),
+            "run_dir": run_dir,
+        }
+        self._save_structured_json(artifacts["input_manifest"], {
+            "schema_version": "file_organization.input_manifest.v1", "run_id": run_id, "files": manifest_files,
+        })
+        self._save_structured_json(artifacts["candidate_interpretations"], {
+            "schema_version": "candidate_interpretations.v1", "run_id": run_id, "items": candidate_interpretations,
+        })
+        self._save_structured_json(artifacts["archive_intents"], {
+            "schema_version": "archive_intents.v1", "run_id": run_id, "items": archive_intents,
+        })
+        self._save_structured_json(artifacts["review_queue"], review_queue)
+        self._save_structured_json(artifacts["planned_archive_actions"], {
+            "schema_version": "archive_plan.v1", "run_id": run_id,
+            "archive_intent_required": True, "actions": archive_actions,
+        })
+        self._save_structured_json(artifacts["trace"], {
+            "schema_version": "file_organization.trace.v1", "run_id": run_id, "events": trace,
+        })
+        return {
+            "schema_version": "file_organization.run.v1",
+            "run_id": run_id,
+            "status": "success" if archive_intents and not failures else ("partial" if archive_intents else "failed"),
+            "processed": len(archive_intents),
+            "failed": len(failures),
+            "structured_outputs": structured_outputs,
+            "failures": failures,
+            "candidate_interpretations": candidate_interpretations,
+            "archive_intents": archive_intents,
+            "review_queue": review_queue,
+            "archive_actions": archive_actions,
+            "artifacts": artifacts,
+        }
+
+    @staticmethod
+    def _review_only_archive_action(run_id: str, source_ref: Any, blockers: List[str], intent: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        ref_payload = DataCleaningTools._logical_ref_payload(source_ref) if source_ref is not None else {}
+        return {
+            "schema_version": "archive_action.v1",
+            "run_id": run_id,
+            "status": "needs_review",
+            "normalized_status": "blocked" if any(str(item).startswith(("STORAGE_BINDING.", "BUSINESS_CONTEXT.", "DOCUMENT_INTERPRETATION.")) for item in blockers) else "needs_review",
+            "confirmed": False,
+            "source_file": ref_payload.get("logical_uri", ""),
+            "source_ref": ref_payload,
+            "project_name": (intent or {}).get("project_id", "") or "待确认",
+            "document_type": ((intent or {}).get("classification") or {}).get("document_type", "未分类"),
+            "business_judgement": {},
+            "archive_decision": review_only_archive_decision(intent or {}, blockers),
+            "proposed_name": "",
+            "target_dir": None,
+            "target_path": None,
+            "blockers": list(dict.fromkeys(blockers)),
+            "archive_intent_ref": (intent or {}).get("intent_id", ""),
+            "archive_intent": intent,
+        }
+
     def prepare_file_organization_run(self, file_paths: List[str], project_name: str = "") -> Dict[str, Any]:
         """Prepare a full file-organization run package without moving source files."""
         if isinstance(file_paths, str):
             file_paths = [file_paths]
+        if self.storage_binding_registry is not None:
+            return self._prepare_interpreted_file_organization_run(file_paths)
 
         run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")
         run_dir = os.path.join(self.workspace_dir, "runs", run_id)
@@ -2256,6 +2601,32 @@ class DataCleaningTools:
                 "planned": len(actions),
                 "message": "Archive plan prepared but not executed. Call with confirmed=True to move files.",
             }
+
+        strict_intent_plan = plan.get("archive_intent_required") is True or any(
+            "archive_intent" in action
+            or any(str(value).startswith(("STORAGE_BINDING.", "BUSINESS_CONTEXT.", "DOCUMENT_INTERPRETATION.", "ARCHIVE_TARGET.")) for value in action.get("blockers", []))
+            for action in actions
+        )
+        if strict_intent_plan:
+            unsafe_actions = []
+            for action in actions:
+                intent = action.get("archive_intent")
+                blockers = [str(value) for value in action.get("blockers", [])]
+                if (
+                    action.get("status") not in {"ready", "already_archived"}
+                    or action.get("confirmed") is not True
+                    or not isinstance(intent, dict)
+                    or intent.get("schema_version") != "archive_intent.v1"
+                    or intent.get("destination_status") != "resolved"
+                    or any(value.startswith(("STORAGE_BINDING.", "BUSINESS_CONTEXT.", "DOCUMENT_INTERPRETATION.", "ARCHIVE_TARGET.")) for value in blockers)
+                ):
+                    unsafe_actions.append(action)
+            if unsafe_actions:
+                return {
+                    "schema_version": "archive_plan.execute.v1", "status": "blocked", "run_id": run_id,
+                    "moved": 0, "failed": len(actions), "results": [],
+                    "gate": {"schema_version": "archive_intent_execution_gate.v1", "status": "blocked", "blockers": ["archive_intent_not_executable"]},
+                }
 
         gate = self._evaluate_archive_execution_gate(run_id=run_id, run_dir=run_dir, confirmed=confirmed)
         if gate["status"] != "passed":

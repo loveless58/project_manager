@@ -126,9 +126,21 @@ def _register_project_management_tools(reg: ToolRegistry) -> None:
                  {"content": {"type": "string"}, "filename": {"type": "string"}}, ["content", "filename"])
 
 
-def _register_data_cleaning_file_organization_tools(reg: ToolRegistry, workspace_dir: Optional[str] = None) -> None:
+def _register_data_cleaning_file_organization_tools(
+    reg: ToolRegistry,
+    workspace_dir: Optional[str] = None,
+    *,
+    runtime_adapters: Any = None,
+) -> None:
     """Register data-cleaning and project-ledger tools into the provided registry."""
-    dt = _dc_tools_mod.DataCleaningTools(workspace_dir=workspace_dir)
+    dt = _dc_tools_mod.DataCleaningTools(
+        workspace_dir=workspace_dir,
+        storage_binding_registry=getattr(runtime_adapters, "storage_binding_registry", None),
+        document_store_router=getattr(runtime_adapters, "document_store_router", None),
+        retrieval_service=getattr(runtime_adapters, "retrieval_service", None),
+        interpretation_service=getattr(runtime_adapters, "interpretation_service", None),
+        archive_target_resolver=getattr(runtime_adapters, "archive_target_resolver", None),
+    )
 
     reg.register("scan_raw_files", "扫描原始文件目录", dt.scan_raw_files, {}, [])
     reg.register("extract_pdf", "提取PDF结构化数据", dt.extract_pdf,
@@ -283,7 +295,12 @@ def _route_skill(goal: str) -> str:
     return route_skill_from_packages(goal)
 
 
-def _build_registry_for_skill(skill_name: str, data_workspace_dir: Optional[str] = None) -> ToolRegistry:
+def _build_registry_for_skill(
+    skill_name: str,
+    data_workspace_dir: Optional[str] = None,
+    *,
+    runtime_adapters: Any = None,
+) -> ToolRegistry:
     """Level 1/2 progressive disclosure: expose only tools owned by the active skill."""
     register_tools = SKILL_REGISTRARS.get(skill_name)
     if register_tools is None:
@@ -291,7 +308,11 @@ def _build_registry_for_skill(skill_name: str, data_workspace_dir: Optional[str]
 
     reg = ToolRegistry()
     if skill_name == "data_cleaning_file_organization":
-        register_tools(reg, workspace_dir=data_workspace_dir)
+        register_tools(
+            reg,
+            workspace_dir=data_workspace_dir,
+            runtime_adapters=runtime_adapters,
+        )
     else:
         register_tools(reg)
     expected = _expected_tools_for_skill(skill_name)
@@ -379,9 +400,16 @@ def run(
         _resolve_legacy_workspace_for_skill(active_skill, app_settings)
 
     # 1. 渐进式披露：先路由 Skill，再只暴露该 Skill 的工具。
+    runtime_for_skill = runtime_adapters
+    if (
+        active_skill == "data_cleaning_file_organization"
+        and app_settings.deployment_mode != "central"
+    ):
+        runtime_for_skill = None
     reg = _build_registry_for_skill(
         active_skill,
         data_workspace_dir=effective_data_workspace_dir,
+        runtime_adapters=runtime_for_skill,
     )
     memory_text = _skills_prompt_text() + f"\n\nActive Skill: {active_skill}\n"
     sys_prompt = build_react_prompt(goal=goal, tools_text=reg.to_prompt_text(), memory_text=memory_text)

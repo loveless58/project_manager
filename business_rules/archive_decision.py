@@ -9,6 +9,25 @@ from .semantic_document import normalize_document_classification
 INTERNAL_PROJECT_NAME = "project_manager"
 
 
+def review_only_archive_decision(intent: Dict[str, Any], blockers: List[str]) -> Dict[str, Any]:
+    """Map an independent intent to a compatibility decision without granting execution."""
+    classification = intent.get("classification") if isinstance(intent, dict) else {}
+    return {
+        "schema_version": "archive_decision.v1",
+        "subject_type": "review_pending",
+        "subject_name": intent.get("project_id", "") or "待确认",
+        "archive_phase": intent.get("archive_phase", "") or None,
+        "document_type": (classification or {}).get("document_type", "未分类"),
+        "confidence": 0.0,
+        "classification": classification or {},
+        "target_dir": None,
+        "target_path": None,
+        "blockers": list(dict.fromkeys(blockers)),
+        "human_review_required": True,
+        "reasons": ["archive_intent_requires_review"],
+    }
+
+
 def evaluate_archive_decision(
     source_file: str,
     extracted: Dict[str, Any],

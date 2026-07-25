@@ -80,6 +80,21 @@ raise SystemExit("expected legacy workspace capability error")
     assert "PROJECT_MANAGER_BUSINESS_ROOT" in completed.stdout
 
 
+def test_runtime_adapters_preserve_three_positional_argument_compatibility():
+    from app_bootstrap.composition import RuntimeAdapters
+
+    first, second, third = object(), object(), object()
+
+    runtime = RuntimeAdapters(first, second, third)
+
+    assert runtime.document_store is first
+    assert runtime.structure_index is second
+    assert runtime.projection_writer is third
+    assert runtime.retrieval_service is None
+    assert runtime.interpretation_service is None
+    assert runtime.archive_target_resolver is None
+
+
 def test_central_data_cleaning_uses_explicit_workspace_without_business_root(tmp_path):
     data_workspace = tmp_path / "data-workspace"
     script = f"""

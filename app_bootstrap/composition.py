@@ -14,6 +14,7 @@ from platform_core.ports import DocumentStore, ProjectionWriter, StructureIndex
 from platform_core.registry import AdapterKind, AdapterRegistry
 from platform_core.settings import AppSettings
 from platform_core.storage_bindings import StorageBindingRegistry
+from services.archive_targets import ArchiveTargetResolver
 
 
 class DisabledStructureIndex:
@@ -44,6 +45,9 @@ class RuntimeAdapters:
     projection_writer: ProjectionWriter
     storage_binding_registry: Optional[StorageBindingRegistry] = None
     document_store_router: Optional[DocumentStoreRouter] = None
+    retrieval_service: Optional[object] = None
+    interpretation_service: Optional[object] = None
+    archive_target_resolver: Optional[ArchiveTargetResolver] = None
 
     def summary(self) -> dict[str, str]:
         return {
@@ -108,6 +112,7 @@ def build_runtime_adapters(
         ),
         storage_binding_registry=storage_binding_registry,
         document_store_router=document_store_router,
+        archive_target_resolver=ArchiveTargetResolver(storage_binding_registry),
         structure_index=selected.build(
             AdapterKind.STRUCTURE_INDEX,
             settings.providers.structure_index,
