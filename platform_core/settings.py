@@ -35,15 +35,65 @@ _CONFIG_PROVIDER_KEYS = frozenset(
     }
 )
 
+_CONFIG_TOP_LEVEL_LEAF_KEYS = frozenset(
+    {"deployment_mode", "business_root", "runtime_workspace"}
+)
+_CONFIG_DATABASE_LEAF_KEYS = _CONFIG_DATABASE_KEYS
+_CONFIG_PROVIDER_LEAF_KEYS = _CONFIG_PROVIDER_KEYS
+
 
 class SettingsError(ValueError):
     pass
 
 
-def _path(value: Optional[PathLike]) -> Optional[Path]:
-    if value is None or not str(value).strip():
+def _has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, os.PathLike):
+        try:
+            raw = os.fspath(value)
+        except TypeError:
+            return True
+        return isinstance(raw, str) and bool(raw.strip())
+    return True
+
+
+def _string(value: Any, *, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise SettingsError(f"{field_name} must be a string")
+    return value
+
+
+def _path(value: Optional[PathLike], *, field_name: str) -> Optional[Path]:
+    if value is None:
         return None
-    return Path(value).expanduser().resolve()
+    try:
+        raw = os.fspath(value)
+    except TypeError:
+        raise SettingsError(f"{field_name} must be a path string") from None
+    if not isinstance(raw, str):
+        raise SettingsError(f"{field_name} must be a path string")
+    if not raw.strip():
+        return None
+    try:
+        return Path(raw).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        raise SettingsError(f"{field_name} must be a valid path string") from None
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise SettingsError(f"configuration contains duplicate field: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(_value: str) -> object:
+    raise SettingsError("configuration file contains invalid JSON")
 
 
 def _read_config(config_file: Optional[PathLike]) -> Dict[str, Any]:
@@ -79,8 +129,14 @@ def _read_config(config_file: Optional[PathLike]) -> Dict[str, Any]:
         ) from None
 
     try:
-        payload = json.loads(serialized)
-    except json.JSONDecodeError:
+        payload = json.loads(
+            serialized,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except SettingsError:
+        raise
+    except (TypeError, ValueError, RecursionError):
         raise SettingsError("configuration file contains invalid JSON") from None
     if not isinstance(payload, dict):
         raise SettingsError("configuration root must be an object")
@@ -88,12 +144,34 @@ def _read_config(config_file: Optional[PathLike]) -> Dict[str, Any]:
     return payload
 
 
+def _validate_config_leaves(
+    payload: Mapping[str, Any],
+    *,
+    section_name: str,
+    leaf_keys: frozenset[str],
+) -> None:
+    for key in payload:
+        if key not in leaf_keys:
+            continue
+        value = payload[key]
+        if value is not None and not isinstance(value, str):
+            qualified = f"{section_name}.{key}" if section_name else key
+            raise SettingsError(
+                f"configuration field {qualified} must be a string or null"
+            )
+
+
 def _validate_config_schema(payload: Mapping[str, Any]) -> None:
     if not set(payload).issubset(_CONFIG_TOP_LEVEL_KEYS):
         raise SettingsError("configuration contains unknown top-level fields")
-    for section_name, allowed_keys in (
-        ("database", _CONFIG_DATABASE_KEYS),
-        ("providers", _CONFIG_PROVIDER_KEYS),
+    _validate_config_leaves(
+        payload,
+        section_name="",
+        leaf_keys=_CONFIG_TOP_LEVEL_LEAF_KEYS,
+    )
+    for section_name, allowed_keys, leaf_keys in (
+        ("database", _CONFIG_DATABASE_KEYS, _CONFIG_DATABASE_LEAF_KEYS),
+        ("providers", _CONFIG_PROVIDER_KEYS, _CONFIG_PROVIDER_LEAF_KEYS),
     ):
         if section_name not in payload:
             continue
@@ -106,15 +184,26 @@ def _validate_config_schema(payload: Mapping[str, Any]) -> None:
             raise SettingsError(
                 f"configuration {section_name} section contains unknown fields"
             )
+        _validate_config_leaves(
+            section,
+            section_name=section_name,
+            leaf_keys=leaf_keys,
+        )
 
 
-def _pick(explicit: Any, env: Mapping[str, str], env_name: str, local: Any, default: Any) -> Any:
-    if explicit is not None and str(explicit).strip():
+def _pick(
+    explicit: Any,
+    env: Mapping[str, str],
+    env_name: str,
+    local: Any,
+    default: Any,
+) -> Any:
+    if _has_value(explicit):
         return explicit
     env_value = env.get(env_name)
-    if env_value is not None and env_value.strip():
+    if _has_value(env_value):
         return env_value
-    if local is not None and str(local).strip():
+    if _has_value(local):
         return local
     return default
 
@@ -182,8 +271,15 @@ def load_app_settings(
     local_database = local.get("database", {}) if isinstance(local.get("database", {}), dict) else {}
     local_providers = local.get("providers", {}) if isinstance(local.get("providers", {}), dict) else {}
 
-    mode = str(
-        _pick(None, env, "PROJECT_MANAGER_DEPLOYMENT_MODE", local.get("deployment_mode"), "local")
+    mode = _string(
+        _pick(
+            None,
+            env,
+            "PROJECT_MANAGER_DEPLOYMENT_MODE",
+            local.get("deployment_mode"),
+            "local",
+        ),
+        field_name="deployment_mode",
     ).lower()
     if mode not in {"local", "central"}:
         raise SettingsError("deployment_mode must be local or central")
@@ -196,7 +292,8 @@ def load_app_settings(
             "PROJECT_MANAGER_BUSINESS_ROOT",
             local.get("business_root"),
             default_root if mode == "local" else None,
-        )
+        ),
+        field_name="business_root",
     )
     default_runtime = Path.home() / ".project_manager"
     raw_runtime_workspace = _pick(
@@ -206,19 +303,23 @@ def load_app_settings(
         local.get("runtime_workspace"),
         default_runtime,
     )
-    resolved_runtime = _path(raw_runtime_workspace)
+    resolved_runtime = _path(
+        raw_runtime_workspace,
+        field_name="runtime_workspace",
+    )
     assert raw_runtime_workspace is not None
     assert resolved_runtime is not None
 
     default_database = "sqlite" if mode == "local" else "postgresql"
-    database_provider = str(
+    database_provider = _string(
         _pick(
             None,
             env,
             "PROJECT_MANAGER_DATABASE_PROVIDER",
             local_database.get("provider"),
             default_database,
-        )
+        ),
+        field_name="database_provider",
     ).lower()
     raw_sqlite_path = _pick(
         sqlite_path,
@@ -229,37 +330,43 @@ def load_app_settings(
         if database_provider == "sqlite"
         else None,
     )
-    sqlite_path = _path(raw_sqlite_path)
-    dsn_env_var = str(
+    sqlite_path = _path(
+        raw_sqlite_path,
+        field_name="sqlite_path",
+    )
+    dsn_env_var = _string(
         _pick(
             None,
             env,
             "PROJECT_MANAGER_DATABASE_DSN_ENV",
             local_database.get("dsn_env_var"),
             "PROJECT_MANAGER_DATABASE_DSN",
-        )
+        ),
+        field_name="database_dsn_env_var",
     )
 
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", dsn_env_var):
         raise SettingsError("database_dsn_env_var must be a valid environment variable name")
 
-    document_store = str(
+    document_store = _string(
         _pick(
             None,
             env,
             "PROJECT_MANAGER_DOCUMENT_STORE",
             local_providers.get("document_store"),
             "local" if resolved_business_root else "disabled",
-        )
+        ),
+        field_name="document_store",
     ).lower()
-    structure_index = str(
+    structure_index = _string(
         _pick(
             None,
             env,
             "PROJECT_MANAGER_STRUCTURE_INDEX",
             local_providers.get("structure_index"),
             "disabled",
-        )
+        ),
+        field_name="structure_index",
     ).lower()
     pageindex_dir = _path(
         _pick(
@@ -268,16 +375,18 @@ def load_app_settings(
             "PROJECT_MANAGER_PAGEINDEX_DIR",
             local_providers.get("pageindex_dir"),
             None,
-        )
+        ),
+        field_name="pageindex_dir",
     )
-    projection_writer = str(
+    projection_writer = _string(
         _pick(
             None,
             env,
             "PROJECT_MANAGER_PROJECTION_WRITER",
             local_providers.get("projection_writer"),
             "filesystem",
-        )
+        ),
+        field_name="projection_writer",
     ).lower()
     raw_projection_root = _pick(
         None,
@@ -286,7 +395,10 @@ def load_app_settings(
         local_providers.get("projection_root"),
         resolved_runtime / "projections",
     )
-    projection_root = _path(raw_projection_root)
+    projection_root = _path(
+        raw_projection_root,
+        field_name="projection_root",
+    )
     assert raw_projection_root is not None
     assert projection_root is not None
 
