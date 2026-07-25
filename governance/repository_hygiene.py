@@ -109,7 +109,9 @@ _JS_LITERAL_BINDING = re.compile(
     r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)"
     r"(?:\s*:\s*[^=;\r\n]+)?\s*=\s*"
     r"(?P<quote>[\"'`])(?P<value>[^\r\n]*?)(?P=quote)"
-    r"(?:\s+(?:as\s+const|satisfies\s+[A-Za-z_$][^;\r\n]*))?"
+    r"(?:\s+(?:as\s+(?:const|[A-Za-z_$][A-Za-z0-9_$]*"
+    r"(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*(?:\s*<[^;=\r\n]+>)?"
+    r"(?:\s*\[\])*)|satisfies\s+[A-Za-z_$][^;\r\n]*))?"
     r"\s*;?\s*(?://.*)?$",
     re.MULTILINE,
 )
@@ -514,7 +516,7 @@ _YAML_ENV_ITEM_FIELD = re.compile(
     r"^(?P<indent>[ \t]*)(?P<dash>-\s+)?"
     r"(?P<field>name|value)\s*:\s*(?:"
     r"(?P<quote>[\"'])(?P<quoted>[^\"'\r\n]+)(?P=quote)"
-    r"|(?P<bare>[^\r\n]+?))\s*(?:#.*)?$",
+    r"|(?P<bare>[^\r\n]*?))(?:[ \t]+#.*)?[ \t]*$",
     re.IGNORECASE,
 )
 

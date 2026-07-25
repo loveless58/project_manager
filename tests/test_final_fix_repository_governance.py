@@ -466,12 +466,20 @@ def test_main_scanner_rejects_decoded_json_unc_object_key(tmp_path):
             'export const servicePassword = "production-value-0123456789" as const;',
         ),
         (
+            "config/provider.js",
+            'export const servicePassword = "production-value-0123456789" as string;',
+        ),
+        (
             "deploy/provider.yaml",
             "env:\n  - name: SERVICE_PASSWORD\n    value: production,value-0123456789\n",
         ),
         (
             "deploy/provider.yaml",
             "env:\n  - value: production value 0123456789\n    name: SERVICE_PASSWORD\n",
+        ),
+        (
+            "deploy/provider.yaml",
+            "env:\n  - name: SERVICE_PASSWORD\n    value: abc#123456789\n",
         ),
     ],
 )

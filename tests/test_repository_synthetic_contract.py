@@ -151,7 +151,9 @@ _INDEPENDENT_JS_LITERAL_BINDING = re.compile(
     r"(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)"
     r"(?:\s*:\s*[^=;\r\n]+)?\s*=\s*"
     r"(?P<quote>[\"'`])(?P<value>[^\r\n]*?)(?P=quote)"
-    r"(?:\s+(?:as\s+const|satisfies\s+[A-Za-z_$][^;\r\n]*))?"
+    r"(?:\s+(?:as\s+(?:const|[A-Za-z_$][A-Za-z0-9_$]*"
+    r"(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*(?:\s*<[^;=\r\n]+>)?"
+    r"(?:\s*\[\])*)|satisfies\s+[A-Za-z_$][^;\r\n]*))?"
     r"\s*;?\s*(?://.*)?$",
     re.MULTILINE,
 )
@@ -511,7 +513,7 @@ _INDEPENDENT_YAML_ENV_FIELD = re.compile(
     r"^(?P<indent>[ \t]*)(?P<dash>-\s+)?"
     r"(?P<field>name|value)\s*:\s*(?:"
     r"(?P<quote>[\"'])(?P<quoted>[^\"'\r\n]+)(?P=quote)"
-    r"|(?P<bare>[^\r\n]+?))\s*(?:#.*)?$",
+    r"|(?P<bare>[^\r\n]*?))(?:[ \t]+#.*)?[ \t]*$",
     re.IGNORECASE,
 )
 
@@ -1104,12 +1106,20 @@ def test_independent_rejects_decoded_json_unc_object_key():
             'export const servicePassword = "production-value-0123456789" as const;',
         ),
         (
+            "config/provider.js",
+            'export const servicePassword = "production-value-0123456789" as string;',
+        ),
+        (
             "deploy/provider.yaml",
             "env:\n  - name: SERVICE_PASSWORD\n    value: production,value-0123456789\n",
         ),
         (
             "deploy/provider.yaml",
             "env:\n  - value: production value 0123456789\n    name: SERVICE_PASSWORD\n",
+        ),
+        (
+            "deploy/provider.yaml",
+            "env:\n  - name: SERVICE_PASSWORD\n    value: abc#123456789\n",
         ),
     ],
 )
