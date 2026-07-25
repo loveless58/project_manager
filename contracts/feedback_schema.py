@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 
@@ -69,7 +69,7 @@ def normalize_feedback_decision(raw: Dict[str, Any], *, run_id: str, index: int)
         "expected_value": raw.get("expected_value", raw.get("new_value", "")),
         "evidence_text": raw.get("evidence_text", ""),
         "reason": raw.get("reason", ""),
-        "created_at": raw.get("created_at") or datetime.now().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     return normalized
 

@@ -46,6 +46,18 @@ TYPE_DEFAULTS = {
         "recommended_decision": "defer",
         "question": "归档计划需要确认，是否批准、拒绝或修改目标路径？",
     },
+    "parser_case_review": {
+        "feedback_type": "parser_case",
+        "allowed_decisions": ["add_parser_case", "defer"],
+        "recommended_decision": "add_parser_case",
+        "question": "解析样例需要复核，是否生成候选测试？",
+    },
+    "false_positive_review": {
+        "feedback_type": "false_positive",
+        "allowed_decisions": ["mark_false_positive", "defer"],
+        "recommended_decision": "mark_false_positive",
+        "question": "该发现是否应标记为误报？",
+    },
     "business_relation_review": {
         "feedback_type": "field_correction",
         "allowed_decisions": ["approve", "reject", "correct_relation", "defer"],

@@ -311,36 +311,18 @@ def validate_review_queue(payload: dict[str, Any], run_id: str) -> None:
             raise ArchiveRunArtifactError("review queue item fields")
         if "run_id" in item and item["run_id"] != run_id:
             raise ArchiveRunArtifactError("review queue item run identity")
-        if "type" in item:
-            policy = review_policy_for_type(item["type"])
-            if (
-                item.get("feedback_type") != policy["feedback_type"]
-                or item.get("allowed_decisions") != policy["allowed_decisions"]
-                or item.get("recommended_decision") != policy["recommended_decision"]
-            ):
-                raise ArchiveRunArtifactError("review queue decision policy")
-        else:
-            legacy_allowed = {
-                "field_correction": {("correct", "defer")},
-                "archive_decision": {
-                    ("approve", "reject", "defer"),
-                    ("approve", "reject", "edit_target", "defer"),
-                },
-                "parser_case": {("add_parser_case", "defer")},
-                "false_positive": {("mark_false_positive", "defer")},
-                "false_negative": {("mark_false_negative", "defer")},
-                "rule_exception": {("propose_rule_exception", "defer")},
-            }.get(item.get("feedback_type"), set())
-            recommended = item.get("recommended_decision")
-            if "allowed_decisions" in item:
-                allowed_decisions = tuple(item["allowed_decisions"] or ())
-                invalid_policy = allowed_decisions not in legacy_allowed or (
-                    recommended is not None and recommended not in allowed_decisions
-                )
-            else:
-                invalid_policy = recommended not in (None, "defer")
-            if invalid_policy:
-                raise ArchiveRunArtifactError("review queue legacy decision policy")
+        item_type = item.get("type")
+        if type(item_type) is not str or not item_type:
+            raise ArchiveRunArtifactError("review queue item type")
+        policy = review_policy_for_type(item_type)
+        if (
+            item.get("feedback_type") != policy["feedback_type"]
+            or item.get("allowed_decisions") != policy["allowed_decisions"]
+            or item.get("recommended_decision") != policy["recommended_decision"]
+        ):
+            raise ArchiveRunArtifactError("review queue decision policy")
+        if item_type in {"business_relation_review", "archive_target_review"} and item.get("confirmed") is not False:
+            raise ArchiveRunArtifactError("review queue candidate authority marker")
         identifier = item.get("id", item.get("item_id"))
         if identifier is not None and type(identifier) is not str:
             raise ArchiveRunArtifactError("review queue item identity")

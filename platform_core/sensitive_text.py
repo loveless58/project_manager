@@ -12,17 +12,25 @@ _DRIVE_PATH = re.compile(r"[a-z]:[\\/]", re.IGNORECASE)
 _UNC_PATH = re.compile(r"(?:\\\\|//)[^\\/\s]+[\\/][^\\/\s]+")  # repo-hygiene: allow=synthetic-path
 _FILE_URI = re.compile(r"file\s*:\s*/{2,}", re.IGNORECASE)
 _POSIX_PATH = re.compile(r"(?<![\w.~%:/-])/(?!/)[^\s\]\[{}]+", re.IGNORECASE)
+_SENSITIVE_COMPOUND_KEYS = (
+    r"api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
+    r"secret[_-]?access[_-]?key|session[_-]?id|cookie[_-]?value"
+)
 _CREDENTIAL_KEY = re.compile(
-    r"(?<![a-z0-9])(?:authorization|bearer|token|key|password|cookie|session|"
-    r"credential|signature)\s*[\"']?\s*[:=]",
+    rf"(?<![a-z0-9])(?:authorization|bearer|token|key|password|cookie|session|"
+    rf"credential|signature|{_SENSITIVE_COMPOUND_KEYS})\s*[\"']?\s*[:=]",
     re.IGNORECASE,
 )
 _BEARER_VALUE = re.compile(r"(?<![a-z0-9])bearer\s+\S", re.IGNORECASE)
 _X_AMZ_KEY = re.compile(r"(?<![a-z0-9])x-amz-[a-z0-9-]+\s*[\"']?\s*[:=]", re.IGNORECASE)
-_SAFE_LOGICAL_URI = re.compile(r"\b(?:https?|business)://\S+", re.IGNORECASE)
+_SAFE_LOGICAL_URI = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
+_PATH_ESCAPE = re.compile(
+    r"(?:^|[\\/\s])(?:~[\\/]|\.\.[\\/])|\$(?:home|\{home\})[\\/]",
+    re.IGNORECASE,
+)
 _MAPPING_CREDENTIAL_KEY = re.compile(
-    r"(?:authorization|bearer|token|key|password|cookie|session|credential|signature|"
-    r"x-amz-[a-z0-9-]+)",
+    rf"(?:authorization|bearer|token|key|password|cookie|session|credential|signature|"
+    rf"{_SENSITIVE_COMPOUND_KEYS}|x-amz-[a-z0-9-]+)",
     re.IGNORECASE,
 )
 
@@ -53,7 +61,8 @@ def _string_contains_sensitive_text(value: str) -> bool:
     normalized = unicodedata.normalize("NFKC", value).casefold()
     path_text = _SAFE_LOGICAL_URI.sub("", normalized)
     if (
-        _UNC_PATH.search(path_text)
+        _PATH_ESCAPE.search(path_text)
+        or _UNC_PATH.search(path_text)
         or _FILE_URI.search(normalized)
         or _POSIX_PATH.search(path_text)
         or _CREDENTIAL_KEY.search(normalized)

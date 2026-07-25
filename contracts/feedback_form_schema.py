@@ -131,6 +131,7 @@ def feedback_decisions_from_form(form: Dict[str, Any]) -> List[Dict[str, Any]]:
             "source_file": item.get("source_file", ""),
             "target_path": item.get("target_path", ""),
             "finding_id": item.get("finding_id", ""),
+            "evidence_text": item.get("evidence_text", ""),
             "reason": response.get("reason", item.get("reason", "")),
             "review_item_hash": item.get("review_item_hash", ""),
             "actor": response.get("actor", item.get("actor", "")),

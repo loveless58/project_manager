@@ -130,6 +130,37 @@ class ReviewQueueContractTests(unittest.TestCase):
             "kind": "note", "value": safe_note,
         }])
 
+
+    def test_sensitive_scanner_handles_compound_keys_escapes_and_provider_uris(self):
+        from platform_core.document_refs import validate_document_ref
+        from platform_core.sensitive_text import contains_sensitive_text
+
+        for key in (
+            "api_key", "access_token", "refresh_token", "client_secret",
+            "secret_access_key", "session_id", "cookie_value", "x-amz-security-token",
+        ):
+            with self.subTest(compound_key=key):
+                self.assertTrue(contains_sensitive_text({key: "synthetic-value"}))
+
+        for value in (
+            "~/private/source.md",
+            "../escape.md",
+            "notes/../escape.md",
+            "$HOME/private/source.md",
+            "${HOME}/private/source.md",
+        ):
+            with self.subTest(path_escape=value):
+                self.assertTrue(contains_sensitive_text(value))
+
+        safe_provider_uri = "local://source/inbox/source.md"
+        self.assertFalse(contains_sensitive_text(safe_provider_uri))
+        ref = validate_document_ref({
+            "storage_provider": "local",
+            "object_key": "inbox/source.md",
+            "logical_uri": safe_provider_uri,
+            "binding_id": "source",
+        })
+        self.assertEqual(ref.logical_uri, safe_provider_uri)
     def test_review_projection_requires_canonical_bound_document_ref(self):
         from contracts.review_queue_schema import normalize_review_queue
 
@@ -215,6 +246,32 @@ class ReviewQueueContractTests(unittest.TestCase):
                 with self.assertRaises(ArchiveRunArtifactError):
                     validate_review_queue(candidate, run_id)
 
+
+    def test_persisted_queue_requires_type_and_candidate_only_marker(self):
+        from contracts.archive_run_artifacts import (
+            ArchiveRunArtifactError,
+            validate_review_queue,
+        )
+        from contracts.review_queue_schema import normalize_review_queue
+
+        queue = normalize_review_queue("run-required-type", [{
+            "type": "adversarial_verification_error",
+        }])
+        disguised = json.loads(json.dumps(queue))
+        item = disguised["items"][0]
+        item.pop("type")
+        item["feedback_type"] = "archive_decision"
+        item["allowed_decisions"] = ["approve", "reject", "defer"]
+        item["recommended_decision"] = "defer"
+        with self.assertRaises(ArchiveRunArtifactError):
+            validate_review_queue(disguised, "run-required-type")
+
+        candidate_only = normalize_review_queue("run-candidate-only", [{
+            "type": "business_relation_review",
+        }])
+        candidate_only["items"][0].pop("confirmed")
+        with self.assertRaises(ArchiveRunArtifactError):
+            validate_review_queue(candidate_only, "run-candidate-only")
     def test_adversarial_error_is_actionable(self):
         from contracts.review_queue_schema import normalize_review_queue
 

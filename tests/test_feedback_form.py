@@ -29,6 +29,12 @@ def _review_item_hash(workspace: str | Path, run_id: str, item_id: str) -> str:
     return review_item_snapshot_hash(queue, item)
 
 
+def _canonical_archive_queue(run_id: str, raw_item: dict) -> dict:
+    from contracts.review_queue_schema import normalize_review_queue
+
+    return normalize_review_queue(run_id, [{"type": "archive_action_review", **raw_item}])
+
+
 class FeedbackFormTests(unittest.TestCase):
     def test_feedback_reads_verdict_with_explicit_precedence(self):
         from contracts.feedback_form_schema import build_feedback_form
@@ -122,24 +128,14 @@ class FeedbackFormTests(unittest.TestCase):
             run_dir = os.path.join(td, "runs", run_id)
             os.makedirs(run_dir)
             _register_archive_intent_run(td, run_id)
-            self._write_json(os.path.join(run_dir, "review_queue.json"), {
-                "schema_version": "review_queue.v2",
-                "run_id": run_id,
-                "status": "needs_review",
-                "items": [
-                    {
-                        "id": "R001",
-                        "run_id": run_id,
-                        "risk": "P1",
-                        "question": "Approve archive target?",
-                        "feedback_type": "archive_decision",
-                        "allowed_decisions": ["approve", "reject", "defer"],
-                        "recommended_decision": "defer",
-                        "source_file": "source.docx",
-                        "target_path": "archive/source.docx",
-                    }
-                ],
-            })
+            self._write_json(os.path.join(run_dir, "review_queue.json"),
+                _canonical_archive_queue(run_id, {
+                    "id": "R001",
+                    "risk": "P1",
+                    "question": "Approve archive target?",
+                    "source_file": "source.docx",
+                    "target_path": "archive/source.docx",
+                }))
             self._write_json(os.path.join(run_dir, "audit_review.json"), {
                 "schema_version": "audit_review.v1",
                 "run_id": run_id,
@@ -181,21 +177,10 @@ class FeedbackFormTests(unittest.TestCase):
             run_dir = os.path.join(td, "runs", run_id)
             os.makedirs(run_dir)
             _register_archive_intent_run(td, run_id)
-            self._write_json(os.path.join(run_dir, "review_queue.json"), {
-                "schema_version": "review_queue.v2",
-                "run_id": run_id,
-                "status": "needs_review",
-                "items": [
-                    {
-                        "id": "R001",
-                        "run_id": run_id,
-                        "risk": "P1",
-                        "feedback_type": "archive_decision",
-                        "allowed_decisions": ["approve", "reject", "defer"],
-                        "recommended_decision": "defer",
-                    }
-                ],
-            })
+            self._write_json(os.path.join(run_dir, "review_queue.json"),
+                _canonical_archive_queue(run_id, {
+                    "id": "R001", "risk": "P1",
+                }))
             form_path = os.path.join(run_dir, "feedback_form.json")
             self._write_json(form_path, {
                 "schema_version": "feedback_form.v1",
@@ -254,12 +239,8 @@ class FeedbackFormTests(unittest.TestCase):
             run_dir = os.path.join(td, "runs", run_id)
             os.makedirs(run_dir)
             _register_archive_intent_run(td, run_id)
-            self._write_json(os.path.join(run_dir, "review_queue.json"), {
-                "schema_version": "review_queue.v2",
-                "run_id": run_id,
-                "status": "needs_review",
-                "items": [{"id": "R001", "run_id": run_id, "feedback_type": "archive_decision"}],
-            })
+            self._write_json(os.path.join(run_dir, "review_queue.json"),
+                _canonical_archive_queue(run_id, {"id": "R001"}))
 
             completed = subprocess.run(
                 [
@@ -325,6 +306,49 @@ class FeedbackFormTests(unittest.TestCase):
                 self.assertEqual(result["error"], "invalid_feedback_form")
                 self.assertFalse((run_dir / "human_feedback_decisions.json").exists())
 
+
+    def test_feedback_form_rejects_nested_response_and_correction_slots(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+        from contracts.review_queue_schema import normalize_review_queue
+
+        invalid_cases = (
+            ("expected_field", {"nested": "field"}),
+            ("evidence_text", ["nested"]),
+            ("finding_id", {"nested": "finding"}),
+            ("created_at", {"nested": "time"}),
+            ("response", {"decision": "approve", "reason": {"nested": "reason"}}),
+            ("response", {"decision": "approve", "new_value": {"nested": "value"}}),
+        )
+        for field, value in invalid_cases:
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as td:
+                run_id = "run-form-full-schema"
+                run_dir = Path(td) / "runs" / run_id
+                run_dir.mkdir(parents=True)
+                _register_archive_intent_run(td, run_id)
+                self._write_json(
+                    str(run_dir / "review_queue.json"),
+                    normalize_review_queue(run_id, [{"type": "archive_action_review"}]),
+                )
+                item = {
+                    "item_id": "R001",
+                    "feedback_type": "archive_decision",
+                    "review_item_hash": _review_item_hash(td, run_id, "R001"),
+                    "response": {"decision": "approve"},
+                }
+                item[field] = value
+
+                result = DataCleaningTools(workspace_dir=td).apply_feedback_form(
+                    run_id,
+                    feedback_form={
+                        "schema_version": "feedback_form.v1",
+                        "run_id": run_id,
+                        "items": [item],
+                    },
+                    generate_tests=False,
+                )
+
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["error"], "invalid_feedback_form")
     @staticmethod
     def _write_json(path: str, payload: dict) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)

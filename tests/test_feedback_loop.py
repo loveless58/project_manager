@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
 import os
 import sys
@@ -39,6 +40,27 @@ def _apply_bound_feedback(tools, run_id: str, feedback_decisions: list[dict]):
             decision.setdefault("review_item_hash", review_item_snapshot_hash(queue, item))
         bound.append(decision)
     return tools.apply_feedback_decisions(run_id, bound)
+
+
+def _canonical_review_item(run_id: str, item_id: str, feedback_type: str) -> dict:
+    from contracts.review_queue_schema import review_policy_for_type
+
+    item_type = {
+        "field_correction": "business_judgement_review",
+        "archive_decision": "archive_action_review",
+        "parser_case": "parser_case_review",
+        "false_positive": "false_positive_review",
+    }[feedback_type]
+    return {
+        "id": item_id,
+        "run_id": run_id,
+        "type": item_type,
+        "severity": "unknown",
+        "risk": "P2",
+        "question": "Review feedback",
+        **review_policy_for_type(item_type),
+        "evidence": [],
+    }
 
 
 class FeedbackLoopTests(unittest.TestCase):
@@ -297,6 +319,61 @@ class FeedbackLoopTests(unittest.TestCase):
         self.assertEqual(decision["decision"], "correct")
         self.assertEqual(decision["risk_level"], "P2")
 
+
+    def test_feedback_input_uses_full_scalar_schema_and_trusted_server_fields(self):
+        from contracts.review_queue_schema import normalize_review_queue
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            run_id = "run-full-feedback-schema"
+            run_dir = Path(td) / "runs" / run_id
+            run_dir.mkdir(parents=True)
+            _register_archive_intent_run(td, run_id)
+            queue = normalize_review_queue(run_id, [{
+                "type": "archive_action_review",
+                "source_file": "trusted/source.md",
+                "target_path": "trusted/archive/source.md",
+            }])
+            (run_dir / "review_queue.json").write_text(
+                json.dumps(queue), encoding="utf-8",
+            )
+            tools = DataCleaningTools(workspace_dir=td)
+            invalid_cases = (
+                ("expected_field", {"nested": "field"}, "invalid_feedback_text"),
+                ("evidence_text", ["nested"], "invalid_feedback_text"),
+                ("finding_id", {"nested": "finding"}, "invalid_feedback_text"),
+                ("created_at", {"nested": "time"}, "invalid_feedback_text"),
+                ("feedback_id", ["nested"], "invalid_feedback_identifier"),
+            )
+            for field, value, expected_error in invalid_cases:
+                with self.subTest(field=field):
+                    result = _apply_bound_feedback(tools, run_id, [{
+                        "feedback_id": "FB-invalid",
+                        "feedback_type": "archive_decision",
+                        "item_id": "R001",
+                        "decision": "approve",
+                        field: value,
+                    }])
+                    self.assertEqual(result["accepted"], 0)
+                    self.assertEqual(result["errors"][0]["error"], expected_error)
+                    self.assertFalse((run_dir / "human_feedback_decisions.json").exists())
+
+            client_timestamp = "2000-01-01T00:00:00Z"
+            accepted = _apply_bound_feedback(tools, run_id, [{
+                "feedback_id": "FB-trusted-fields",
+                "feedback_type": "archive_decision",
+                "item_id": "R001",
+                "decision": "approve",
+                "created_at": client_timestamp,
+                "source_file": "forged/source.md",
+                "target_path": "forged/archive.md",
+            }])
+
+            self.assertEqual(accepted["accepted"], 1)
+            decision = accepted["decisions"][0]
+            self.assertNotEqual(decision["created_at"], client_timestamp)
+            self.assertEqual(decision["source_file"], "trusted/source.md")
+            self.assertEqual(decision["target_path"], "trusted/archive/source.md")
     def test_apply_feedback_decisions_writes_review_artifacts_without_business_mutation(self):
         from tools.data_cleaning_tools import DataCleaningTools
 
@@ -311,21 +388,9 @@ class FeedbackLoopTests(unittest.TestCase):
                     "run_id": run_id,
                     "status": "needs_review",
                     "items": [
-                        {
-                            "id": "R001", "run_id": run_id,
-                            "feedback_type": "field_correction",
-                            "allowed_decisions": ["correct", "defer"],
-                        },
-                        {
-                            "id": "R002", "run_id": run_id,
-                            "feedback_type": "archive_decision",
-                            "allowed_decisions": ["approve", "reject", "defer"],
-                        },
-                        {
-                            "id": "R003", "run_id": run_id,
-                            "feedback_type": "parser_case",
-                            "allowed_decisions": ["add_parser_case", "defer"],
-                        },
+                        _canonical_review_item(run_id, "R001", "field_correction"),
+                        _canonical_review_item(run_id, "R002", "archive_decision"),
+                        _canonical_review_item(run_id, "R003", "parser_case"),
                     ],
                 }, stream)
             tools = DataCleaningTools(workspace_dir=td)
@@ -402,11 +467,7 @@ class FeedbackLoopTests(unittest.TestCase):
                     "schema_version": "review_queue.v2",
                     "run_id": run_id,
                     "status": "needs_review",
-                    "items": [{
-                        "id": "R001", "run_id": run_id,
-                        "feedback_type": "false_positive",
-                        "allowed_decisions": ["mark_false_positive", "defer"],
-                    }],
+                    "items": [_canonical_review_item(run_id, "R001", "false_positive")],
                 }, stream)
             result = _apply_bound_feedback(DataCleaningTools(workspace_dir=td),
                 run_id=run_id,
@@ -437,22 +498,8 @@ class FeedbackLoopTests(unittest.TestCase):
                         "run_id": run_id,
                         "status": "needs_review",
                         "items": [
-                            {
-                                "id": "R001",
-                                "run_id": run_id,
-                                "risk": "P1",
-                                "feedback_type": "archive_decision",
-                                "allowed_decisions": ["approve", "reject", "defer"],
-                                "recommended_decision": "defer",
-                            },
-                            {
-                                "id": "R002",
-                                "run_id": run_id,
-                                "risk": "P3",
-                                "feedback_type": "parser_case",
-                                "allowed_decisions": ["add_parser_case", "defer"],
-                                "recommended_decision": "add_parser_case",
-                            },
+                            _canonical_review_item(run_id, "R001", "archive_decision"),
+                            _canonical_review_item(run_id, "R002", "parser_case"),
                         ],
                     },
                     f,
@@ -499,12 +546,7 @@ class FeedbackLoopTests(unittest.TestCase):
                 "schema_version": "review_queue.v2",
                 "run_id": run_id,
                 "status": "needs_review",
-                "items": [{
-                    "id": "R001",
-                    "run_id": run_id,
-                    "feedback_type": "archive_decision",
-                    "allowed_decisions": ["approve", "reject", "defer"],
-                }],
+                "items": [_canonical_review_item(run_id, "R001", "archive_decision")],
             }), encoding="utf-8")
             before = queue_path.read_bytes()
 
@@ -556,12 +598,7 @@ class FeedbackLoopTests(unittest.TestCase):
                 "schema_version": "review_queue.v2",
                 "run_id": run_id,
                 "status": "needs_review",
-                "items": [{
-                    "id": "R001",
-                    "run_id": run_id,
-                    "feedback_type": "archive_decision",
-                    "allowed_decisions": ["approve", "reject", "defer"],
-                }],
+                "items": [_canonical_review_item(run_id, "R001", "archive_decision")],
             }), encoding="utf-8")
             tools = DataCleaningTools(workspace_dir=td)
             decision = {
@@ -623,9 +660,9 @@ class FeedbackLoopTests(unittest.TestCase):
                     "type": "archive_target_review",
                     "risk": "P1",
                     "question": "Review target",
-                    "feedback_type": "human_confirmation",
-                    "allowed_decisions": ["force_ready"],
-                    "recommended_decision": "force_ready",
+                    "feedback_type": "archive_decision",
+                    "allowed_decisions": ["approve", "reject", "defer"],
+                    "recommended_decision": "defer",
                     "confirmed": False,
                 }],
             }
@@ -636,10 +673,10 @@ class FeedbackLoopTests(unittest.TestCase):
             result = DataCleaningTools(workspace_dir=td).apply_feedback_decisions(
                 run_id,
                 [{
-                    "feedback_id": "FB-force-ready",
-                    "feedback_type": "human_confirmation",
+                    "feedback_id": "FB-disguised-archive",
+                    "feedback_type": "archive_decision",
                     "item_id": "R001",
-                    "decision": "force_ready",
+                    "decision": "approve",
                     "review_item_hash": review_item_snapshot_hash(
                         queue, queue["items"][0],
                     ),
@@ -726,12 +763,9 @@ class FeedbackLoopTests(unittest.TestCase):
                 "schema_version": "review_queue.v2",
                 "run_id": run_id,
                 "status": "needs_review",
-                "items": [{
-                    "id": f"R{index:03d}",
-                    "run_id": run_id,
-                    "feedback_type": "field_correction",
-                    "allowed_decisions": ["correct", "defer"],
-                } for index in range(1, 8)],
+                "items": [
+                    _canonical_review_item(run_id, f"R{index:03d}", "field_correction")
+                    for index in range(1, 8)],
             }
             (run_dir / "review_queue.json").write_text(json.dumps(queue), encoding="utf-8")
             slash = chr(47)
@@ -822,12 +856,9 @@ class FeedbackLoopTests(unittest.TestCase):
                 "schema_version": "review_queue.v2",
                 "run_id": run_id,
                 "status": "needs_review",
-                "items": [{
-                    "id": f"R{index:03d}",
-                    "run_id": run_id,
-                    "feedback_type": "field_correction",
-                    "allowed_decisions": ["correct", "defer"],
-                } for index in range(1, len(cases) + 2)],
+                "items": [
+                    _canonical_review_item(run_id, f"R{index:03d}", "field_correction")
+                    for index in range(1, len(cases) + 2)],
             }
             (run_dir / "review_queue.json").write_text(json.dumps(queue), encoding="utf-8")
             decisions = []
@@ -886,12 +917,9 @@ class FeedbackLoopTests(unittest.TestCase):
                 "schema_version": "review_queue.v2",
                 "run_id": run_id,
                 "status": "needs_review",
-                "items": [{
-                    "id": f"R{index:03d}",
-                    "run_id": run_id,
-                    "feedback_type": "field_correction",
-                    "allowed_decisions": ["correct", "defer"],
-                } for index in range(1, len(cases) + 1)],
+                "items": [
+                    _canonical_review_item(run_id, f"R{index:03d}", "field_correction")
+                    for index in range(1, len(cases) + 1)],
             }
             (run_dir / "review_queue.json").write_text(json.dumps(queue), encoding="utf-8")
             decisions = [{
@@ -923,12 +951,9 @@ class FeedbackLoopTests(unittest.TestCase):
                 "schema_version": "review_queue.v2",
                 "run_id": run_id,
                 "status": "needs_review",
-                "items": [{
-                    "id": f"R{index:03d}",
-                    "run_id": run_id,
-                    "feedback_type": "archive_decision",
-                    "allowed_decisions": ["approve", "reject", "defer"],
-                } for index in range(1, 4)],
+                "items": [
+                    _canonical_review_item(run_id, f"R{index:03d}", "archive_decision")
+                    for index in range(1, 4)],
             }), encoding="utf-8")
 
             result = DataCleaningTools(workspace_dir=td).apply_feedback_decisions(run_id, [
@@ -1009,12 +1034,9 @@ class FeedbackLoopTests(unittest.TestCase):
                 "schema_version": "review_queue.v2",
                 "run_id": run_id,
                 "status": "needs_review",
-                "items": [{
-                    "id": f"R{index:03d}",
-                    "run_id": run_id,
-                    "feedback_type": "field_correction",
-                    "allowed_decisions": ["correct", "defer"],
-                } for index in range(1, 3)],
+                "items": [
+                    _canonical_review_item(run_id, f"R{index:03d}", "field_correction")
+                    for index in range(1, 3)],
             }
             (run_dir / "review_queue.json").write_text(json.dumps(queue), encoding="utf-8")
             tools = DataCleaningTools(workspace_dir=td)
@@ -1056,6 +1078,156 @@ class FeedbackLoopTests(unittest.TestCase):
                 {name: (run_dir / name).read_bytes() for name in artifact_names},
                 before,
             )
+    def test_feedback_rejects_every_tampered_history_artifact_before_staging(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            run_id = "run-all-history-artifacts"
+            run_dir = Path(td) / "runs" / run_id
+            run_dir.mkdir(parents=True)
+            _register_archive_intent_run(td, run_id)
+            queue = {
+                "schema_version": "review_queue.v2",
+                "run_id": run_id,
+                "status": "needs_review",
+                "items": [{
+                    "id": f"R{index:03d}",
+                    "run_id": run_id,
+                    "type": "archive_action_review",
+                    "severity": "unknown",
+                    "risk": "P1",
+                    "question": "Review archive action",
+                    "feedback_type": "archive_decision",
+                    "allowed_decisions": ["approve", "reject", "edit_target", "defer"],
+                    "recommended_decision": "defer",
+                    "confirmed": False,
+                    "evidence": [],
+                } for index in range(1, 3)],
+            }
+            queue_path = run_dir / "review_queue.json"
+            queue_path.write_text(json.dumps(queue), encoding="utf-8")
+            tools = DataCleaningTools(workspace_dir=td)
+            seeded = _apply_bound_feedback(tools, run_id, [{
+                "feedback_id": "FB-history-seed",
+                "feedback_type": "archive_decision",
+                "item_id": "R001",
+                "decision": "approve",
+            }])
+            self.assertEqual(seeded["accepted"], 1)
+            artifact_names = (
+                "human_feedback_decisions.json",
+                "feedback_events.jsonl",
+                "rule_candidates.json",
+                "parser_test_candidates.json",
+                "review_queue.json",
+            )
+            baseline = {
+                name: (run_dir / name).read_bytes()
+                for name in artifact_names
+            }
+
+            def mutate_history(*, drop_hash=False, resign=False):
+                path = run_dir / "human_feedback_decisions.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                decision = payload["decisions"][0]
+                decision["feedback_type"] = "human_confirmation"
+                decision["decision"] = "force_ready"
+                if drop_hash:
+                    decision.pop("payload_hash", None)
+                if resign:
+                    semantic = {
+                        key: value for key, value in decision.items()
+                        if key not in {"feedback_id", "created_at", "payload_hash"}
+                    }
+                    encoded = json.dumps(
+                        semantic, ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    decision["payload_hash"] = hashlib.sha256(encoded).hexdigest()
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            def mutate_event_invalid_json():
+                (run_dir / "feedback_events.jsonl").write_bytes(b"not-json\n")
+
+            def mutate_event_identity():
+                path = run_dir / "feedback_events.jsonl"
+                event = json.loads(path.read_text(encoding="utf-8").strip())
+                event["run_id"] = "other-run"
+                path.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+            def mutate_event_replay():
+                path = run_dir / "feedback_events.jsonl"
+                current = path.read_bytes()
+                path.write_bytes(current + current)
+
+            def mutate_rule_root():
+                path = run_dir / "rule_candidates.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["run_id"] = "other-run"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            def mutate_rule_status():
+                path = run_dir / "rule_candidates.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["items"][0]["status"] = "approved"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            def mutate_parser_candidate():
+                path = run_dir / "parser_test_candidates.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["items"] = [{
+                    "schema_version": "parser_test_candidate.v1",
+                    "feedback_id": "FB-forged",
+                    "run_id": run_id,
+                    "item_id": "R001",
+                    "field": {"nested": "not-text"},
+                    "input_pattern": ["not-text"],
+                    "expected_value": "value",
+                    "reason": "",
+                    "status": "pending_test_authoring",
+                }]
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            mutations = (
+                ("history_missing_hash", lambda: mutate_history(drop_hash=True)),
+                ("history_resigned_policy", lambda: mutate_history(resign=True)),
+                ("event_invalid_json", mutate_event_invalid_json),
+                ("event_identity", mutate_event_identity),
+                ("event_replay", mutate_event_replay),
+                ("rule_root", mutate_rule_root),
+                ("rule_status", mutate_rule_status),
+                ("parser_candidate", mutate_parser_candidate),
+            )
+            for name, mutate in mutations:
+                with self.subTest(case=name):
+                    for artifact_name, content in baseline.items():
+                        (run_dir / artifact_name).write_bytes(content)
+                    mutate()
+                    before = {
+                        artifact_name: (run_dir / artifact_name).read_bytes()
+                        for artifact_name in artifact_names
+                    }
+
+                    result = _apply_bound_feedback(tools, run_id, [{
+                        "feedback_id": "FB-history-next",
+                        "feedback_type": "archive_decision",
+                        "item_id": "R002",
+                        "decision": "reject",
+                    }])
+
+                    self.assertEqual(result["status"], "failed")
+                    self.assertEqual(
+                        result["errors"][0]["error"],
+                        "invalid_feedback_review_state",
+                    )
+                    self.assertEqual(
+                        {
+                            artifact_name: (run_dir / artifact_name).read_bytes()
+                            for artifact_name in artifact_names
+                        },
+                        before,
+                    )
+                    self.assertEqual(list(run_dir.glob(".feedback-txn-*")), [])
     def test_feedback_transaction_rolls_back_every_artifact_when_replace_fails(self):
         from contracts.feedback_form_schema import review_item_snapshot_hash
         from tools.data_cleaning_tools import DataCleaningTools
@@ -1068,11 +1240,7 @@ class FeedbackLoopTests(unittest.TestCase):
             queue = {
                 "schema_version": "review_queue.v2", "run_id": run_id,
                 "status": "needs_review",
-                "items": [{
-                    "id": "R001", "run_id": run_id,
-                    "feedback_type": "archive_decision",
-                    "allowed_decisions": ["approve", "reject", "edit_target", "defer"],
-                }],
+                "items": [_canonical_review_item(run_id, "R001", "archive_decision")],
             }
             queue_path = run_dir / "review_queue.json"
             queue_path.write_text(json.dumps(queue), encoding="utf-8")
@@ -1081,7 +1249,7 @@ class FeedbackLoopTests(unittest.TestCase):
                     "schema_version": "human_feedback.decisions.v1",
                     "run_id": run_id, "decisions": [], "errors": [],
                 }).encode("utf-8"),
-                "feedback_events.jsonl": b'{"seed":true}\n',
+                "feedback_events.jsonl": b"",
                 "rule_candidates.json": json.dumps({
                     "schema_version": "rule_candidates.v1",
                     "run_id": run_id, "items": [],
@@ -1135,18 +1303,8 @@ class FeedbackLoopTests(unittest.TestCase):
             queue = {
                 "schema_version": "review_queue.v2", "run_id": run_id,
                 "status": "needs_review",
-                "items": [
-                    {
-                        "id": "R001", "run_id": run_id,
-                        "feedback_type": "archive_decision",
-                        "allowed_decisions": ["approve", "reject", "edit_target", "defer"],
-                    },
-                    {
-                        "id": "R002", "run_id": run_id,
-                        "feedback_type": "archive_decision",
-                        "allowed_decisions": ["approve", "reject", "edit_target", "defer"],
-                    },
-                ],
+                "items": [_canonical_review_item(run_id, "R001", "archive_decision"),
+                          _canonical_review_item(run_id, "R002", "archive_decision")],
             }
             (run_dir / "review_queue.json").write_text(json.dumps(queue), encoding="utf-8")
             decisions = [
@@ -1164,8 +1322,8 @@ class FeedbackLoopTests(unittest.TestCase):
             barrier = threading.Barrier(2)
             real_load = DataCleaningTools._load_feedback_history
 
-            def synchronized_load(instance, path, current_run_id):
-                result = real_load(instance, path, current_run_id)
+            def synchronized_load(instance, path, current_run_id, **kwargs):
+                result = real_load(instance, path, current_run_id, **kwargs)
                 try:
                     barrier.wait(timeout=0.5)
                 except threading.BrokenBarrierError:

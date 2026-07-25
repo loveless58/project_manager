@@ -104,7 +104,14 @@ _FEEDBACK_INPUT_FIELDS = {
     "review_item_hash",
 }
 _FEEDBACK_SCALAR_FIELDS = ("old_value", "new_value", "expected_value")
-_FEEDBACK_TEXT_FIELDS = ("reason", "actor", "field", "input_pattern")
+_FEEDBACK_TEXT_FIELDS = (
+    "reason", "actor", "field", "input_pattern", "expected_field",
+    "evidence_text", "finding_id", "source_file", "target_path", "created_at",
+)
+_FEEDBACK_IDENTIFIER_FIELDS = ("feedback_id", "run_id", "item_id")
+_FEEDBACK_ENUM_FIELDS = ("feedback_type", "decision", "risk_level")
+_FEEDBACK_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_RFC3339_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 _MAX_FEEDBACK_VALUE_BYTES = 2048
 
 _FEEDBACK_FORM_ROOT_FIELDS = {
@@ -114,7 +121,7 @@ _FEEDBACK_FORM_ROOT_FIELDS = {
 _FEEDBACK_FORM_ITEM_FIELDS = {
     "item_id", "feedback_id", "run_id", "required", "risk_level", "question",
     "feedback_type", "allowed_decisions", "recommended_decision", "source_file",
-    "target_path", "field", "expected_field", "evidence", "response",
+    "target_path", "field", "expected_field", "evidence_text", "evidence", "response",
     "old_value", "new_value", "expected_value", "input_pattern", "finding_id",
     "reason", "actor", "created_at", "review_item_hash", "source_ref",
     "candidate_ids", "candidate_target_binding_ids", "evidence_refs", "conflicts",
@@ -129,6 +136,14 @@ _FEEDBACK_RESPONSE_FIELDS = {
 
 
 # 工作目录在 DataCleaningTools 实例化时按实际路由解析。
+
+_FEEDBACK_HISTORY_BASE_FIELDS = {
+    "schema_version", "feedback_id", "run_id", "item_id", "feedback_type",
+    "decision", "risk_level", "field", "old_value", "new_value",
+    "source_file", "target_path", "finding_id", "input_pattern",
+    "expected_field", "expected_value", "evidence_text", "reason",
+    "created_at", "review_item_hash", "confirmed", "payload_hash",
+}
 
 # 分类关键词映射（新三层架构：项目投标/项目执行/项目丢标）
 CLASSIFICATION_KEYWORDS = {
@@ -2416,11 +2431,28 @@ class DataCleaningTools:
                     "message": "feedback requires an existing review_queue.v2",
                 }],
             )
+        artifacts = {
+            "human_feedback_decisions": os.path.join(run_dir, "human_feedback_decisions.json"),
+            "feedback_events": os.path.join(run_dir, "feedback_events.jsonl"),
+            "rule_candidates": os.path.join(run_dir, "rule_candidates.json"),
+            "parser_test_candidates": os.path.join(run_dir, "parser_test_candidates.json"),
+        }
         try:
             review_queue = strict_json_load(review_queue_path)
             validate_review_queue(review_queue, run_id)
             queue_items = self._feedback_queue_items(review_queue, run_id)
-            existing = self._load_feedback_history(run_dir, run_id)
+            existing = self._load_feedback_history(
+                run_dir, run_id, review_queue=review_queue, queue_items=queue_items,
+            )
+            existing_event_bytes = self._load_feedback_events(artifacts["feedback_events"], existing)
+            existing_rule_candidates = self._load_candidate_items(
+                artifacts["rule_candidates"], schema_version="rule_candidates.v1",
+                run_id=run_id, expected_items=build_rule_candidates(existing),
+            )
+            existing_parser_candidates = self._load_candidate_items(
+                artifacts["parser_test_candidates"], schema_version="parser_test_candidates.v1",
+                run_id=run_id, expected_items=build_parser_test_candidates(existing),
+            )
         except (ArchiveRunArtifactError, FeedbackValidationError, OSError, TypeError, ValueError):
             return self._feedback_apply_result(
                 run_id, [], [{
@@ -2506,18 +2538,10 @@ class DataCleaningTools:
         all_decisions = existing + accepted
         new_rule_candidates = build_rule_candidates(accepted)
         new_parser_candidates = build_parser_test_candidates(accepted)
-        artifacts = {
-            "human_feedback_decisions": os.path.join(run_dir, "human_feedback_decisions.json"),
-            "feedback_events": os.path.join(run_dir, "feedback_events.jsonl"),
-            "rule_candidates": os.path.join(run_dir, "rule_candidates.json"),
-            "parser_test_candidates": os.path.join(run_dir, "parser_test_candidates.json"),
-        }
         review_queue_updates = {
             "status": "unchanged", "updated": 0, "pending": [], "artifact": "",
         }
         if accepted:
-            existing_rule_candidates = self._load_candidate_items(artifacts["rule_candidates"])
-            existing_parser_candidates = self._load_candidate_items(artifacts["parser_test_candidates"])
             decisions_payload = {
                 "schema_version": "human_feedback.decisions.v1",
                 "run_id": run_id,
@@ -2541,9 +2565,7 @@ class DataCleaningTools:
             )
             review_queue_payload = review_queue_updates.pop("_payload")
             artifacts["review_queue"] = review_queue_updates["artifact"]
-            event_bytes = self._feedback_events_bytes(
-                artifacts["feedback_events"], accepted,
-            )
+            event_bytes = self._feedback_events_bytes(existing_event_bytes, accepted)
             transaction_payloads = {
                 artifacts["human_feedback_decisions"]: self._encode_feedback_json(decisions_payload),
                 artifacts["feedback_events"]: event_bytes,
@@ -2649,6 +2671,28 @@ class DataCleaningTools:
             raise FeedbackValidationError("invalid_feedback_value", "feedback contains a non-JSON value") from None
         if len(encoded) > MAX_REVIEW_BYTES:
             raise FeedbackValidationError("feedback_size_limit", "feedback exceeds the byte limit")
+        for identifier_field in _FEEDBACK_IDENTIFIER_FIELDS:
+            if identifier_field not in raw:
+                continue
+            identifier = raw[identifier_field]
+            if type(identifier) is not str or not _FEEDBACK_IDENTIFIER.fullmatch(identifier):
+                raise FeedbackValidationError(
+                    "invalid_feedback_identifier",
+                    f"{identifier_field} must be a canonical identifier",
+                )
+        for enum_field in _FEEDBACK_ENUM_FIELDS:
+            if enum_field not in raw:
+                continue
+            enum_value = raw[enum_field]
+            if (
+                type(enum_value) is not str
+                or not enum_value
+                or len(enum_value.encode("utf-8")) > 128
+                or review_value_contains_sensitive_text(enum_value)
+            ):
+                raise FeedbackValidationError(
+                    "invalid_feedback_enum", f"{enum_field} must be a bounded string",
+                )
         for scalar_field in _FEEDBACK_SCALAR_FIELDS:
             if scalar_field not in raw:
                 continue
@@ -2681,6 +2725,11 @@ class DataCleaningTools:
             if type(text_value) is not str:
                 raise FeedbackValidationError(
                     "invalid_feedback_text", f"{text_field} must be a string",
+                )
+            if text_field == "created_at" and text_value and not _RFC3339_TIMESTAMP.fullmatch(text_value):
+                raise FeedbackValidationError(
+                    "invalid_feedback_timestamp",
+                    "created_at must use RFC3339 when supplied",
                 )
             if len(text_value.encode("utf-8")) > _MAX_FEEDBACK_VALUE_BYTES:
                 raise FeedbackValidationError(
@@ -2751,7 +2800,14 @@ class DataCleaningTools:
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    def _load_feedback_history(self, run_dir: str, run_id: str) -> List[Dict[str, Any]]:
+    def _load_feedback_history(
+        self,
+        run_dir: str,
+        run_id: str,
+        *,
+        review_queue: Dict[str, Any],
+        queue_items: Dict[str, Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
         path = os.path.join(run_dir, "human_feedback_decisions.json")
         if not os.path.exists(path):
             return []
@@ -2761,20 +2817,60 @@ class DataCleaningTools:
             or payload.get("schema_version") != "human_feedback.decisions.v1"
             or payload.get("run_id") != run_id
             or type(payload.get("decisions")) is not list
-            or type(payload.get("errors")) is not list
+            or payload.get("errors") != []
         ):
             raise ArchiveRunArtifactError("feedback history schema")
         identifiers = set()
         result = []
         for item in payload["decisions"]:
-            if (
-                type(item) is not dict
-                or item.get("run_id") != run_id
-                or type(item.get("feedback_id")) is not str
-                or type(item.get("item_id")) is not str
-                or item["feedback_id"] in identifiers
-            ):
+            if type(item) is not dict:
                 raise ArchiveRunArtifactError("feedback history item")
+            queue_item = queue_items.get(item.get("item_id"))
+            if queue_item is None:
+                raise ArchiveRunArtifactError("feedback history item binding")
+            trace = review_trace_projection(queue_item)
+            expected_fields = _FEEDBACK_HISTORY_BASE_FIELDS | set(trace)
+            if "actor" in item:
+                expected_fields.add("actor")
+            if set(item) != expected_fields:
+                raise ArchiveRunArtifactError("feedback history item fields")
+            feedback_id = item.get("feedback_id")
+            item_id = item.get("item_id")
+            if (
+                item.get("schema_version") != "human_feedback.decision.v1"
+                or item.get("run_id") != run_id
+                or type(feedback_id) is not str
+                or not feedback_id
+                or type(item_id) is not str
+                or not item_id
+                or feedback_id in identifiers
+                or item.get("feedback_type") != queue_item.get("feedback_type")
+                or type(item.get("decision")) is not str
+                or item.get("decision") not in queue_item.get("allowed_decisions", [])
+                or item.get("risk_level") != queue_item.get(
+                    "risk", queue_item.get("risk_level", item.get("risk_level")),
+                )
+                or item.get("confirmed") is not False
+            ):
+                raise ArchiveRunArtifactError("feedback history item identity")
+            for key, value in trace.items():
+                if item.get(key) != value:
+                    raise ArchiveRunArtifactError("feedback history provenance")
+            if (
+                item.get("source_file") != trace.get("source_file", trace.get("file", ""))
+                or item.get("target_path") != trace.get("target_path", "")
+            ):
+                raise ArchiveRunArtifactError("feedback history trusted path")
+            feedback_ids = queue_item.get("feedback_ids", [])
+            feedback_decisions = queue_item.get("feedback_decisions", [])
+            if (
+                type(feedback_ids) is not list
+                or type(feedback_decisions) is not list
+                or len(feedback_ids) != len(feedback_decisions)
+                or feedback_id not in feedback_ids
+                or feedback_decisions[feedback_ids.index(feedback_id)] != item["decision"]
+            ):
+                raise ArchiveRunArtifactError("feedback history queue replay")
             input_projection = {
                 key: value for key, value in item.items()
                 if key in _FEEDBACK_INPUT_FIELDS
@@ -2789,16 +2885,19 @@ class DataCleaningTools:
             }
             expected_hash = self._canonical_feedback_hash(semantic)
             stored_hash = item.get("payload_hash")
-            if stored_hash is None:
-                item = dict(item)
-                item["payload_hash"] = expected_hash
-            elif (
+            if (
                 type(stored_hash) is not str
                 or re.fullmatch(r"[0-9a-f]{64}", stored_hash) is None
                 or stored_hash != expected_hash
             ):
                 raise ArchiveRunArtifactError("feedback history payload hash")
-            identifiers.add(item["feedback_id"])
+            snapshot_queue = dict(review_queue)
+            snapshot_queue["status"] = "needs_review"
+            if item.get("review_item_hash") != review_item_snapshot_hash(
+                snapshot_queue, queue_item,
+            ):
+                raise ArchiveRunArtifactError("feedback history review snapshot")
+            identifiers.add(feedback_id)
             result.append(item)
         return result
 
@@ -2849,26 +2948,72 @@ class DataCleaningTools:
             if type(response) is not dict or set(response) - _FEEDBACK_RESPONSE_FIELDS:
                 raise FeedbackValidationError("invalid_feedback_form", "feedback response is invalid")
 
+            input_projection = {
+                key: value for key, value in item.items()
+                if key in _FEEDBACK_INPUT_FIELDS
+            }
+            try:
+                DataCleaningTools._validate_feedback_input(input_projection)
+                DataCleaningTools._validate_feedback_input(response)
+            except FeedbackValidationError:
+                raise FeedbackValidationError(
+                    "invalid_feedback_form", "feedback form scalar schema is invalid",
+                ) from None
+
     @staticmethod
+
     def _encode_feedback_json(payload: Dict[str, Any]) -> bytes:
         return json.dumps(
             payload, ensure_ascii=False, indent=2, allow_nan=False,
         ).encode("utf-8")
 
     @staticmethod
-    def _feedback_events_bytes(
-        path: str, accepted: List[Dict[str, Any]],
+    def _load_feedback_events(
+        path: str, decisions: List[Dict[str, Any]],
     ) -> bytes:
-        current = b""
-        if os.path.exists(path):
-            with open(path, "rb") as stream:
-                current = stream.read(MAX_REVIEW_BYTES + 1)
-            if len(current) > MAX_REVIEW_BYTES:
-                raise FeedbackValidationError(
-                    "feedback_size_limit", "feedback events exceed byte limit",
+        if not os.path.exists(path):
+            if decisions:
+                raise ArchiveRunArtifactError("feedback events missing")
+            return b""
+        before = os.lstat(path)
+        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
+            raise ArchiveRunArtifactError("feedback events file")
+        with open(path, "rb") as stream:
+            current = stream.read(MAX_REVIEW_BYTES + 1)
+        if len(current) > MAX_REVIEW_BYTES:
+            raise ArchiveRunArtifactError("feedback events size")
+        if current and not current.endswith(b"\n"):
+            raise ArchiveRunArtifactError("feedback events framing")
+        raw_lines = current.splitlines()
+        if len(raw_lines) != len(decisions):
+            raise ArchiveRunArtifactError("feedback events replay count")
+        for raw_line, decision in zip(raw_lines, decisions):
+            try:
+                event = json.loads(
+                    raw_line.decode("utf-8", "strict"),
+                    object_pairs_hook=DataCleaningTools._unique_json_pairs,
+                    parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
                 )
-            if current and not current.endswith(b"\n"):
-                current += b"\n"
+            except (UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+                raise ArchiveRunArtifactError("feedback event JSON") from None
+            if type(event) is not dict or event != feedback_event(decision):
+                raise ArchiveRunArtifactError("feedback event replay")
+            validate_json_tree(event)
+        return current
+
+    @staticmethod
+    def _unique_json_pairs(pairs: List[tuple[str, Any]]) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
+    @staticmethod
+    def _feedback_events_bytes(
+        current: bytes, accepted: List[Dict[str, Any]],
+    ) -> bytes:
         lines = []
         for decision in accepted:
             event = feedback_event(decision)
@@ -3034,8 +3179,20 @@ class DataCleaningTools:
         except (ArchiveRunArtifactError, OSError, ValueError):
             return self._feedback_boundary_error("candidate_test_generation.v1", run_id)
 
-        parser_candidates = self._load_candidate_items(os.path.join(run_dir, "parser_test_candidates.json"))
-        rule_candidates = self._load_candidate_items(os.path.join(run_dir, "rule_candidates.json"))
+        review_queue = strict_json_load(os.path.join(run_dir, "review_queue.json"))
+        validate_review_queue(review_queue, run_id)
+        parser_candidates = self._load_candidate_items(
+            os.path.join(run_dir, "parser_test_candidates.json"),
+            schema_version="parser_test_candidates.v1",
+            run_id=run_id,
+            expected_items=None,
+        )
+        rule_candidates = self._load_candidate_items(
+            os.path.join(run_dir, "rule_candidates.json"),
+            schema_version="rule_candidates.v1",
+            run_id=run_id,
+            expected_items=None,
+        )
 
         generated_dir = os.path.join(run_dir, "generated_tests")
         artifacts = {
@@ -3058,12 +3215,71 @@ class DataCleaningTools:
         self._save_structured_json(artifacts["test_manifest"], manifest)
         return manifest
 
-    def _load_candidate_items(self, path: str) -> List[Dict[str, Any]]:
+    def _load_candidate_items(
+        self,
+        path: str,
+        *,
+        schema_version: str,
+        run_id: str,
+        expected_items: Optional[List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
         if not os.path.exists(path):
+            if expected_items is not None and expected_items:
+                raise ArchiveRunArtifactError("feedback candidates missing")
             return []
-        payload = self._load_json_file(path)
-        items = payload.get("items", [])
-        return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+        payload = strict_json_load(path)
+        if (
+            set(payload) != {"schema_version", "run_id", "items"}
+            or payload.get("schema_version") != schema_version
+            or payload.get("run_id") != run_id
+            or (expected_items is not None and payload.get("items") != expected_items)
+        ):
+            raise ArchiveRunArtifactError("feedback candidates replay")
+        validate_json_tree(payload)
+        items = payload.get("items")
+        if type(items) is not list or len(items) > 256:
+            raise ArchiveRunArtifactError("feedback candidates items")
+        if expected_items is None:
+            parser_fields = {
+                "schema_version", "feedback_id", "run_id", "item_id", "field",
+                "input_pattern", "expected_value", "reason", "status",
+            }
+            rule_fields = {
+                "schema_version", "feedback_id", "feedback_type", "run_id",
+                "item_id", "decision", "risk_level", "source_file", "target_path",
+                "finding_id", "reason", "status", "requires_test",
+            }
+            for item in items:
+                fields = parser_fields if schema_version == "parser_test_candidates.v1" else rule_fields
+                item_version = "parser_test_candidate.v1" if schema_version == "parser_test_candidates.v1" else "rule_candidate.v1"
+                status = "pending_test_authoring" if schema_version == "parser_test_candidates.v1" else "pending_rule_approval"
+                if (
+                    type(item) is not dict
+                    or set(item) != fields
+                    or item.get("schema_version") != item_version
+                    or item.get("run_id") != run_id
+                    or item.get("status") != status
+                    or type(item.get("feedback_id")) is not str
+                    or type(item.get("item_id")) is not str
+                    or not item["feedback_id"]
+                    or not item["item_id"]
+                ):
+                    raise ArchiveRunArtifactError("feedback candidate schema")
+                for key, value in item.items():
+                    if key == "expected_value":
+                        if type(value) not in (str, int, float, bool) and value is not None:
+                            raise ArchiveRunArtifactError("feedback candidate scalar")
+                    elif key == "requires_test":
+                        if value is not True:
+                            raise ArchiveRunArtifactError("feedback candidate test marker")
+                    elif type(value) is not str:
+                        raise ArchiveRunArtifactError("feedback candidate scalar")
+                if schema_version == "parser_test_candidates.v1" and review_value_contains_sensitive_text(
+                    item["expected_value"],
+                ):
+                    raise ArchiveRunArtifactError("feedback candidate unsafe scalar")
+
+        return payload["items"]
 
     def _first_project_name(self, archive_actions: List[Dict[str, Any]], structured_outputs: List[str]) -> str:
         for action in archive_actions:

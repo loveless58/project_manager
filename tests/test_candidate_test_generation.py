@@ -47,6 +47,7 @@ class CandidateTestGenerationTests(unittest.TestCase):
                                 "input_pattern": "合同金额：12.5万元",
                                 "expected_value": "125000",
                                 "status": "pending_test_authoring",
+                                "reason": "synthetic parser case",
                             }
                         ],
                     },
@@ -68,6 +69,10 @@ class CandidateTestGenerationTests(unittest.TestCase):
                                 "item_id": "R002",
                                 "decision": "approve",
                                 "risk_level": "P1",
+                                "source_file": "source.docx",
+                                "target_path": "archive/source.docx",
+                                "finding_id": "",
+                                "reason": "synthetic archive decision",
                                 "requires_test": True,
                                 "status": "pending_rule_approval",
                             }

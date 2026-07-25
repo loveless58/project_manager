@@ -51,7 +51,6 @@ def validate_document_ref(
         or not uri
         or uri != uri.strip()
         or len(uri.encode("utf-8")) > 2048
-        or contains_sensitive_text(uri)
     ):
         raise DocumentRefValidationError("logical_uri must be safe and canonical")
     try:
@@ -71,6 +70,8 @@ def validate_document_ref(
     ):
         raise DocumentRefValidationError("logical_uri must be a controlled URI")
 
+    if contains_sensitive_text(uri):
+        raise DocumentRefValidationError("logical_uri contains sensitive text")
     if not ref.binding_id:
         expected = f"{ref.storage_provider}://{ref.object_key}"
         if parsed.scheme == "business" or uri != expected:
