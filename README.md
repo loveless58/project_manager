@@ -92,7 +92,7 @@ python -m infrastructure.database.cli --database runtime/state.sqlite3 --json ve
 运维边界如下：
 
 - `status` 与 `check` 都会读取 schema 状态并执行数据库完整性验证；`check` 用于表达运维检查意图，两者都不执行 migration。
-- `migrate` 只向前执行。存在待执行项时，迁移前必须先创建、验证并授权一致性备份；任何调用底层 `apply_pending_migrations()` 的代码也必须提供匹配当前版本和目标版本的已验证备份清单。
+- `migrate` 只向前执行。存在待执行项时，迁移前必须先创建并验证一致性备份，再完成授权；任何调用底层 `apply_pending_migrations()` 的代码也必须提供匹配当前版本和目标版本的已验证备份清单。
 - 迁移批次持有协作式 maintenance lock。`SqliteUnitOfWork(mode="write")` 等受管写入者会等待整个批次完成；每份 migration 仍独立提交，失败只回滚当前 migration，早先成功版本不会被撤销。
 - 初始备份使用 data-generation witness 绑定到第一份 migration 的写锁复验；备份后若发生其他提交，迁移会 fail closed，必须重新创建恢复备份。
 - 第一份之后，每份 migration 开始前都会在 SQLite 写锁内刷新恢复备份。pre-vNNNN 恢复点包含此前成功的 migration 和刷新前已提交的业务数据；若 vNNNN 失败，可从该恢复点验证并发布候选库，不会丢失这些已提交状态。
