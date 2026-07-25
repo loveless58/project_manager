@@ -23,6 +23,10 @@ from infrastructure.database.sqlite.schema import initialize_schema_metadata
 
 
 FIXTURE_MIGRATIONS = Path(__file__).parent / "fixtures" / "migrations"
+EMPTY_MIGRATIONS = Path(__file__).parent / "fixtures" / "empty_migrations"
+# Public backup/restore boundaries require a loader-issued catalog capability,
+# including the deliberately empty version-zero fixture.
+EMPTY_CATALOG = load_migration_catalog(EMPTY_MIGRATIONS)
 
 
 @pytest.fixture
@@ -42,7 +46,7 @@ def database(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def backup_result(database: Path, tmp_path: Path):
-    return create_sqlite_backup(database, tmp_path / "backup.sqlite3", ())
+    return create_sqlite_backup(database, tmp_path / "backup.sqlite3", EMPTY_CATALOG)
 
 
 def _sha256(path: Path) -> str:
@@ -110,7 +114,7 @@ def test_restores_verified_backup_to_new_path(
         backup_result.manifest_path,
         target,
         active_database_path=active,
-        catalog=(),
+        catalog=EMPTY_CATALOG,
     )
 
     assert result == RestoreResult(
@@ -143,7 +147,7 @@ def test_restore_never_switches_or_overwrites_active_database(
             backup_result.manifest_path,
             target,
             active_database_path=active,
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert raised.value.__cause__ is None
@@ -163,7 +167,7 @@ def test_existing_target_is_preserved(
             backup_result.manifest_path,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert target.read_bytes() == b"existing target"
@@ -224,7 +228,7 @@ def test_manifest_is_strictly_validated_before_opening_sqlite(
             manifest,
             tmp_path / "restored.sqlite3",
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert not opened
@@ -256,7 +260,7 @@ def test_backup_size_and_hash_are_verified_before_opening_sqlite(
             manifest,
             tmp_path / "restored.sqlite3",
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert not opened
@@ -292,10 +296,10 @@ def test_manifest_schema_metadata_must_match_restored_database(
     payload = asdict(backup_result.manifest)
     if mismatch == "schema":
         payload["schema_version"] = 1
-        restore_catalog: tuple[MigrationInfo, ...] = ()
+        restore_catalog = EMPTY_CATALOG
     else:
         payload["catalog_target_version"] = 2
-        restore_catalog = ()
+        restore_catalog = EMPTY_CATALOG
     manifest = tmp_path / f"{mismatch}.manifest.json"
     manifest.write_text(json.dumps(payload), encoding="utf-8")
     target = tmp_path / "restored.sqlite3"
@@ -325,7 +329,7 @@ def test_uninitialized_backup_is_rejected(tmp_path: Path) -> None:
             manifest,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     _assert_no_restore_artifacts(target)
@@ -383,7 +387,7 @@ def test_foreign_key_orphan_is_rejected(tmp_path: Path) -> None:
             manifest,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     _assert_no_restore_artifacts(target)
@@ -402,7 +406,7 @@ def test_corrupt_backup_is_rejected_after_manifest_verification(tmp_path: Path) 
             manifest,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     _assert_no_restore_artifacts(target)
@@ -430,7 +434,7 @@ def test_injected_target_verification_failure_cleans_only_owned_temporary_state(
             backup_result.manifest_path,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     _assert_no_restore_artifacts(target)
@@ -489,7 +493,7 @@ def test_backup_api_failure_closes_source_and_destination_and_cleans_temp(
             backup_result.manifest_path,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert "sensitive" not in str(raised.value)
@@ -522,7 +526,7 @@ def test_publication_failure_cleans_owned_temp_and_preserves_foreign_files(
             backup_result.manifest_path,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert "sensitive" not in str(raised.value)
@@ -551,7 +555,7 @@ def test_link_that_creates_target_then_raises_is_compensated(
             backup_result.manifest_path,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     _assert_no_restore_artifacts(target)
@@ -580,7 +584,7 @@ def test_replaced_target_is_never_deleted_or_reported_as_success(
             backup_result.manifest_path,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert target.read_bytes() == replacement
@@ -616,7 +620,7 @@ def test_final_identity_stat_failure_compensates_published_target(
             backup_result.manifest_path,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert target_stat_calls >= 2
@@ -680,7 +684,7 @@ def test_backup_replacement_between_precheck_and_open_is_rejected(
             backup_result.manifest_path,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert replaced
@@ -718,7 +722,7 @@ def test_replaced_temporary_target_is_not_deleted_during_failure_cleanup(
             backup_result.manifest_path,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert replaced_path is not None
@@ -774,7 +778,7 @@ def test_source_path_ab_swap_cannot_publish_replacement_business_data(
         backup_result.manifest_path,
         target,
         active_database_path=tmp_path / "active.sqlite3",
-        catalog=(),
+        catalog=EMPTY_CATALOG,
     )
 
     assert swapped
@@ -806,7 +810,7 @@ def test_broken_target_symlink_is_refused_before_resolution(
             backup_result.manifest_path,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert target.is_symlink()
@@ -828,7 +832,7 @@ def test_target_symlink_to_existing_file_is_preserved(
             backup_result.manifest_path,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert target.is_symlink()
@@ -854,7 +858,7 @@ def test_target_symlink_to_active_database_keeps_active_alias_check(
             backup_result.manifest_path,
             target,
             active_database_path=active,
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert target.is_symlink()
@@ -872,7 +876,7 @@ def test_plain_new_target_still_restores_after_raw_entry_check(
         backup_result.manifest_path,
         target,
         active_database_path=tmp_path / "active.sqlite3",
-        catalog=(),
+        catalog=EMPTY_CATALOG,
     )
 
     assert target.is_file()
@@ -903,7 +907,7 @@ def test_source_link_that_creates_then_raises_is_cleaned(
             backup_result.manifest_path,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert raised.value.__cause__ is None
@@ -937,7 +941,7 @@ def test_source_binding_stat_failure_cleans_private_link(
             backup_result.manifest_path,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert failed
@@ -973,7 +977,7 @@ def test_replaced_bound_source_is_not_deleted_during_cleanup(
             backup_result.manifest_path,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert replaced_path is not None
@@ -990,7 +994,7 @@ def test_source_and_target_use_separate_local_staging_directories(
     target_dir = tmp_path / "target-operations"
     backup_dir.mkdir()
     target_dir.mkdir()
-    backup = create_sqlite_backup(database, backup_dir / "backup.sqlite3", ())
+    backup = create_sqlite_backup(database, backup_dir / "backup.sqlite3", EMPTY_CATALOG)
     target = target_dir / "restored.sqlite3"
     real_create = restore_module._create_staging_directory
     observed: dict[str, tuple[Path, Path]] = {}
@@ -1011,7 +1015,7 @@ def test_source_and_target_use_separate_local_staging_directories(
         backup.manifest_path,
         target,
         active_database_path=database,
-        catalog=(),
+        catalog=EMPTY_CATALOG,
     )
 
     source_staging, source_parent = observed["source"]
@@ -1055,7 +1059,7 @@ def test_source_link_error_never_deletes_non_owned_replacement(
             backup_result.manifest_path,
             target,
             active_database_path=tmp_path / "active.sqlite3",
-            catalog=(),
+            catalog=EMPTY_CATALOG,
         )
 
     assert replaced_path is not None

@@ -17,7 +17,12 @@ from .contracts import (
     UnitOfWorkStateError,
     UnsupportedDatabaseProviderError,
 )
-from .migration_catalog import catalog_target_version, load_migration_catalog
+from .migration_catalog import (
+    MigrationCatalog,
+    catalog_target_version,
+    load_migration_catalog,
+    validate_migration_catalog,
+)
 
 __all__ = [
     "AppliedMigration",
@@ -27,6 +32,7 @@ __all__ = [
     "DatabaseConfigurationError",
     "DatabaseError",
     "DatabaseIntegrityError",
+    "MigrationCatalog",
     "MigrationCatalogError",
     "MigrationChecksumError",
     "MigrationExecutionError",
@@ -39,4 +45,5 @@ __all__ = [
     "UnsupportedDatabaseProviderError",
     "catalog_target_version",
     "load_migration_catalog",
+    "validate_migration_catalog",
 ]

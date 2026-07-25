@@ -92,11 +92,15 @@ python -m infrastructure.database.cli --database runtime/state.sqlite3 --json ve
 运维边界如下：
 
 - `status` 与 `check` 都会读取 schema 状态并执行数据库完整性验证；`check` 用于表达运维检查意图，两者都不执行 migration。
-- `migrate` 只向前执行。存在待执行项时，迁移前必须先创建并验证一致性备份；任何调用底层 `apply_pending_migrations()` 的代码也必须提供匹配当前版本和目标版本的已验证备份清单。
+- `migrate` 只向前执行。存在待执行项时，迁移前必须先创建、验证并授权一致性备份；任何调用底层 `apply_pending_migrations()` 的代码也必须提供匹配当前版本和目标版本的已验证备份清单。
+- 迁移批次持有协作式 maintenance lock。`SqliteUnitOfWork(mode="write")` 等受管写入者会等待整个批次完成；每份 migration 仍独立提交，失败只回滚当前 migration，早先成功版本不会被撤销。
+- 初始备份使用 data-generation witness 绑定到第一份 migration 的写锁复验；备份后若发生其他提交，迁移会 fail closed，必须重新创建恢复备份。
+- 第一份之后，每份 migration 开始前都会在 SQLite 写锁内刷新恢复备份。pre-vNNNN 恢复点包含此前成功的 migration 和刷新前已提交的业务数据；若 vNNNN 失败，可从该恢复点验证并发布候选库，不会丢失这些已提交状态。
+- 协作锁不能阻止直接使用原始 `sqlite3` 连接、第三方 SQLite 工具或旧版本进程的 unmanaged writes。即使跨 migration 间隙的已提交写入会被下一恢复点纳入，运维仍必须在执行 `migrate` 前停止所有 unmanaged writers，并在命令结束后再恢复流量。
 - `before_record_insert` 只是 `apply_pending_migrations()` 的关键字测试故障注入参数，用于证明 migration SQL 与迁移记录原子回滚；它不是单独导出的生产 API。
 - 备份使用 SQLite Backup API，而不是直接复制活跃数据库文件。备份清单记录 SHA-256 和字节大小，并同时记录 schema 版本、catalog 目标版本、SQLite 版本和完整性结果。
 - 备份和恢复都不覆盖已存在的目标路径。目标文件、对应 `.manifest.json` 或恢复候选库已存在时，操作会失败，不会静默替换。
-- 恢复顺序为：先验证 manifest、SHA-256 和字节大小；再用 SQLite Backup API 物化临时候选库；随后在临时库执行 integrity、外键和 schema 验证；全部通过后才以 no-overwrite 方式发布最终候选路径。恢复只创建候选数据库，不会修改配置或替换活跃库；发布完成后必须由运维人员显式切换，并保留回退方案。
+- 恢复顺序为：先验证 manifest、SHA-256 和字节大小；再用 SQLite Backup API 物化临时候选库；随后在临时库执行 integrity、外键和 schema 验证；全部通过后才以 no-overwrite 方式发布最终候选路径。恢复只创建候选数据库，不会修改配置或替换活跃库；发布完成后必须由运维人员显式切换，并保留回退方案。失败 migration 的直接恢复点是其最新 pre-vNNNN 备份，而不是迁移批次开始前可能已经陈旧的初始快照。
 
 SQLite 的运行边界是“节点本地”，而不是“仓库所在机器”：
 

@@ -12,6 +12,7 @@ ROOT_PUBLIC_NAMES = {
     "DatabaseConfigurationError",
     "DatabaseError",
     "DatabaseIntegrityError",
+    "MigrationCatalog",
     "MigrationCatalogError",
     "MigrationChecksumError",
     "MigrationExecutionError",
@@ -24,6 +25,7 @@ ROOT_PUBLIC_NAMES = {
     "UnsupportedDatabaseProviderError",
     "catalog_target_version",
     "load_migration_catalog",
+    "validate_migration_catalog",
 }
 
 SQLITE_PUBLIC_NAMES = {

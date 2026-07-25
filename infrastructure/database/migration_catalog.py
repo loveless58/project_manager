@@ -4,6 +4,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from threading import RLock
+from weakref import WeakKeyDictionary
 
 from .contracts import MigrationCatalogError, MigrationInfo
 
@@ -27,12 +29,113 @@ class _SqlToken:
     value: str
 
 
-def load_migration_catalog(directory: Path) -> tuple[MigrationInfo, ...]:
+@dataclass(frozen=True, slots=True)
+class _MigrationCatalogRecord:
+    directory: Path
+    directory_identity: tuple[int, int]
+    items: tuple[MigrationInfo, ...]
+
+
+class MigrationCatalog(Sequence[MigrationInfo]):
+    """Opaque, loader-issued migration catalog capability.
+
+    The SQL files remain the source of truth.  Every database-mutating public
+    boundary revalidates the registered directory and bytes before opening a
+    database, so a copied/replaced DTO sequence is never migration authority.
+    """
+
+    __slots__ = ("__weakref__",)
+
+    def __init__(self) -> None:
+        raise TypeError("MigrationCatalog values are created by load_migration_catalog")
+
+    def __len__(self) -> int:
+        return len(_catalog_record_for(self).items)
+
+    def __getitem__(self, index):
+        return _catalog_record_for(self).items[index]
+
+    def __iter__(self):
+        return iter(_catalog_record_for(self).items)
+
+    def __copy__(self):
+        raise TypeError("MigrationCatalog cannot be copied")
+
+    def __deepcopy__(self, memo):
+        raise TypeError("MigrationCatalog cannot be copied")
+
+    def __repr__(self) -> str:
+        return f"MigrationCatalog(target_version={catalog_target_version(self)})"
+
+
+_CATALOG_RECORD_LOCK = RLock()
+_CATALOG_RECORDS = WeakKeyDictionary()
+
+
+def _issue_catalog(record: _MigrationCatalogRecord) -> MigrationCatalog:
+    catalog = object.__new__(MigrationCatalog)
+    with _CATALOG_RECORD_LOCK:
+        _CATALOG_RECORDS[catalog] = record
+    return catalog
+
+
+def _catalog_record_for(catalog: object) -> _MigrationCatalogRecord:
+    if type(catalog) is not MigrationCatalog:
+        raise MigrationCatalogError("migration catalog provenance is invalid")
+    with _CATALOG_RECORD_LOCK:
+        try:
+            return _CATALOG_RECORDS[catalog]
+        except KeyError:
+            raise MigrationCatalogError(
+                "migration catalog provenance is invalid"
+            ) from None
+
+
+def load_migration_catalog(directory: Path) -> MigrationCatalog:
+    try:
+        resolved_directory = directory.resolve(strict=True)
+        if not resolved_directory.is_dir():
+            raise OSError
+        items = _load_migration_items(resolved_directory)
+        stat_result = resolved_directory.stat()
+    except MigrationCatalogError:
+        raise
+    except OSError:
+        raise MigrationCatalogError("migration catalog directory is invalid") from None
+    return _issue_catalog(
+        _MigrationCatalogRecord(
+            directory=resolved_directory,
+            directory_identity=(stat_result.st_dev, stat_result.st_ino),
+            items=items,
+        )
+    )
+
+
+def validate_migration_catalog(catalog: object) -> MigrationCatalog:
+    record = _catalog_record_for(catalog)
+    try:
+        stat_result = record.directory.stat()
+        if (
+            not record.directory.is_dir()
+            or (stat_result.st_dev, stat_result.st_ino) != record.directory_identity
+            or _load_migration_items(record.directory) != record.items
+        ):
+            raise MigrationCatalogError("migration catalog provenance is invalid")
+    except MigrationCatalogError:
+        raise
+    except OSError:
+        raise MigrationCatalogError("migration catalog provenance is invalid") from None
+    return catalog
+
+
+def _load_migration_items(directory: Path) -> tuple[MigrationInfo, ...]:
     items: list[MigrationInfo] = []
 
     for path in directory.iterdir():
-        if not path.is_file() or path.suffix != ".sql":
+        if path.suffix != ".sql":
             continue
+        if path.is_symlink() or not path.is_file():
+            raise MigrationCatalogError("migration path is invalid")
 
         filename = path.name
         match = re.fullmatch(
@@ -59,7 +162,7 @@ def load_migration_catalog(directory: Path) -> tuple[MigrationInfo, ...]:
                 version=int(match["version"]),
                 name=match["name"],
                 checksum_sha256=hashlib.sha256(payload).hexdigest(),
-                path=path,
+                path=path.resolve(strict=True),
             )
         )
 
@@ -297,7 +400,14 @@ def _target_uses_non_main_schema(
 ) -> bool:
     if target_index is None or target_index + 1 >= len(tokens):
         return False
-    schema = _identifier_value(tokens[target_index])
+    schema_token = tokens[target_index]
+    schema = _identifier_value(schema_token)
+    if (
+        schema is None
+        and schema_token.kind is _SqlTokenKind.STRING
+        and _is_punctuation(tokens[target_index + 1], ".")
+    ):
+        schema = schema_token.value.casefold()
     return (
         schema is not None
         and _is_punctuation(tokens[target_index + 1], ".")
@@ -423,3 +533,11 @@ def _skip_block_comment(sql: str, index: int) -> int:
     if end < 0:
         raise MigrationCatalogError("migration SQL is not lexically complete")
     return end + 2
+
+
+__all__ = [
+    "MigrationCatalog",
+    "catalog_target_version",
+    "load_migration_catalog",
+    "validate_migration_catalog",
+]

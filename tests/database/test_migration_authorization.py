@@ -205,9 +205,18 @@ def test_replacing_database_path_after_authorization_is_rejected(
     )
     original_identity = (database.stat().st_dev, database.stat().st_ino)
     initialize_database(replacement)
-    os.replace(replacement, database)
-    assert (database.stat().st_dev, database.stat().st_ino) != original_identity
+    try:
+        os.replace(replacement, database)
+    except PermissionError:
+        # Windows refuses replacement while the persistent data-generation
+        # witness owns an open handle. This is a stronger fail-closed outcome.
+        assert (database.stat().st_dev, database.stat().st_ino) == original_identity
+        backup_module._close_migration_authorization(authorization)
+        assert not _has_table(database, "authorized_item")
+        assert _applied_versions(database) == []
+        return
 
+    assert (database.stat().st_dev, database.stat().st_ino) != original_identity
     with pytest.raises(BackupError, match="authorization"):
         apply_pending_migrations(
             database,
@@ -317,17 +326,13 @@ def test_authorization_is_bound_to_catalog_identity(tmp_path: Path) -> None:
         original_catalog,
         tmp_path / "backup.sqlite3",
     )
-    alternate_path = tmp_path / "alternate.sql"
-    payload = b"CREATE TABLE different_item(id INTEGER PRIMARY KEY);\n"
-    alternate_path.write_bytes(payload)
-    alternate_catalog = (
-        MigrationInfo(
-            version=1,
-            name="different_item",
-            checksum_sha256=hashlib.sha256(payload).hexdigest(),
-            path=alternate_path,
-        ),
+    alternate_directory = tmp_path / "alternate-migrations"
+    alternate_directory.mkdir()
+    (alternate_directory / "0001_different_item.sql").write_text(
+        "CREATE TABLE different_item(id INTEGER PRIMARY KEY);\n",
+        encoding="utf-8",
     )
+    alternate_catalog = load_migration_catalog(alternate_directory)
 
     with pytest.raises(BackupError, match="authorization"):
         apply_pending_migrations(

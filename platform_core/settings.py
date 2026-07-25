@@ -15,6 +15,26 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_FILE = PROJECT_ROOT / "config" / "project-manager.local.json"
 LEGACY_CONFIG_FILE = PROJECT_ROOT / "config" / "workspace.local.json"
 
+_CONFIG_TOP_LEVEL_KEYS = frozenset(
+    {
+        "deployment_mode",
+        "business_root",
+        "runtime_workspace",
+        "database",
+        "providers",
+    }
+)
+_CONFIG_DATABASE_KEYS = frozenset({"provider", "sqlite_path", "dsn_env_var"})
+_CONFIG_PROVIDER_KEYS = frozenset(
+    {
+        "document_store",
+        "structure_index",
+        "pageindex_dir",
+        "projection_writer",
+        "projection_root",
+    }
+)
+
 
 class SettingsError(ValueError):
     pass
@@ -64,7 +84,28 @@ def _read_config(config_file: Optional[PathLike]) -> Dict[str, Any]:
         raise SettingsError("configuration file contains invalid JSON") from None
     if not isinstance(payload, dict):
         raise SettingsError("configuration root must be an object")
+    _validate_config_schema(payload)
     return payload
+
+
+def _validate_config_schema(payload: Mapping[str, Any]) -> None:
+    if not set(payload).issubset(_CONFIG_TOP_LEVEL_KEYS):
+        raise SettingsError("configuration contains unknown top-level fields")
+    for section_name, allowed_keys in (
+        ("database", _CONFIG_DATABASE_KEYS),
+        ("providers", _CONFIG_PROVIDER_KEYS),
+    ):
+        if section_name not in payload:
+            continue
+        section = payload[section_name]
+        if not isinstance(section, dict):
+            raise SettingsError(
+                f"configuration {section_name} section must be an object"
+            )
+        if not set(section).issubset(allowed_keys):
+            raise SettingsError(
+                f"configuration {section_name} section contains unknown fields"
+            )
 
 
 def _pick(explicit: Any, env: Mapping[str, str], env_name: str, local: Any, default: Any) -> Any:

@@ -23,6 +23,10 @@ from infrastructure.database.sqlite.schema import initialize_schema_metadata
 
 
 FIXTURE_MIGRATIONS = Path(__file__).parent / "fixtures" / "migrations"
+EMPTY_MIGRATIONS = Path(__file__).parent / "fixtures" / "empty_migrations"
+# Public backup boundaries require an opaque, loader-issued catalog even when
+# the target version is zero.
+EMPTY_CATALOG = load_migration_catalog(EMPTY_MIGRATIONS)
 
 
 @pytest.fixture
@@ -42,7 +46,7 @@ def database(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def backup_result(database: Path, tmp_path: Path):
-    return create_sqlite_backup(database, tmp_path / "backup.sqlite3", ())
+    return create_sqlite_backup(database, tmp_path / "backup.sqlite3", EMPTY_CATALOG)
 
 
 def _manifest_path(backup_path: Path) -> Path:
@@ -82,7 +86,7 @@ def test_backup_uses_wal_consistent_sqlite_snapshot(tmp_path: Path) -> None:
         writer.commit()
         assert Path(f"{database}-wal").is_file()
 
-        result = create_sqlite_backup(database, tmp_path / "backup.sqlite3", ())
+        result = create_sqlite_backup(database, tmp_path / "backup.sqlite3", EMPTY_CATALOG)
     finally:
         writer.close()
 
@@ -96,7 +100,7 @@ def test_missing_source_is_refused_without_creating_outputs(tmp_path: Path) -> N
     output = output_dir / "backup.sqlite3"
 
     with pytest.raises(BackupError):
-        create_sqlite_backup(tmp_path / "missing.sqlite3", output, ())
+        create_sqlite_backup(tmp_path / "missing.sqlite3", output, EMPTY_CATALOG)
 
     _assert_no_backup_artifacts(output)
 
@@ -169,7 +173,7 @@ def test_invalid_catalog_status_is_refused(
     output = output_dir / "backup.sqlite3"
 
     with pytest.raises(BackupError):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     _assert_no_backup_artifacts(output)
 
@@ -182,7 +186,7 @@ def test_corrupt_database_is_refused(tmp_path: Path) -> None:
     output = output_dir / "backup.sqlite3"
 
     with pytest.raises(BackupError):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     _assert_no_backup_artifacts(output)
 
@@ -203,7 +207,7 @@ def test_foreign_key_failure_is_refused(tmp_path: Path) -> None:
     output = output_dir / "backup.sqlite3"
 
     with pytest.raises(BackupError):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     _assert_no_backup_artifacts(output)
 
@@ -218,7 +222,7 @@ def test_preexisting_backup_is_never_overwritten(
     output.write_bytes(b"existing backup")
 
     with pytest.raises(BackupError):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert output.read_bytes() == b"existing backup"
     assert not _manifest_path(output).exists()
@@ -236,7 +240,7 @@ def test_preexisting_manifest_is_preserved_and_new_backup_is_compensated(
     manifest_path.write_text("existing manifest", encoding="utf-8")
 
     with pytest.raises(BackupError):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert not output.exists()
     assert manifest_path.read_text(encoding="utf-8") == "existing manifest"
@@ -325,7 +329,7 @@ def test_injected_second_publication_failure_cleans_owned_files(
     monkeypatch.setattr(backup_module.os, "link", fail_manifest_link)
 
     with pytest.raises(BackupError) as raised:
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert str(database) not in str(raised.value)
     assert calls == 2
@@ -366,7 +370,7 @@ def test_source_foreign_keys_are_checked_before_backup_snapshot(
     )
 
     with pytest.raises(BackupError):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert not copy_called
     _assert_no_backup_artifacts(output)
@@ -397,7 +401,7 @@ def test_replaced_backup_is_not_deleted_when_manifest_publication_fails(
     monkeypatch.setattr(backup_module.os, "link", replace_after_first_link)
 
     with pytest.raises(BackupError):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert output.read_bytes() == replacement
     assert not _manifest_path(output).exists()
@@ -421,7 +425,7 @@ def test_link_that_creates_backup_then_raises_is_safely_compensated(
     monkeypatch.setattr(backup_module.os, "link", link_then_raise)
 
     with pytest.raises(BackupError):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     _assert_no_backup_artifacts(output)
 
@@ -452,7 +456,7 @@ def test_first_temp_unlink_failure_is_retried_without_reporting_success(
     monkeypatch.setattr(Path, "unlink", fail_first_backup_temp_unlink)
 
     with pytest.raises(BackupError, match="temporary file cleanup"):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert temp_unlink_attempts == 2
     _assert_no_backup_artifacts(output)
@@ -485,7 +489,7 @@ def test_persistent_temp_unlink_failure_never_reports_success_or_deletes_foreign
     monkeypatch.setattr(Path, "unlink", fail_backup_temp_unlink)
 
     with pytest.raises(BackupError, match="temporary file cleanup"):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert temp_unlink_attempts >= 2
     assert sentinel.read_text(encoding="utf-8") == "preserve"
@@ -525,7 +529,7 @@ def test_failed_backup_compensation_is_reported_without_deleting_backup(
     monkeypatch.setattr(Path, "unlink", fail_backup_compensation)
 
     with pytest.raises(BackupError) as raised:
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert str(raised.value) == "backup publication cleanup failed"
     assert output.is_file()
@@ -613,7 +617,7 @@ def test_mkstemp_close_error_cleans_created_path_and_is_safely_mapped(
     monkeypatch.setattr(backup_module.os, "close", close_then_raise)
 
     with pytest.raises(BackupError) as raised:
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert str(raised.value) == "database backup failed"
     assert close_calls == 1
@@ -649,7 +653,7 @@ def test_replaced_temp_is_not_deleted_during_final_cleanup_retry(
     monkeypatch.setattr(Path, "unlink", replace_backup_temp_while_unlink_fails)
 
     with pytest.raises(BackupError, match="temporary file cleanup"):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert replaced_path is not None
     assert replaced_path.read_bytes() == replacement
@@ -689,7 +693,7 @@ def test_temp_cleanup_reports_failed_backup_compensation(
     )
 
     with pytest.raises(BackupError) as raised:
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert str(raised.value) == "backup publication cleanup failed"
     assert output.is_file()
@@ -719,7 +723,7 @@ def test_manifest_temp_replacement_compensates_backup_without_deleting_replaceme
     monkeypatch.setattr(backup_module, "_write_manifest", write_then_replace)
 
     with pytest.raises(BackupError):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert not output.exists()
     assert not _manifest_path(output).exists()
@@ -752,7 +756,7 @@ def test_manifest_temp_stat_failure_compensates_backup_and_cleans_staging(
     monkeypatch.setattr(Path, "stat", fail_manifest_temp_stat_once)
 
     with pytest.raises(BackupError):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert failed
     _assert_no_backup_artifacts(output)
@@ -785,7 +789,7 @@ def test_backup_final_replacement_before_manifest_link_never_returns_success(
     )
 
     with pytest.raises(BackupError):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert output.read_bytes() == replacement
     assert not _manifest_path(output).exists()
@@ -820,7 +824,7 @@ def test_manifest_final_replacement_never_returns_success_or_deletes_replacement
     )
 
     with pytest.raises(BackupError):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert not output.exists()
     assert manifest_path.read_text(encoding="utf-8") == replacement
@@ -858,7 +862,7 @@ def test_backup_uses_private_staging_directory_and_removes_it_on_success(
         observe_staging,
     )
 
-    result = create_sqlite_backup(database, output, ())
+    result = create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert staging_path is not None
     assert (staging_path, 0o700) in chmod_calls
@@ -897,7 +901,7 @@ def test_private_staging_directory_is_removed_after_publication_failure(
     )
 
     with pytest.raises(BackupError):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert staging_path is not None
     assert not staging_path.exists()
@@ -929,7 +933,7 @@ def test_staging_cleanup_never_deletes_replacement_directory(
     monkeypatch.setattr(Path, "rmdir", replace_staging_while_rmdir_fails)
 
     with pytest.raises(BackupError, match="temporary file cleanup"):
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert replacement_dir is not None
     assert (replacement_dir / marker_name).read_text(encoding="utf-8") == "preserve"
@@ -963,7 +967,7 @@ def test_fstat_failure_closes_fd_and_cleans_private_staging(
     monkeypatch.setattr(backup_module.os, "close", record_close)
 
     with pytest.raises(BackupError) as raised:
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert str(raised.value) == "database backup failed"
     assert fstat_calls == 1
@@ -1021,7 +1025,7 @@ def test_staging_identity_failure_removes_only_exact_empty_directory(
     monkeypatch.setattr(Path, "rmdir", record_exact_rmdir)
 
     with pytest.raises(BackupError) as raised:
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert str(raised.value) == "database backup failed"
     assert created_staging is not None
@@ -1068,7 +1072,7 @@ def test_staging_identity_failure_preserves_nonempty_replacement_state(
     )
 
     with pytest.raises(BackupError) as raised:
-        create_sqlite_backup(database, output, ())
+        create_sqlite_backup(database, output, EMPTY_CATALOG)
 
     assert str(raised.value) == "database backup failed"
     assert created_staging is not None

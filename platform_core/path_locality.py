@@ -14,7 +14,7 @@ from typing import Union
 
 
 PathLike = Union[str, os.PathLike[str]]
-_NETWORK_URI = re.compile(r"^(?:smb|nfs|afp)://", re.IGNORECASE)
+_NETWORK_URI = re.compile(r"^(?:smb|nfs|afp):[\\/]{1,2}", re.IGNORECASE)
 _WINDOWS_EXTENDED_LOCAL_PATH = re.compile(r"^\\\\\?\\[A-Za-z]:[\\/]", re.IGNORECASE)
 
 

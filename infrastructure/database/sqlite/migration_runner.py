@@ -18,13 +18,21 @@ from ..contracts import (
     SchemaStatus,
     SchemaTooNewError,
 )
-from ..migration_catalog import catalog_target_version
-from .backup import _revalidate_migration_authorization
+from ..migration_catalog import (
+    catalog_target_version,
+    validate_migration_catalog,
+)
+from .backup import (
+    _close_migration_authorization,
+    _refresh_migration_backup_under_lock,
+    _revalidate_migration_authorization,
+)
 from .connection import (
     SqliteConnectionOptions,
     _raise_mapped_sqlite_error,
     open_sqlite_connection,
 )
+from .maintenance import database_maintenance_lock
 from .schema import (
     _inspect_schema_connection,
     initialize_schema_metadata,
@@ -70,12 +78,29 @@ _MAIN_SCHEMA_SQLITE_ACTIONS = {
     sqlite3.SQLITE_REINDEX,
     sqlite3.SQLITE_UPDATE,
 }
+_RESERVED_MIGRATION_TABLES = frozenset({"_schema_migrations"})
+_READ_ONLY_MIGRATION_PRAGMAS = frozenset(
+    {
+        "foreign_key_list",
+        "index_info",
+        "index_list",
+        "index_xinfo",
+        "table_info",
+        "table_xinfo",
+        "user_version",
+    }
+)
 
 
 class _MigrationTransactionAuthorizer:
-    def __init__(self, preflight: Callable[[], bool]) -> None:
+    def __init__(
+        self,
+        preflight: Callable[[], bool],
+        *,
+        runner_begin_seen: bool = False,
+    ) -> None:
         self._preflight = preflight
-        self._runner_begin_seen = False
+        self._runner_begin_seen = runner_begin_seen
         self.preflight_completed = False
         self.failure: DatabaseError | None = None
         self.skip_migration = False
@@ -101,9 +126,23 @@ class _MigrationTransactionAuthorizer:
             return sqlite3.SQLITE_DENY
         if action_code in _DENIED_SQLITE_ACTIONS:
             return sqlite3.SQLITE_DENY
+        if action_code == sqlite3.SQLITE_PRAGMA:
+            pragma_name = (argument_1 or "").casefold()
+            if (
+                database_name not in (None, "main")
+                or pragma_name not in _READ_ONLY_MIGRATION_PRAGMAS
+                or (pragma_name == "user_version" and argument_2 is not None)
+            ):
+                return sqlite3.SQLITE_DENY
         if (
-            action_code == sqlite3.SQLITE_PRAGMA
-            and database_name not in (None, "main")
+            action_code
+            in {
+                sqlite3.SQLITE_DELETE,
+                sqlite3.SQLITE_INSERT,
+                sqlite3.SQLITE_READ,
+                sqlite3.SQLITE_UPDATE,
+            }
+            and (argument_1 or "").casefold() in _RESERVED_MIGRATION_TABLES
         ):
             return sqlite3.SQLITE_DENY
         if action_code in _MAIN_SCHEMA_SQLITE_ACTIONS and database_name != "main":
@@ -132,6 +171,44 @@ class MigrationRunResult:
     applied_versions: tuple[int, ...]
 
 
+@dataclass(slots=True)
+class _MigrationRecoverySession:
+    authorization: object
+    initial_schema_version: int
+    target_version: int
+    options: SqliteConnectionOptions
+
+    def prepare_under_write_lock(
+        self,
+        database_path: Path,
+        catalog: Sequence[MigrationInfo],
+        migration: MigrationInfo,
+    ) -> None:
+        if migration.version == self.initial_schema_version + 1:
+            _revalidate_migration_authorization(
+                self.authorization,
+                database_path,
+                catalog,
+                starting_schema_version=self.initial_schema_version,
+                catalog_target_version=self.target_version,
+                require_fresh_generation=True,
+            )
+            return
+
+        self.authorization = _refresh_migration_backup_under_lock(
+            self.authorization,
+            database_path,
+            catalog,
+            migration_version=migration.version,
+            expected_schema_version=migration.version - 1,
+            catalog_target_version=self.target_version,
+            options=self.options,
+        )
+
+    def close(self) -> None:
+        _close_migration_authorization(self.authorization)
+
+
 def initialize_database(
     database_path: Path,
     *,
@@ -151,7 +228,31 @@ def apply_pending_migrations(
         Callable[[sqlite3.Connection, MigrationInfo], None] | None
     ) = None,
 ) -> MigrationRunResult:
+    catalog = validate_migration_catalog(catalog)
     _verify_catalog_payloads(catalog)
+    with database_maintenance_lock(
+        database_path,
+        timeout_ms=options.busy_timeout_ms,
+    ):
+        return _apply_pending_migrations_under_maintenance(
+            database_path,
+            catalog,
+            backup_authorization=backup_authorization,
+            options=options,
+            before_record_insert=before_record_insert,
+        )
+
+
+def _apply_pending_migrations_under_maintenance(
+    database_path: Path,
+    catalog: Sequence[MigrationInfo],
+    *,
+    backup_authorization: object | None,
+    options: SqliteConnectionOptions,
+    before_record_insert: (
+        Callable[[sqlite3.Connection, MigrationInfo], None] | None
+    ),
+) -> MigrationRunResult:
     initial_status = inspect_schema(database_path, catalog, options=options)
     _raise_for_unusable_status(initial_status)
     previous_version = initial_status.current_version
@@ -171,34 +272,41 @@ def apply_pending_migrations(
         starting_schema_version=previous_version,
         target_version=target_version,
     )
-
-    applied_versions: list[int] = []
-    for migration in catalog:
-        if migration.version <= previous_version:
-            continue
-        applied = _apply_one_migration(
-            database_path,
-            catalog,
-            migration,
-            backup_authorization=backup_authorization,
-            starting_schema_version=previous_version,
-            target_version=target_version,
-            options=options,
-            before_record_insert=before_record_insert,
-        )
-        if applied:
-            applied_versions.append(migration.version)
-
-    final_status = inspect_schema(database_path, catalog, options=options)
-    _raise_for_unusable_status(final_status)
-    if final_status.state is not SchemaState.CURRENT:
-        raise DatabaseIntegrityError("database migration state is incomplete")
-
-    return MigrationRunResult(
-        previous_version=previous_version,
-        current_version=final_status.current_version,
-        applied_versions=tuple(applied_versions),
+    recovery_session = _MigrationRecoverySession(
+        authorization=backup_authorization,
+        initial_schema_version=previous_version,
+        target_version=target_version,
+        options=options,
     )
+
+    try:
+        applied_versions: list[int] = []
+        for migration in catalog:
+            if migration.version <= previous_version:
+                continue
+            applied = _apply_one_migration(
+                database_path,
+                catalog,
+                migration,
+                recovery_session=recovery_session,
+                options=options,
+                before_record_insert=before_record_insert,
+            )
+            if applied:
+                applied_versions.append(migration.version)
+
+        final_status = inspect_schema(database_path, catalog, options=options)
+        _raise_for_unusable_status(final_status)
+        if final_status.state is not SchemaState.CURRENT:
+            raise DatabaseIntegrityError("database migration state is incomplete")
+
+        return MigrationRunResult(
+            previous_version=previous_version,
+            current_version=final_status.current_version,
+            applied_versions=tuple(applied_versions),
+        )
+    finally:
+        recovery_session.close()
 
 
 def _apply_one_migration(
@@ -206,9 +314,7 @@ def _apply_one_migration(
     catalog: Sequence[MigrationInfo],
     migration: MigrationInfo,
     *,
-    backup_authorization: object,
-    starting_schema_version: int,
-    target_version: int,
+    recovery_session: _MigrationRecoverySession,
     options: SqliteConnectionOptions,
     before_record_insert: (
         Callable[[sqlite3.Connection, MigrationInfo], None] | None
@@ -233,13 +339,6 @@ def _apply_one_migration(
                 )
 
             def preflight() -> bool:
-                _revalidate_migration_authorization(
-                    backup_authorization,
-                    database_path,
-                    catalog,
-                    starting_schema_version=starting_schema_version,
-                    catalog_target_version=target_version,
-                )
                 locked_status = _inspect_schema_connection(
                     inspection_connection,
                     catalog,
@@ -254,22 +353,31 @@ def _apply_one_migration(
                     raise DatabaseIntegrityError(
                         "database migration history is invalid"
                     )
+                recovery_session.prepare_under_write_lock(
+                    database_path,
+                    catalog,
+                    migration,
+                )
                 return True
 
             started = perf_counter()
-            authorizer = _MigrationTransactionAuthorizer(preflight)
+            authorizer = _MigrationTransactionAuthorizer(
+                preflight,
+                runner_begin_seen=True,
+            )
             try:
-                connection.set_authorizer(authorizer)
-                try:
-                    connection.executescript("BEGIN IMMEDIATE;\n" + migration_sql)
-                finally:
-                    connection.set_authorizer(None)
-
-                if not authorizer.preflight_completed and not authorizer.ensure_preflight():
+                connection.execute("BEGIN IMMEDIATE")
+                if not authorizer.ensure_preflight():
                     if authorizer.failure is not None:
                         raise authorizer.failure
                     connection.rollback()
                     return False
+
+                connection.set_authorizer(authorizer)
+                try:
+                    _execute_migration_statements(connection, migration_sql)
+                finally:
+                    connection.set_authorizer(None)
 
                 execution_ms = max(0, round((perf_counter() - started) * 1000))
 
@@ -286,6 +394,15 @@ def _apply_one_migration(
                         execution_ms,
                     ),
                 )
+                transaction_status = _inspect_schema_connection(
+                    connection,
+                    catalog,
+                )
+                _raise_for_unusable_status(transaction_status)
+                if transaction_status.current_version != migration.version:
+                    raise DatabaseIntegrityError(
+                        "database migration history is invalid"
+                    )
                 connection.commit()
                 return True
             except Exception as error:
@@ -328,6 +445,34 @@ def _apply_one_migration(
             connection.close()
     finally:
         inspection_connection.close()
+
+
+def _execute_migration_statements(
+    connection: sqlite3.Connection,
+    migration_sql: str,
+) -> None:
+    """Execute complete SQLite statements inside the caller-owned transaction.
+
+    ``sqlite3.complete_statement`` follows SQLite's lexical rules, including
+    trigger bodies and semicolons in literals/comments. This avoids
+    ``executescript``'s implicit pre-script commit while retaining whole
+    statement execution under the runtime authorizer.
+    """
+
+    statement_start = 0
+    for index, character in enumerate(migration_sql):
+        if character != ";":
+            continue
+        candidate = migration_sql[statement_start : index + 1]
+        if not sqlite3.complete_statement(candidate):
+            continue
+        if candidate.strip():
+            connection.execute(candidate)
+        statement_start = index + 1
+
+    trailing_statement = migration_sql[statement_start:]
+    if trailing_statement.strip():
+        connection.execute(trailing_statement)
 
 
 def _read_verified_migration_sql(migration: MigrationInfo) -> str:

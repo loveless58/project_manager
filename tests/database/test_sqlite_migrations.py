@@ -6,12 +6,13 @@ from pathlib import Path
 
 import pytest
 
+import infrastructure.database.sqlite.backup as backup_module
 import infrastructure.database.sqlite.migration_runner as migration_runner
 from infrastructure.database.contracts import (
     BackupError,
     DatabaseBusyError,
     DatabaseIntegrityError,
-    MigrationChecksumError,
+    MigrationCatalogError,
     MigrationExecutionError,
     MigrationInfo,
     SchemaState,
@@ -73,6 +74,22 @@ def _unchecked_catalog(tmp_path: Path, sql: str):
     )
 
 
+def _bypass_catalog_provenance_for_authorizer_unit_test(monkeypatch) -> None:
+    """Reach the defense-in-depth authorizer behind the public capability gate.
+
+    Separate boundary tests prove that forged catalogs are rejected. These
+    focused tests deliberately bypass only that outer gate so SQLite authorizer
+    regressions remain observable as an independent protection layer.
+    """
+
+    monkeypatch.setattr(
+        backup_module, "validate_migration_catalog", lambda catalog: catalog
+    )
+    monkeypatch.setattr(
+        migration_runner, "validate_migration_catalog", lambda catalog: catalog
+    )
+
+
 def _inject_metadata_corruption_after_first_migration(
     monkeypatch, database: Path, corruption_sql: str
 ):
@@ -89,19 +106,6 @@ def _inject_metadata_corruption_after_first_migration(
         return applied
 
     monkeypatch.setattr(migration_runner, "_apply_one_migration", apply_one)
-
-
-class _ObservedWriteConnection:
-    def __init__(self, connection, about_to_execute: threading.Event):
-        self._connection = connection
-        self._about_to_execute = about_to_execute
-
-    def __getattr__(self, name):
-        return getattr(self._connection, name)
-
-    def executescript(self, sql):
-        self._about_to_execute.set()
-        return self._connection.executescript(sql)
 
 
 def _table_names(database: Path) -> list[str]:
@@ -203,7 +207,10 @@ def test_pending_migration_requires_backup_authorization(tmp_path, fixture_catal
 
 
 @pytest.mark.parametrize("transaction_end", ["END;", "END TRANSACTION;"])
-def test_transaction_end_cannot_escape_atomic_migration(tmp_path, transaction_end):
+def test_transaction_end_cannot_escape_atomic_migration(
+    monkeypatch, tmp_path, transaction_end
+):
+    _bypass_catalog_provenance_for_authorizer_unit_test(monkeypatch)
     catalog = _unchecked_catalog(
         tmp_path,
         "CREATE TABLE escaped_transaction(id INTEGER PRIMARY KEY);\n"
@@ -226,7 +233,8 @@ def test_transaction_end_cannot_escape_atomic_migration(tmp_path, transaction_en
     assert _applied_versions(database) == []
 
 
-def test_runtime_authorizer_rejects_attach_before_side_file_creation(tmp_path):
+def test_runtime_authorizer_rejects_attach_before_side_file_creation(monkeypatch, tmp_path):
+    _bypass_catalog_provenance_for_authorizer_unit_test(monkeypatch)
     side_database = tmp_path / "attached.sqlite3"
     catalog = _unchecked_catalog(
         tmp_path,
@@ -257,8 +265,9 @@ def test_runtime_authorizer_rejects_attach_before_side_file_creation(tmp_path):
     ],
 )
 def test_runtime_authorizer_rejects_temp_schema_before_recording(
-    tmp_path, statement
+    monkeypatch, tmp_path, statement
 ):
+    _bypass_catalog_provenance_for_authorizer_unit_test(monkeypatch)
     catalog = _unchecked_catalog(tmp_path, statement)
     database = tmp_path / "state.sqlite3"
     initialize_database(database)
@@ -288,6 +297,7 @@ def test_runtime_authorizer_rejects_temp_schema_before_recording(
 def test_runtime_authorizer_rejects_pre_attached_schema_actions(
     monkeypatch, tmp_path, statement
 ):
+    _bypass_catalog_provenance_for_authorizer_unit_test(monkeypatch)
     side_database = tmp_path / "pre-attached.sqlite3"
     with sqlite3.connect(side_database) as side_connection:
         side_connection.execute(
@@ -345,15 +355,15 @@ def test_runtime_authorizer_rejects_pre_attached_schema_actions(
 @pytest.mark.parametrize(
     "statement",
     [
-        "PRAGMA main.user_version = 7;",
         "PRAGMA main.user_version;",
-        "PRAGMA foreign_keys = ON;",
+        "PRAGMA main.table_info('_schema_migrations');",
+        "PRAGMA main.foreign_key_list('_schema_migrations');",
     ],
 )
 def test_runtime_authorizer_allows_main_connection_local_and_read_only_pragmas(
     tmp_path, statement
 ):
-    catalog = _unchecked_catalog(tmp_path, statement)
+    catalog = _catalog(tmp_path, statement)
     database = tmp_path / "state.sqlite3"
     initialize_database(database)
 
@@ -468,17 +478,17 @@ def test_missing_migration_path_does_not_leak_os_error_cause(tmp_path):
     secret_path = str(catalog[0].path.resolve())
     catalog[0].path.unlink()
     database = tmp_path / "state.sqlite3"
-    initialize_database(database)
 
-    with pytest.raises(MigrationExecutionError, match="migration 1 failed") as raised:
+    with pytest.raises(MigrationCatalogError, match="catalog") as raised:
         apply_pending_migrations(
             database,
             catalog,
-            backup_authorization=_authorization(database, catalog, tmp_path),
+            backup_authorization=None,
         )
 
     assert raised.value.__cause__ is None
     assert secret_path not in str(raised.value)
+    assert not database.exists()
 
 
 def test_invalid_utf8_does_not_leak_decode_error_cause(tmp_path):
@@ -494,16 +504,16 @@ def test_invalid_utf8_does_not_leak_decode_error_cause(tmp_path):
         ),
     )
     database = tmp_path / "state.sqlite3"
-    initialize_database(database)
 
-    with pytest.raises(MigrationChecksumError, match="checksum") as raised:
+    with pytest.raises(MigrationCatalogError, match="catalog") as raised:
         apply_pending_migrations(
             database,
             catalog,
-            backup_authorization=_authorization(database, catalog, tmp_path),
+            backup_authorization=None,
         )
 
     assert raised.value.__cause__ is None
+    assert not database.exists()
 
 
 def test_checksum_tampering_is_rejected_before_no_op(tmp_path):
@@ -527,7 +537,7 @@ def test_checksum_tampering_is_rejected_before_no_op(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(MigrationChecksumError, match="checksum"):
+    with pytest.raises(MigrationCatalogError, match="catalog"):
         apply_pending_migrations(
             database,
             original_catalog,
@@ -601,40 +611,30 @@ def test_competing_runner_rechecks_state_after_write_lock(monkeypatch, tmp_path)
     initialize_database(database)
     authorization = _authorization(database, catalog, tmp_path)
     first_has_lock = threading.Event()
-    second_read_pending = threading.Event()
-    second_waiting_for_write = threading.Event()
+    release_first = threading.Event()
+    second_attempted = threading.Event()
+    second_inspected = threading.Event()
     second_identity: dict[str, int] = {}
     original_inspect = migration_runner.inspect_schema
-    original_open = migration_runner.open_sqlite_connection
 
     def inspect_with_sync(database_path, inspected_catalog, **kwargs):
         status = original_inspect(database_path, inspected_catalog, **kwargs)
         if threading.get_ident() == second_identity.get("thread"):
-            if not second_read_pending.is_set():
-                assert status.state is SchemaState.PENDING
-                second_read_pending.set()
+            assert status.state is SchemaState.CURRENT
+            second_inspected.set()
         return status
 
-    def open_with_sync(database_path, **kwargs):
-        connection = original_open(database_path, **kwargs)
-        if threading.get_ident() == second_identity.get("thread"):
-            return _ObservedWriteConnection(connection, second_waiting_for_write)
-        return connection
-
     monkeypatch.setattr(migration_runner, "inspect_schema", inspect_with_sync)
-    monkeypatch.setattr(
-        migration_runner,
-        "open_sqlite_connection",
-        open_with_sync,
-    )
 
     def hold_first_lock(connection, migration):
         first_has_lock.set()
-        assert second_read_pending.wait(timeout=5)
-        assert second_waiting_for_write.wait(timeout=5)
+        assert second_attempted.wait(timeout=5)
+        assert not second_inspected.is_set()
+        assert release_first.wait(timeout=5)
 
     def run_second():
         second_identity["thread"] = threading.get_ident()
+        second_attempted.set()
         return apply_pending_migrations(
             database,
             catalog,
@@ -651,15 +651,18 @@ def test_competing_runner_rechecks_state_after_write_lock(monkeypatch, tmp_path)
         )
         assert first_has_lock.wait(timeout=5)
         second = executor.submit(run_second)
+        assert second_attempted.wait(timeout=5)
+        second_waited_for_maintenance = not second_inspected.wait(timeout=0.25)
+        release_first.set()
         results = (first.result(timeout=5), second.result(timeout=5))
 
-    assert second_read_pending.is_set()
-    assert second_waiting_for_write.is_set()
+    assert second_waited_for_maintenance
+    assert second_inspected.is_set()
     assert sorted(result.applied_versions for result in results) == [(), (1,)]
     applied_result = next(result for result in results if result.applied_versions)
     no_op_result = next(result for result in results if not result.applied_versions)
     assert applied_result.previous_version == 0
-    assert no_op_result.previous_version == 0
+    assert no_op_result.previous_version == 1
     assert all(result.current_version == 1 for result in results)
     assert _applied_versions(database) == [1]
 

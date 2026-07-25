@@ -25,6 +25,7 @@ from ..contracts import (
     RestoreVerificationError,
     SchemaState,
 )
+from ..migration_catalog import validate_migration_catalog
 from .backup import load_backup_manifest
 from .connection import SqliteConnectionOptions, open_sqlite_connection
 from .schema import inspect_schema
@@ -71,6 +72,7 @@ def verify_and_restore_sqlite(
     database.
     """
 
+    catalog = validate_migration_catalog(catalog)
     try:
         return _verify_and_restore_sqlite(
             backup_path,

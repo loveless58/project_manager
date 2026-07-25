@@ -231,27 +231,41 @@ CREATE TABLE IF NOT EXISTS _schema_migrations (
 执行流程：
 
 1. 完整读取并验证 catalog；
-2. 打开 SQLite 连接；
-3. 初始化 `_schema_migrations`；
-4. 使用 `BEGIN IMMEDIATE` 获取写事务；
-5. 获得锁后重新读取已应用记录和状态；
-6. 按版本执行待迁移 SQL；
-7. 每个 migration 的 SQL 和对应 applied record 在同一事务中提交；
+2. 对当前状态创建、验证并授权初始恢复备份，同时保持数据库 data-generation witness；
+3. 获取覆盖整个待迁移批次的协作式 maintenance lock；
+4. 第一份 migration 在 SQLite 写锁内重新验证初始备份授权、数据库身份、schema 状态和 data generation；
+5. 后续每份 migration 在 SQLite 写锁内先创建、验证并授权新的恢复备份；
+6. 按版本执行单份 migration SQL；
+7. 每份 migration 的 SQL 和对应 applied record 在同一事务中独立提交；
 8. 记录 UTC 时间和执行毫秒数；
-9. 任一语句失败时回滚当前 migration；
-10. 早先已成功提交的 migration 保留；
+9. 任一语句失败时仅回滚当前 migration；
+10. 早先已经成功提交的 migration 和业务数据保留；
 11. 再次执行时从最后成功版本继续。
 
-实现不得在已经由 Python 开启的事务中直接调用会隐式提交的裸
-`sqlite3.Connection.executescript()`。Runner 必须采用经过测试的受控执行方式：
-由 runner 生成只包含 `BEGIN IMMEDIATE` 与单份 migration SQL、但不包含 `COMMIT`
-的受控脚本；脚本成功返回后计算执行耗时，通过参数化 SQL 写入 applied record，最后调用
-连接的 `commit()`。脚本或元数据写入任一步失败都调用连接的 `rollback()`。这样既允许
-trigger 等合法多语句 SQL，又保证 migration SQL 与 applied record 在同一个 SQLite
-事务中原子提交。实现必须用故障注入测试证明失败时不留下半迁移 schema 或伪造的
-applied record，不得使用基于分号的朴素字符串切分 migration SQL。
+实现不得在已经由 Python 开启的事务中调用会隐式提交的裸
+`sqlite3.Connection.executescript()`。Runner 使用 `sqlite3.complete_statement()`
+识别完整 SQLite 语句边界，并在 runner 已开启的事务中逐条 `execute()`；这既支持
+trigger body、注释和字符串中的分号，也不会把 `COMMIT` 提前到 applied record 之前。
+脚本或元数据写入任一步失败都调用连接的 `rollback()`。实现必须用故障注入测试证明
+失败时不留下半迁移 schema 或伪造的 applied record，禁止使用基于分号的朴素字符串切分。
 
-并发 runner 通过 SQLite 写锁和 `busy_timeout` 串行化。锁等待超时映射为稳定 `DatabaseBusyError`，不向调用方暴露底层 SQL 或数据库路径。
+### 8.1 Maintenance window 与写入者边界
+
+Maintenance lock 是进程内可重入锁加数据库旁路锁文件组成的协作协议。Migration runner
+从第一份 migration 的锁内复验开始，到最后一份 migration 提交或失败退出为止持续持锁；
+`SqliteUnitOfWork(mode="write")` 等受管写入者必须使用同一协议，因此会等待整个迁移批次，
+而不是插入两个 migration 之间。并发 runner 也通过该协议和 SQLite 写锁串行化。
+锁等待超时统一映射为稳定 `DatabaseBusyError`，不向调用方暴露底层 SQL 或数据库路径。
+
+协作锁无法约束直接打开数据库的原始 `sqlite3` 连接、第三方工具或旧版本进程。它们属于
+unmanaged writers：如果其提交发生在两份 migration 之间，runner 会在下一份 migration
+的写锁内刷新恢复备份，因而该恢复点同时包含最后成功的 migration 和已经提交的业务数据；
+如果写入与见证复验竞态，runner 必须 fail closed，不得带着陈旧授权继续。运维仍必须在
+migration 前停止或隔离所有 unmanaged writers，只有这样才能获得确定性的维护窗口。
+
+每份后续 migration 的刷新备份是该 migration 的直接恢复点。假设 v0001 已提交、v0002
+失败，则 v0002 回滚而 v0001 保留；对应的 pre-v0002 备份覆盖 v0001 和刷新前已提交的业务
+数据。恢复操作始终发布新候选库，由运维显式切换，绝不自动覆盖活跃库。
 
 ## 9. SQLite 连接工厂
 
@@ -373,11 +387,17 @@ db migrate --backup-dir <本机备份目录>
 
 规则：
 
-- 在任何 migration 开始前创建并验证备份；
+- 在任何 migration 开始前创建、验证并授权初始备份；
+- 初始备份到第一份 migration 获得写锁之间若出现 data generation 变化，则授权失效并停止；
+- 整个 migration 批次持有协作式 maintenance lock，受管写入者必须等待批次结束；
+- 每份 migration 仍独立提交，不把整个批次合并成一个大事务；
+- 第一份之后，每份 migration 开始前都在 SQLite 写锁内刷新并验证恢复备份；
+- 刷新恢复点覆盖最后成功的 migration，以及此前已经提交且可见的业务数据；
 - 备份失败时不执行 migration；
 - 从版本 `0` 执行第一份 migration 也不例外；
 - 备份目录必须是节点本机目录；
 - runner 的程序化 API 必须显式接收备份策略或备份结果，不能暗中跳过；
+- unmanaged writers 不受协作锁约束，运维必须在迁移前停止原始 SQLite、第三方工具和旧版本进程的写入；
 - 成功 migration 输出关联的备份标识，但不输出绝对路径。
 
 ## 14. 恢复验证

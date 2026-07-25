@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import AbstractContextManager
 from enum import Enum, auto
 from pathlib import Path
 from types import TracebackType
@@ -10,6 +11,7 @@ from .connection import (
     _raise_mapped_sqlite_error,
     open_sqlite_connection,
 )
+from .maintenance import database_maintenance_lock
 
 
 UowMode = Literal["read", "write"]
@@ -36,15 +38,33 @@ class SqliteUnitOfWork:
         self._options = options
         self._connection: sqlite3.Connection | None = None
         self._state = _UowState.NEW
+        self._maintenance_context: AbstractContextManager[None] | None = None
 
     def __enter__(self) -> "SqliteUnitOfWork":
         self._require_state(_UowState.NEW)
-        connection = open_sqlite_connection(self._database_path, options=self._options)
+        if self._mode == "write":
+            maintenance_context = database_maintenance_lock(
+                self._database_path,
+                timeout_ms=self._options.busy_timeout_ms,
+            )
+            maintenance_context.__enter__()
+            self._maintenance_context = maintenance_context
         try:
+            connection = open_sqlite_connection(
+                self._database_path,
+                options=self._options,
+            )
             connection.execute("BEGIN IMMEDIATE" if self._mode == "write" else "BEGIN")
         except sqlite3.DatabaseError as error:
-            connection.close()
+            if "connection" in locals():
+                connection.close()
+            self._release_maintenance_context()
             _raise_mapped_sqlite_error(error)
+        except BaseException:
+            if "connection" in locals():
+                connection.close()
+            self._release_maintenance_context()
+            raise
         self._connection = connection
         self._state = _UowState.ACTIVE
         return self
@@ -75,6 +95,7 @@ class SqliteUnitOfWork:
                 self._state = _UowState.ROLLED_BACK
 
         close_error = self._close_connection()
+        maintenance_error = self._release_maintenance_context()
         self._state = _UowState.CLOSED
 
         if exc_type is None:
@@ -82,6 +103,8 @@ class SqliteUnitOfWork:
                 raise rollback_error
             if close_error is not None:
                 raise close_error
+            if maintenance_error is not None:
+                raise maintenance_error
         return None
 
     @property
@@ -96,8 +119,11 @@ class SqliteUnitOfWork:
             _raise_mapped_sqlite_error(error)
         self._state = _UowState.COMMITTED
         close_error = self._close_connection()
+        maintenance_error = self._release_maintenance_context()
         if close_error is not None:
             raise close_error
+        if maintenance_error is not None:
+            raise maintenance_error
 
     def rollback(self) -> None:
         connection = self._active_connection()
@@ -107,8 +133,11 @@ class SqliteUnitOfWork:
             _raise_mapped_sqlite_error(error)
         self._state = _UowState.ROLLED_BACK
         close_error = self._close_connection()
+        maintenance_error = self._release_maintenance_context()
         if close_error is not None:
             raise close_error
+        if maintenance_error is not None:
+            raise maintenance_error
 
     def _active_connection(self) -> sqlite3.Connection:
         self._require_state(_UowState.ACTIVE)
@@ -124,6 +153,17 @@ class SqliteUnitOfWork:
             return None
         try:
             connection.close()
+        except BaseException as error:
+            return error
+        return None
+
+    def _release_maintenance_context(self) -> BaseException | None:
+        maintenance_context = self._maintenance_context
+        self._maintenance_context = None
+        if maintenance_context is None:
+            return None
+        try:
+            maintenance_context.__exit__(None, None, None)
         except BaseException as error:
             return error
         return None

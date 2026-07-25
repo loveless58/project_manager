@@ -13,7 +13,12 @@ from functools import partial
 from pathlib import Path
 from typing import Any, TextIO
 
-from platform_core.settings import SettingsError, load_app_settings
+from platform_core.path_locality import NodeLocalPathError, ensure_node_local_path
+from platform_core.settings import (
+    AppSettings,
+    SettingsError,
+    load_app_settings,
+)
 
 from .contracts import (
     DatabaseBusyError,
@@ -152,7 +157,7 @@ def main(
         catalog = _load_production_catalog()
         payload, exit_code = _dispatch(
             parsed,
-            database_path=database_path,
+            settings=settings,
             catalog=catalog,
         )
         _emit_payload(
@@ -241,14 +246,17 @@ def _load_production_catalog():
     return load_migration_catalog(_PRODUCTION_MIGRATIONS)
 
 
-def _dispatch(parsed, *, database_path: Path, catalog):
+def _dispatch(parsed, *, settings: AppSettings, catalog):
+    database_path = settings.database.sqlite_path
+    if database_path is None:
+        raise DatabaseConfigurationError("database configuration is invalid")
     if parsed.command in ("status", "check"):
         status = inspect_schema(database_path, catalog)
         return _status_payload(parsed.command, status), _exit_for_schema_status(status)
     if parsed.command == "migrate":
-        return _migrate(database_path, Path(parsed.backup_dir), catalog)
+        return _migrate(database_path, Path(parsed.backup_dir), catalog, settings)
     if parsed.command == "backup":
-        return _backup(database_path, Path(parsed.output), catalog)
+        return _backup(database_path, Path(parsed.output), catalog, settings)
     if parsed.command == "verify-restore":
         return _verify_restore(
             database_path,
@@ -256,12 +264,13 @@ def _dispatch(parsed, *, database_path: Path, catalog):
             Path(parsed.manifest),
             Path(parsed.target),
             catalog,
+            settings,
         )
     raise DatabaseConfigurationError("database arguments are invalid")
 
 
-def _migrate(database_path: Path, backup_dir: Path, catalog):
-    _require_node_local_path(backup_dir)
+def _migrate(database_path: Path, backup_dir: Path, catalog, settings: AppSettings):
+    backup_dir = _require_node_local_path(backup_dir, settings, "backup_dir")
     initialize_database(database_path)
     status = inspect_schema(database_path, catalog)
     _raise_for_incompatible_schema(status)
@@ -300,8 +309,8 @@ def _migrate(database_path: Path, backup_dir: Path, catalog):
     return _payload("migrate", "current", None, details), EXIT_OK
 
 
-def _backup(database_path: Path, output_path: Path, catalog):
-    _require_node_local_path(output_path)
+def _backup(database_path: Path, output_path: Path, catalog, settings: AppSettings):
+    output_path = _require_node_local_path(output_path, settings, "backup_output")
     result = create_sqlite_backup(database_path, output_path, catalog)
     verified_manifest = verify_backup_artifacts(
         result.backup_path,
@@ -321,10 +330,11 @@ def _verify_restore(
     manifest_path: Path,
     target_path: Path,
     catalog,
+    settings: AppSettings,
 ):
-    _require_node_local_path(backup_path)
-    _require_node_local_path(manifest_path)
-    _require_node_local_path(target_path)
+    backup_path = _require_node_local_path(backup_path, settings, "restore_backup")
+    manifest_path = _require_node_local_path(manifest_path, settings, "restore_manifest")
+    target_path = _require_node_local_path(target_path, settings, "restore_target")
     result = verify_and_restore_sqlite(
         backup_path,
         manifest_path,
@@ -411,10 +421,24 @@ def _backup_identifier(sha256: str) -> str:
     return f"sha256:{sha256[:_BACKUP_SHA_PREFIX_LENGTH]}"
 
 
-def _require_node_local_path(path: Path) -> None:
-    raw = str(path).strip().lower()
-    if raw.startswith(("\\\\", "//", "smb:", "nfs:", "afp:")):
-        raise DatabaseConfigurationError("operations path must be node-local")
+def _require_node_local_path(
+    path: Path,
+    settings: AppSettings | None = None,
+    field_name: str = "operations_path",
+) -> Path:
+    try:
+        return ensure_node_local_path(
+            field_name=field_name,
+            raw_value=path,
+            resolved_path=path,
+            business_root=(
+                settings.business_root if settings is not None else None
+            ),
+        )
+    except NodeLocalPathError:
+        raise DatabaseConfigurationError(
+            "operations path must be node-local"
+        ) from None
 
 
 def _emit_database_error(

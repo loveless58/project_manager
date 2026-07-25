@@ -16,6 +16,7 @@ def open_sqlite_connection(
     *,
     options: SqliteConnectionOptions = SqliteConnectionOptions(),
     create: bool = False,
+    check_same_thread: bool = True,
 ) -> sqlite3.Connection:
     target = str(database_path)
     use_uri = False
@@ -29,6 +30,7 @@ def open_sqlite_connection(
             timeout=options.busy_timeout_ms / 1_000,
             isolation_level=None,
             uri=use_uri,
+            check_same_thread=check_same_thread,
         )
         connection.row_factory = sqlite3.Row
         connection.execute(f"PRAGMA busy_timeout = {options.busy_timeout_ms}")

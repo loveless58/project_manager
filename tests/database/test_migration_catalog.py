@@ -16,7 +16,7 @@ FIXTURE_MIGRATIONS = Path(__file__).parent / "fixtures" / "migrations"
 def test_catalog_loads_empty_directory(tmp_path):
     catalog = load_migration_catalog(tmp_path)
 
-    assert catalog == ()
+    assert tuple(catalog) == ()
     assert catalog_target_version(catalog) == 0
 
 

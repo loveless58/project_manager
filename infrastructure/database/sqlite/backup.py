@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import sqlite3
 import tempfile
 from collections.abc import Sequence
@@ -28,6 +29,7 @@ from ..contracts import (
     MigrationInfo,
     SchemaState,
 )
+from ..migration_catalog import validate_migration_catalog
 from .connection import SqliteConnectionOptions, open_sqlite_connection
 from .schema import inspect_schema
 
@@ -71,6 +73,52 @@ class _MigrationBackupAuthorization:
     __slots__ = ("__weakref__",)
 
 
+class _DataGenerationWitness:
+    """A connection-scoped SQLite ``data_version`` freshness witness."""
+
+    __slots__ = ("_connection", "_expected_generation", "_lock")
+
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        options: SqliteConnectionOptions,
+    ) -> None:
+        self._lock = RLock()
+        self._connection: sqlite3.Connection | None = open_sqlite_connection(
+            database_path,
+            options=options,
+            create=False,
+            check_same_thread=False,
+        )
+        self._expected_generation = self._read_generation()
+
+    def assert_unchanged(self) -> None:
+        with self._lock:
+            if self._read_generation() != self._expected_generation:
+                raise ValueError
+
+    def observe(self) -> int:
+        with self._lock:
+            return self._read_generation()
+
+    def close(self) -> None:
+        with self._lock:
+            connection = self._connection
+            self._connection = None
+            if connection is not None:
+                connection.close()
+
+    def _read_generation(self) -> int:
+        connection = self._connection
+        if connection is None:
+            raise ValueError
+        row = connection.execute("PRAGMA data_version").fetchone()
+        if row is None or type(row[0]) is not int:
+            raise ValueError
+        return row[0]
+
+
 @dataclass(frozen=True, slots=True)
 class _BackupCreationRecord:
     source_path: Path
@@ -80,6 +128,7 @@ class _BackupCreationRecord:
     manifest_path: Path
     manifest_identity: _FileIdentity
     catalog_fingerprint: _CatalogFingerprint
+    generation_witness: _DataGenerationWitness
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +156,7 @@ class _MigrationBackupAuthorizationRecord:
     catalog_fingerprint: _CatalogFingerprint
     starting_schema_version: int
     catalog_target_version: int
+    generation_witness: _DataGenerationWitness
 
 
 _TOKEN_RECORD_LOCK = RLock()
@@ -199,6 +249,7 @@ def create_sqlite_backup(
     entries while publication or compensation is running.
     """
 
+    catalog = validate_migration_catalog(catalog)
     try:
         return _create_sqlite_backup(
             database_path,
@@ -305,9 +356,11 @@ def authorize_migration_backup(
 ) -> _MigrationBackupAuthorization:
     """Bind a verified backup to one live database instance and catalog."""
 
+    catalog = validate_migration_catalog(catalog)
     try:
         verified_record = _verified_record_for(verified_backup)
         provenance = verified_record.provenance
+        provenance.generation_witness.assert_unchanged()
         source_path, source_identity = _resolved_path_identity(database_path)
         if (
             source_path != provenance.source_path
@@ -333,6 +386,7 @@ def authorize_migration_backup(
             or source_identity_after != source_identity
         ):
             raise ValueError
+        provenance.generation_witness.assert_unchanged()
 
         return _issue_migration_authorization(
             _MigrationBackupAuthorizationRecord(
@@ -349,6 +403,7 @@ def authorize_migration_backup(
                 catalog_fingerprint=provenance.catalog_fingerprint,
                 starting_schema_version=verified_record.manifest.schema_version,
                 catalog_target_version=verified_record.manifest.catalog_target_version,
+                generation_witness=provenance.generation_witness,
             )
         )
     except (BackupError, DatabaseError, OSError, ValueError):
@@ -362,7 +417,9 @@ def _revalidate_migration_authorization(
     *,
     starting_schema_version: int,
     catalog_target_version: int,
+    require_fresh_generation: bool = False,
 ) -> None:
+    catalog = validate_migration_catalog(catalog)
     try:
         authorization_record = _authorization_record_for(authorization)
         if (
@@ -401,8 +458,107 @@ def _revalidate_migration_authorization(
             != authorization_record.catalog_target_version
         ):
             raise ValueError
-    except (BackupError, OSError, ValueError):
+        if require_fresh_generation:
+            authorization_record.generation_witness.assert_unchanged()
+    except (BackupError, OSError, sqlite3.DatabaseError, ValueError):
         raise BackupError("backup authorization is invalid") from None
+
+
+def _refresh_migration_backup_under_lock(
+    authorization: object,
+    database_path: Path,
+    catalog: Sequence[MigrationInfo],
+    *,
+    migration_version: int,
+    expected_schema_version: int,
+    catalog_target_version: int,
+    options: SqliteConnectionOptions,
+) -> object:
+    """Create and authorize the next recovery point under a held write lock."""
+
+    catalog = validate_migration_catalog(catalog)
+    stage = "authorization revalidation"
+    try:
+        previous_record = _authorization_record_for(authorization)
+        _revalidate_migration_authorization(
+            authorization,
+            database_path,
+            catalog,
+            starting_schema_version=previous_record.starting_schema_version,
+            catalog_target_version=catalog_target_version,
+        )
+        # Query the persistent witness at every acquired write lock. A change
+        # is expected after our preceding migration commit and may also include
+        # an unmanaged writer; the lock-held snapshot below covers both.
+        previous_record.generation_witness.observe()
+        output_path = _new_migration_recovery_path(
+            previous_record.backup_path,
+            migration_version=migration_version,
+        )
+        stage = "snapshot creation"
+        backup_result = _create_sqlite_backup(
+            database_path,
+            output_path,
+            catalog,
+            options=options,
+        )
+        if (
+            backup_result.manifest.schema_version != expected_schema_version
+            or backup_result.manifest.catalog_target_version
+            != catalog_target_version
+        ):
+            raise ValueError
+        stage = "snapshot verification"
+        verified_backup = verify_migration_backup(backup_result)
+        stage = "snapshot authorization"
+        refreshed_authorization = authorize_migration_backup(
+            database_path,
+            verified_backup,
+            catalog,
+            options=options,
+        )
+        stage = "locked freshness verification"
+        _revalidate_migration_authorization(
+            refreshed_authorization,
+            database_path,
+            catalog,
+            starting_schema_version=expected_schema_version,
+            catalog_target_version=catalog_target_version,
+            require_fresh_generation=True,
+        )
+        previous_record.generation_witness.close()
+        return refreshed_authorization
+    except (BackupError, DatabaseError, OSError, sqlite3.DatabaseError, ValueError):
+        raise BackupError(
+            f"migration recovery backup refresh failed during {stage}"
+        ) from None
+
+
+def _new_migration_recovery_path(
+    previous_backup_path: Path,
+    *,
+    migration_version: int,
+) -> Path:
+    suffix = previous_backup_path.suffix
+    stem = previous_backup_path.stem if suffix else previous_backup_path.name
+    for _ in range(128):
+        candidate = previous_backup_path.with_name(
+            f"{stem}.before-v{migration_version:04d}."
+            f"{secrets.token_hex(8)}{suffix}"
+        )
+        if not os.path.lexists(candidate) and not os.path.lexists(
+            Path(f"{candidate}.manifest.json")
+        ):
+            return candidate
+    raise BackupError("migration recovery backup refresh failed")
+
+
+def _close_migration_authorization(authorization: object) -> None:
+    try:
+        record = _authorization_record_for(authorization)
+    except ValueError:
+        return
+    record.generation_witness.close()
 
 
 def _create_sqlite_backup(
@@ -412,6 +568,11 @@ def _create_sqlite_backup(
     *,
     options: SqliteConnectionOptions,
 ) -> BackupResult:
+    generation_witness = _DataGenerationWitness(
+        database_path,
+        options=options,
+    )
+    witness_transferred = False
     source_path, source_identity = _resolved_path_identity(database_path)
     source_status = inspect_schema(database_path, catalog, options=options)
     _require_backup_eligible(source_status.state)
@@ -443,6 +604,7 @@ def _create_sqlite_backup(
         snapshot_status = inspect_schema(backup_temp, catalog, options=options)
         _require_backup_eligible(snapshot_status.state)
         _require_valid_foreign_keys(backup_temp, options=options)
+        generation_witness.assert_unchanged()
         source_path_after, source_identity_after = _resolved_path_identity(
             database_path
         )
@@ -536,7 +698,7 @@ def _create_sqlite_backup(
             if isinstance(error, BackupError):
                 raise
             raise BackupError("backup publication failed") from None
-        return BackupResult(
+        result = BackupResult(
             output_path,
             manifest_path,
             manifest,
@@ -549,9 +711,12 @@ def _create_sqlite_backup(
                     manifest_path=manifest_path.resolve(strict=True),
                     manifest_identity=manifest_identity,
                     catalog_fingerprint=_catalog_fingerprint(catalog),
+                    generation_witness=generation_witness,
                 )
             ),
         )
+        witness_transferred = True
+        return result
     finally:
         if backup_temp is not None and backup_identity is not None:
             _remove_owned_path(backup_temp, backup_identity)
@@ -562,6 +727,8 @@ def _create_sqlite_backup(
             )
         if staging_dir is not None and staging_identity is not None:
             _remove_owned_directory(staging_dir, staging_identity)
+        if not witness_transferred:
+            generation_witness.close()
 
 
 def _copy_sqlite_snapshot(
@@ -609,7 +776,7 @@ def _create_staging_directory(
 ) -> tuple[Path, tuple[int, int]]:
     path = Path(
         tempfile.mkdtemp(
-            prefix=f".{final_name}.backup-staging.",
+            prefix=".sqlite-backup-staging.",
             dir=parent,
         )
     )
