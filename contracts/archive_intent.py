@@ -6,6 +6,10 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
+from platform_core.document_refs import (
+    DocumentRefValidationError,
+    validate_document_ref,
+)
 from platform_core.models import DocumentRef
 
 
@@ -29,10 +33,9 @@ class ArchiveIntent:
 
     def __post_init__(self) -> None:
         ref = self.source_ref
-        if not isinstance(ref, DocumentRef) or not all(
-            isinstance(value, str) and value and value == value.strip()
-            for value in (ref.storage_provider, ref.object_key, ref.logical_uri, ref.binding_id)
-        ):
+        try:
+            validate_document_ref(ref, require_binding=True)
+        except DocumentRefValidationError:
             raise ArchiveIntentError("source_ref requires a bound logical document reference")
         if self.destination_status not in {"resolved", "unresolved"}:
             raise ArchiveIntentError("destination_status must be resolved or unresolved")

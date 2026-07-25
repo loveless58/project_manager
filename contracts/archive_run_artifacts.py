@@ -6,7 +6,6 @@ import math
 import os
 import re
 import stat
-import unicodedata
 from typing import Any
 
 from contracts.document_interpretation import (
@@ -14,7 +13,12 @@ from contracts.document_interpretation import (
     parse_candidate_document_interpretation,
 )
 from platform_core.models import BusinessContextEvidence
+from platform_core.document_refs import (
+    DocumentRefValidationError,
+    validate_document_ref,
+)
 
+from platform_core.sensitive_text import contains_sensitive_text
 
 MAX_BYTES = 128 * 1024
 MAX_DEPTH = 24
@@ -27,15 +31,6 @@ MAX_INTEGER_ABS = 10**18
 _ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _CODE = re.compile(r"^[A-Z][A-Z0-9_.]{1,127}$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
-_CREDENTIAL = re.compile(
-    r"(?<!\w)(?:(?:authorization|token|api[_-]?(?:key|token)|password)\s*[:=]\s*\S|bearer\s+\S)",
-    re.IGNORECASE,
-)
-_DOUBLE_SLASH = "/" * 2
-_FILE_URI = "file:" + "/" * 3
-_ABSOLUTE_PATH = re.compile(
-    rf"(?:^|[\s\"'(=])(?:{re.escape(_FILE_URI)}|{re.escape(_DOUBLE_SLASH)}[^/\s]+/[^/\s]+|[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/][^\\/\s]+|/(?!/))"
-)
 _REF_KEYS = {"storage_provider", "object_key", "logical_uri", "binding_id"}
 _INTERPRETATION_KEYS = {
     "schema_version", "status", "document_type", "fields", "relations", "evidence",
@@ -282,6 +277,8 @@ def validate_audit_review(payload: dict[str, Any], run_id: str) -> None:
 
 
 def validate_review_queue(payload: dict[str, Any], run_id: str) -> None:
+    from contracts.review_queue_schema import review_policy_for_type
+
     validate_json_tree(payload, inspect_sensitive=False)
     required = {"schema_version", "run_id", "status", "items"}
     if not required <= set(payload) or set(payload) - (required | {"feedback_summary"}):
@@ -314,6 +311,36 @@ def validate_review_queue(payload: dict[str, Any], run_id: str) -> None:
             raise ArchiveRunArtifactError("review queue item fields")
         if "run_id" in item and item["run_id"] != run_id:
             raise ArchiveRunArtifactError("review queue item run identity")
+        if "type" in item:
+            policy = review_policy_for_type(item["type"])
+            if (
+                item.get("feedback_type") != policy["feedback_type"]
+                or item.get("allowed_decisions") != policy["allowed_decisions"]
+                or item.get("recommended_decision") != policy["recommended_decision"]
+            ):
+                raise ArchiveRunArtifactError("review queue decision policy")
+        else:
+            legacy_allowed = {
+                "field_correction": {("correct", "defer")},
+                "archive_decision": {
+                    ("approve", "reject", "defer"),
+                    ("approve", "reject", "edit_target", "defer"),
+                },
+                "parser_case": {("add_parser_case", "defer")},
+                "false_positive": {("mark_false_positive", "defer")},
+                "false_negative": {("mark_false_negative", "defer")},
+                "rule_exception": {("propose_rule_exception", "defer")},
+            }.get(item.get("feedback_type"), set())
+            recommended = item.get("recommended_decision")
+            if "allowed_decisions" in item:
+                allowed_decisions = tuple(item["allowed_decisions"] or ())
+                invalid_policy = allowed_decisions not in legacy_allowed or (
+                    recommended is not None and recommended not in allowed_decisions
+                )
+            else:
+                invalid_policy = recommended not in (None, "defer")
+            if invalid_policy:
+                raise ArchiveRunArtifactError("review queue legacy decision policy")
         identifier = item.get("id", item.get("item_id"))
         if identifier is not None and type(identifier) is not str:
             raise ArchiveRunArtifactError("review queue item identity")
@@ -728,10 +755,9 @@ def _run_hash_ref(value: dict[str, Any], run_id: str) -> None:
 
 
 def _validate_ref(ref: object) -> None:
-    if type(ref) is not dict or set(ref) != _REF_KEYS or any(
-        type(item) is not str or not item or item != item.strip() or _contains_sensitive(item)
-        for item in ref.values()
-    ):
+    try:
+        validate_document_ref(ref, require_binding=True)
+    except DocumentRefValidationError:
         raise ArchiveRunArtifactError("source ref")
 
 
@@ -760,8 +786,7 @@ def _conflict(item: object) -> dict[str, str]:
 
 
 def _contains_sensitive(value: str) -> bool:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
-    return bool(_CREDENTIAL.search(normalized) or _ABSOLUTE_PATH.search(normalized))
+    return contains_sensitive_text(value)
 
 
 def _unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:

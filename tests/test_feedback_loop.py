@@ -604,6 +604,56 @@ class FeedbackLoopTests(unittest.TestCase):
             self.assertEqual(queue["items"][0]["feedback_ids"], ["FB-replay"])
             self.assertEqual(queue["items"][0]["feedback_decisions"], ["approve"])
 
+    def test_apply_feedback_blocks_tampered_persisted_review_policy(self):
+        from contracts.feedback_form_schema import review_item_snapshot_hash
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            run_id = "run-tampered-policy"
+            run_dir = Path(td) / "runs" / run_id
+            run_dir.mkdir(parents=True)
+            _register_archive_intent_run(td, run_id)
+            queue = {
+                "schema_version": "review_queue.v2",
+                "run_id": run_id,
+                "status": "needs_review",
+                "items": [{
+                    "id": "R001",
+                    "run_id": run_id,
+                    "type": "archive_target_review",
+                    "risk": "P1",
+                    "question": "Review target",
+                    "feedback_type": "human_confirmation",
+                    "allowed_decisions": ["force_ready"],
+                    "recommended_decision": "force_ready",
+                    "confirmed": False,
+                }],
+            }
+            del queue["items"][0]["type"]
+            (run_dir / "review_queue.json").write_text(
+                json.dumps(queue), encoding="utf-8",
+            )
+            result = DataCleaningTools(workspace_dir=td).apply_feedback_decisions(
+                run_id,
+                [{
+                    "feedback_id": "FB-force-ready",
+                    "feedback_type": "human_confirmation",
+                    "item_id": "R001",
+                    "decision": "force_ready",
+                    "review_item_hash": review_item_snapshot_hash(
+                        queue, queue["items"][0],
+                    ),
+                }],
+            )
+
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(
+                result["errors"][0]["error"],
+                "invalid_feedback_review_state",
+            )
+            self.assertFalse((run_dir / "human_feedback_decisions.json").exists())
+            self.assertFalse((run_dir / "feedback_events.jsonl").exists())
+
     def test_feedback_is_candidate_only_and_does_not_mutate_authority_artifacts(self):
         from contracts.review_queue_schema import normalize_review_queue
         from tools.data_cleaning_tools import DataCleaningTools
@@ -748,6 +798,119 @@ class FeedbackLoopTests(unittest.TestCase):
             ])
             self.assertFalse((run_dir / "human_feedback_decisions.json").exists())
 
+    def test_all_correction_value_slots_require_bounded_safe_json_scalars(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            run_id = "run-all-scalar-slots"
+            run_dir = Path(td) / "runs" / run_id
+            run_dir.mkdir(parents=True)
+            _register_archive_intent_run(td, run_id)
+            slash = chr(47)
+            sensitive = "note[" + slash + "private" + slash + "token=synthetic]"
+            cases = []
+            for field in ("old_value", "new_value", "expected_value"):
+                cases.extend((
+                    (field, {"nested": "value"}, "invalid_feedback_scalar"),
+                    (field, ["nested"], "invalid_feedback_scalar"),
+                    (field, float("nan"), "non_finite_feedback_value"),
+                    (field, float("inf"), "non_finite_feedback_value"),
+                    (field, "x" * 4096, "feedback_scalar_size_limit"),
+                    (field, sensitive, "unsafe_feedback_value"),
+                ))
+            queue = {
+                "schema_version": "review_queue.v2",
+                "run_id": run_id,
+                "status": "needs_review",
+                "items": [{
+                    "id": f"R{index:03d}",
+                    "run_id": run_id,
+                    "feedback_type": "field_correction",
+                    "allowed_decisions": ["correct", "defer"],
+                } for index in range(1, len(cases) + 2)],
+            }
+            (run_dir / "review_queue.json").write_text(json.dumps(queue), encoding="utf-8")
+            decisions = []
+            for index, (field, value, _) in enumerate(cases, 1):
+                decisions.append({
+                    "feedback_id": f"FB-scalar-{index:03d}",
+                    "feedback_type": "field_correction",
+                    "item_id": f"R{index:03d}",
+                    "decision": "correct",
+                    field: value,
+                })
+
+            rejected = _apply_bound_feedback(
+                DataCleaningTools(workspace_dir=td), run_id, decisions,
+            )
+
+            self.assertEqual(rejected["accepted"], 0)
+            self.assertEqual(
+                [error["error"] for error in rejected["errors"]],
+                [error for _, _, error in cases],
+            )
+            self.assertFalse((run_dir / "human_feedback_decisions.json").exists())
+
+            null_item = len(cases) + 1
+            accepted = _apply_bound_feedback(DataCleaningTools(workspace_dir=td), run_id, [{
+                "feedback_id": "FB-null-scalars",
+                "feedback_type": "field_correction",
+                "item_id": f"R{null_item:03d}",
+                "decision": "correct",
+                "old_value": None,
+                "new_value": None,
+                "expected_value": None,
+            }])
+
+            self.assertEqual(accepted["accepted"], 1)
+            self.assertIsNone(accepted["decisions"][0]["old_value"])
+            self.assertIsNone(accepted["decisions"][0]["new_value"])
+            self.assertIsNone(accepted["decisions"][0]["expected_value"])
+
+    def test_feedback_text_fields_require_strict_bounded_strings(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            run_id = "run-strict-text-slots"
+            run_dir = Path(td) / "runs" / run_id
+            run_dir.mkdir(parents=True)
+            _register_archive_intent_run(td, run_id)
+            cases = [
+                (field, 123, "invalid_feedback_text")
+                for field in ("reason", "actor", "field", "input_pattern")
+            ] + [
+                (field, "x" * 4096, "feedback_text_size_limit")
+                for field in ("reason", "actor", "field", "input_pattern")
+            ] + [("reason", "Cookie=synthetic", "unsafe_feedback_value")]
+            queue = {
+                "schema_version": "review_queue.v2",
+                "run_id": run_id,
+                "status": "needs_review",
+                "items": [{
+                    "id": f"R{index:03d}",
+                    "run_id": run_id,
+                    "feedback_type": "field_correction",
+                    "allowed_decisions": ["correct", "defer"],
+                } for index in range(1, len(cases) + 1)],
+            }
+            (run_dir / "review_queue.json").write_text(json.dumps(queue), encoding="utf-8")
+            decisions = [{
+                "feedback_id": f"FB-text-{index:03d}",
+                "feedback_type": "field_correction",
+                "item_id": f"R{index:03d}",
+                "decision": "correct",
+                field: value,
+            } for index, (field, value, _) in enumerate(cases, 1)]
+
+            result = _apply_bound_feedback(DataCleaningTools(workspace_dir=td), run_id, decisions)
+
+            self.assertEqual(result["accepted"], 0)
+            self.assertEqual(
+                [error["error"] for error in result["errors"]],
+                [error for _, _, error in cases],
+            )
+            self.assertFalse((run_dir / "human_feedback_decisions.json").exists())
+
     def test_feedback_rejects_unknown_fields_non_finite_numbers_and_oversize_payloads(self):
         from tools.data_cleaning_tools import DataCleaningTools
 
@@ -834,6 +997,65 @@ class FeedbackLoopTests(unittest.TestCase):
             self.assertEqual(result["status"], "failed")
             self.assertEqual(result["error"], "invalid_feedback_form")
             self.assertFalse((run_dir / "human_feedback_decisions.json").exists())
+    def test_feedback_history_revalidates_scalar_text_and_payload_hash(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            run_id = "run-tampered-history"
+            run_dir = Path(td) / "runs" / run_id
+            run_dir.mkdir(parents=True)
+            _register_archive_intent_run(td, run_id)
+            queue = {
+                "schema_version": "review_queue.v2",
+                "run_id": run_id,
+                "status": "needs_review",
+                "items": [{
+                    "id": f"R{index:03d}",
+                    "run_id": run_id,
+                    "feedback_type": "field_correction",
+                    "allowed_decisions": ["correct", "defer"],
+                } for index in range(1, 3)],
+            }
+            (run_dir / "review_queue.json").write_text(json.dumps(queue), encoding="utf-8")
+            tools = DataCleaningTools(workspace_dir=td)
+            first = _apply_bound_feedback(tools, run_id, [{
+                "feedback_id": "FB-history-1",
+                "feedback_type": "field_correction",
+                "item_id": "R001",
+                "decision": "correct",
+                "old_value": "before",
+                "new_value": "after",
+            }])
+            self.assertEqual(first["accepted"], 1)
+
+            history_path = run_dir / "human_feedback_decisions.json"
+            history = json.loads(history_path.read_text(encoding="utf-8"))
+            history["decisions"][0]["old_value"] = {"nested": "not-a-scalar"}
+            history["decisions"][0]["reason"] = 123
+            history_path.write_text(json.dumps(history), encoding="utf-8")
+            artifact_names = (
+                "human_feedback_decisions.json",
+                "feedback_events.jsonl",
+                "rule_candidates.json",
+                "parser_test_candidates.json",
+                "review_queue.json",
+            )
+            before = {name: (run_dir / name).read_bytes() for name in artifact_names}
+
+            second = _apply_bound_feedback(tools, run_id, [{
+                "feedback_id": "FB-history-2",
+                "feedback_type": "field_correction",
+                "item_id": "R002",
+                "decision": "correct",
+                "new_value": "safe",
+            }])
+
+            self.assertEqual(second["status"], "failed")
+            self.assertEqual(second["errors"][0]["error"], "invalid_feedback_review_state")
+            self.assertEqual(
+                {name: (run_dir / name).read_bytes() for name in artifact_names},
+                before,
+            )
     def test_feedback_transaction_rolls_back_every_artifact_when_replace_fails(self):
         from contracts.feedback_form_schema import review_item_snapshot_hash
         from tools.data_cleaning_tools import DataCleaningTools

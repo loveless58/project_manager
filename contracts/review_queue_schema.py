@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import json
 import re
-import unicodedata
 from typing import Any, Dict, List
 
+from platform_core.document_refs import (
+    DocumentRefValidationError,
+    validate_document_ref,
+)
+from platform_core.sensitive_text import (
+    contains_sensitive_text as review_value_contains_sensitive_text,
+)
 
 MAX_REVIEW_BYTES = 128 * 1024
 SEVERITY_TO_RISK = {
@@ -77,17 +83,6 @@ _ABSOLUTE_PATH = re.compile(
     rf"{re.escape(_FORWARD_SLASH)}|{re.escape(_FILE_URI_PREFIX)})",
     re.IGNORECASE,
 )
-_EMBEDDED_PATH = re.compile(
-    rf"(?:(?:^|[^a-z0-9])[a-z]:[{re.escape(_BACKSLASH + _FORWARD_SLASH)}]|"
-    rf"{re.escape(_BACKSLASH * 2)}[^\s{re.escape(_BACKSLASH)}]+{re.escape(_BACKSLASH)}|"
-    rf"file:\s*{re.escape(_FORWARD_SLASH)}{{2,}}|"
-    rf"(?:^|[\s\"'=:(]){re.escape(_FORWARD_SLASH)}(?!{re.escape(_FORWARD_SLASH)})[^\s]+)",
-    re.IGNORECASE,
-)
-_CREDENTIAL_MARKERS = (
-    "author" + "ization", "bear" + "er", "to" + "ken", "api_key",
-    "api-key", "password", "x-amz-credential", "x-amz-signature",
-)
 _TRACE_TEXT_FIELDS = {
     "project_name", "reason", "recommended_action", "verdict", "block_reason",
     "finding_id", "dimension", "status", "destination_status", "content_hash",
@@ -100,7 +95,6 @@ _TRACE_LIST_FIELDS = {
     "low_confidence_items",
 }
 _CANDIDATE_LIST_FIELDS = {"candidate_ids", "candidate_target_binding_ids"}
-_REF_KEYS = ("storage_provider", "object_key", "logical_uri", "binding_id")
 
 
 def normalize_review_queue(run_id: str, raw_items: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -125,6 +119,21 @@ def normalize_review_queue(run_id: str, raw_items: List[Dict[str, Any]]) -> Dict
     }
 
 
+def review_policy_for_type(item_type: object) -> Dict[str, Any]:
+    """Return a caller-isolated copy of the fixed decision policy."""
+    defaults = TYPE_DEFAULTS.get(item_type)
+    if defaults is None:
+        return {
+            "feedback_type": "rule_exception",
+            "allowed_decisions": ["accept", "reject", "defer"],
+            "recommended_decision": "defer",
+        }
+    return {
+        key: list(defaults[key]) if key == "allowed_decisions" else defaults[key]
+        for key in ("feedback_type", "allowed_decisions", "recommended_decision")
+    }
+
+
 def normalize_review_queue_item(run_id: str, raw_item: Dict[str, Any], index: int) -> Dict[str, Any]:
     item_type = raw_item.get("type") if _safe_text(raw_item.get("type")) else "review_item"
     defaults = TYPE_DEFAULTS.get(item_type, {
@@ -135,15 +144,16 @@ def normalize_review_queue_item(run_id: str, raw_item: Dict[str, Any], index: in
     })
     severity = raw_item.get("severity") if _safe_text(raw_item.get("severity")) else "unknown"
     projected = review_trace_projection(raw_item)
+    policy = review_policy_for_type(item_type)
     identifier = raw_item.get("id")
     if not _safe_text(identifier) or not _IDENTIFIER.fullmatch(identifier):
         identifier = f"R{index:03d}"
-    allowed = list(defaults["allowed_decisions"])
-    recommended = defaults["recommended_decision"]
+    allowed = policy["allowed_decisions"]
+    recommended = policy["recommended_decision"]
     question = raw_item.get("question")
     if not _safe_text(question):
         question = _question_for_item(projected | {"type": item_type}, defaults["question"])
-    feedback_type = defaults["feedback_type"]
+    feedback_type = policy["feedback_type"]
     risk = raw_item.get("risk")
     if not _safe_text(risk):
         risk = SEVERITY_TO_RISK.get(severity, "P2")
@@ -261,11 +271,16 @@ def _record_list(value: Any, allowed_fields: set[str]) -> List[Dict[str, Any]]:
 
 
 def _source_ref(value: Any) -> Dict[str, str]:
-    if type(value) is not dict or set(value) != set(_REF_KEYS):
+    try:
+        ref = validate_document_ref(value, require_binding=True)
+    except DocumentRefValidationError:
         return {}
-    if any(not _safe_text(value.get(key)) for key in _REF_KEYS):
-        return {}
-    return {key: value[key] for key in _REF_KEYS}
+    return {
+        "storage_provider": ref.storage_provider,
+        "object_key": ref.object_key,
+        "logical_uri": ref.logical_uri,
+        "binding_id": ref.binding_id,
+    }
 
 
 def _safe_string_list(value: Any, *, identifiers: bool = False) -> List[str]:
@@ -282,33 +297,6 @@ def _safe_string_list(value: Any, *, identifiers: bool = False) -> List[str]:
     return result
 
 
-def review_value_contains_sensitive_text(value: Any) -> bool:
-    if type(value) is str:
-        normalized = unicodedata.normalize("NFKC", value).casefold()
-        if _EMBEDDED_PATH.search(normalized):
-            return True
-        for marker in _CREDENTIAL_MARKERS:
-            position = normalized.find(marker)
-            while position >= 0:
-                before = normalized[position - 1] if position else ""
-                end = position + len(marker)
-                after = normalized[end] if end < len(normalized) else ""
-                if (not before.isalnum()) and (
-                    marker in {"bear" + "er", "author" + "ization"}
-                    or after in {"", " ", "\t", ":", "=", "?", "&"}
-                ):
-                    return True
-                position = normalized.find(marker, position + 1)
-        return False
-    if type(value) is dict:
-        return any(
-            review_value_contains_sensitive_text(key)
-            or review_value_contains_sensitive_text(item)
-            for key, item in value.items()
-        )
-    if type(value) in {list, tuple}:
-        return any(review_value_contains_sensitive_text(item) for item in value)
-    return False
 
 
 def _safe_text(value: Any, *, allow_path_like: bool = False) -> bool:
@@ -336,5 +324,5 @@ def _validate_raw_item(value: Any) -> None:
 __all__ = [
     "MAX_REVIEW_BYTES", "TYPE_DEFAULTS", "normalize_review_queue",
     "normalize_review_queue_item", "review_trace_projection",
-    "review_value_contains_sensitive_text",
+    "review_policy_for_type", "review_value_contains_sensitive_text",
 ]

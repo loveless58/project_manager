@@ -62,6 +62,10 @@ class ReviewQueueContractTests(unittest.TestCase):
         credential_name = "X-Amz-" + "Credential"
         signature_name = "X-Amz-" + "Signature"
         auth_name = "Author" + "ization"
+        cookie_name = "Coo" + "kie"
+        session_name = "Ses" + "sion"
+        key_name = "K" + "ey"
+        generic_signature = "Signa" + "ture"
         fullwidth_auth = "".join(
             chr(ord(char) + 0xFEE0) if "!" <= char <= "~" else char
             for char in auth_name + ":"
@@ -75,6 +79,17 @@ class ReviewQueueContractTests(unittest.TestCase):
             "prefix " + credential_name + "=synthetic-value suffix",
             "prefix " + signature_name + "=synthetic-value suffix",
             "prefix " + fullwidth_auth + " synthetic-value suffix",
+            "note[" + slash + "etc" + slash + "passwd]",
+            "prefix " + cookie_name + "=synthetic-value suffix",
+            "prefix " + session_name + "=synthetic-value suffix",
+            "prefix " + key_name + "=synthetic-value suffix",
+            "prefix " + generic_signature + "=synthetic-value suffix",
+            "prefix X-Amz-Algorithm=synthetic-value suffix",
+            "prefix " + slash * 2 + "server" + slash + "share" + slash + "item suffix",
+            "prefix {\"token\":\"synthetic\"} suffix",
+            "note[" + slash + "(secret)" + slash + "item]",
+            "prefix bearer=synthetic-value suffix",
+            "prefix {\"X-Amz-Algorithm\":\"synthetic-value\"} suffix",
         )
         for index, sensitive in enumerate(sensitive_values, 1):
             with self.subTest(index=index):
@@ -91,6 +106,114 @@ class ReviewQueueContractTests(unittest.TestCase):
                 }])["items"][0]
 
                 self.assertNotIn(sensitive, json.dumps(item, ensure_ascii=False))
+        from contracts.review_queue_schema import review_value_contains_sensitive_text
+        for key in ("token", "authorization", "bearer", "cookie", "x-amz-algorithm"):
+            with self.subTest(mapping_key=key):
+                self.assertTrue(review_value_contains_sensitive_text({key: "synthetic"}))
+
+
+    def test_review_projection_preserves_safe_http_and_business_uris(self):
+        from contracts.review_queue_schema import normalize_review_queue
+
+        safe_note = (
+            "See https://example.invalid/docs/(v1)/item and "
+            "business://source/inbox/(v1)/item.md"
+        )
+        item = normalize_review_queue("run-safe-uri", [{
+            "type": "business_relation_review",
+            "reason": safe_note,
+            "evidence": [{"kind": "note", "value": safe_note}],
+        }])["items"][0]
+
+        self.assertEqual(item["reason"], safe_note)
+        self.assertEqual(item["evidence"], [{
+            "kind": "note", "value": safe_note,
+        }])
+
+    def test_review_projection_requires_canonical_bound_document_ref(self):
+        from contracts.review_queue_schema import normalize_review_queue
+
+        valid_ref = {
+            "storage_provider": "local",
+            "object_key": "inbox/source.md",
+            "logical_uri": "business://source/inbox/source.md",
+            "binding_id": "source",
+        }
+        valid_item = normalize_review_queue("run-valid-ref", [{
+            "type": "business_relation_review",
+            "source_ref": valid_ref,
+        }])["items"][0]
+        self.assertEqual(valid_item["source_ref"], valid_ref)
+        prefixed_ref = {
+            **valid_ref,
+            "logical_uri": "business://source/tenant/prefix/inbox/source.md",
+        }
+        prefixed_item = normalize_review_queue("run-prefixed-ref", [{
+            "type": "business_relation_review",
+            "source_ref": prefixed_ref,
+        }])["items"][0]
+        self.assertEqual(prefixed_item["source_ref"], prefixed_ref)
+
+        backslash = chr(92)
+        invalid_refs = (
+            {**valid_ref, "storage_provider": "local store"},
+            {**valid_ref, "binding_id": "source id"},
+            {**valid_ref, "object_key": "../escape.md"},
+            {**valid_ref, "object_key": "inbox/./source.md"},
+            {**valid_ref, "object_key": "inbox" + backslash + "source.md"},
+            {**valid_ref, "logical_uri": "not a uri"},
+            {**valid_ref, "logical_uri": "business://source/inbox/source.md?version=1"},
+            {**valid_ref, "logical_uri": "business://source/inbox/source.md#fragment"},
+            {**valid_ref, "logical_uri": "business://other/inbox/source.md"},
+            {**valid_ref, "logical_uri": "business://source/other.md"},
+            {**valid_ref, "logical_uri": "local://inbox/source.md"},
+            {**valid_ref, "logical_uri": "business://source//inbox/source.md"},
+        )
+        for index, invalid_ref in enumerate(invalid_refs, 1):
+            with self.subTest(index=index):
+                item = normalize_review_queue("run-invalid-ref", [{
+                    "type": "business_relation_review",
+                    "source_ref": invalid_ref,
+                }])["items"][0]
+
+                self.assertNotIn("source_ref", item)
+
+    def test_persisted_review_queue_rejects_fixed_policy_tampering(self):
+        from contracts.archive_run_artifacts import (
+            ArchiveRunArtifactError,
+            validate_review_queue,
+        )
+
+        run_id = "run-persisted-policy"
+        queue = {
+            "schema_version": "review_queue.v2",
+            "run_id": run_id,
+            "status": "needs_review",
+            "items": [{
+                "id": "R001",
+                "run_id": run_id,
+                "type": "archive_target_review",
+                "severity": "unknown",
+                "risk": "P2",
+                "question": "Review target",
+                "feedback_type": "archive_decision",
+                "allowed_decisions": ["approve", "reject", "edit_target", "defer"],
+                "recommended_decision": "defer",
+                "confirmed": False,
+                "evidence": [],
+            }],
+        }
+        tampering = (
+            ("feedback_type", "human_confirmation"),
+            ("allowed_decisions", ["force_ready"]),
+            ("recommended_decision", "force_ready"),
+        )
+        for field, value in tampering:
+            with self.subTest(field=field):
+                candidate = json.loads(json.dumps(queue))
+                candidate["items"][0][field] = value
+                with self.assertRaises(ArchiveRunArtifactError):
+                    validate_review_queue(candidate, run_id)
 
     def test_adversarial_error_is_actionable(self):
         from contracts.review_queue_schema import normalize_review_queue

@@ -103,6 +103,10 @@ _FEEDBACK_INPUT_FIELDS = {
     "finding_id", "reason", "evidence_text", "created_at", "actor",
     "review_item_hash",
 }
+_FEEDBACK_SCALAR_FIELDS = ("old_value", "new_value", "expected_value")
+_FEEDBACK_TEXT_FIELDS = ("reason", "actor", "field", "input_pattern")
+_MAX_FEEDBACK_VALUE_BYTES = 2048
+
 _FEEDBACK_FORM_ROOT_FIELDS = {
     "schema_version", "run_id", "created_at", "audit_verdict",
     "verification_verdict", "required_feedback_items", "items", "instructions",
@@ -2645,19 +2649,46 @@ class DataCleaningTools:
             raise FeedbackValidationError("invalid_feedback_value", "feedback contains a non-JSON value") from None
         if len(encoded) > MAX_REVIEW_BYTES:
             raise FeedbackValidationError("feedback_size_limit", "feedback exceeds the byte limit")
-        for scalar_field in ("new_value", "expected_value"):
-            if scalar_field not in raw or raw[scalar_field] is None:
+        for scalar_field in _FEEDBACK_SCALAR_FIELDS:
+            if scalar_field not in raw:
                 continue
             scalar_value = raw[scalar_field]
+            if scalar_value is None:
+                continue
             if type(scalar_value) not in (str, int, float, bool):
                 raise FeedbackValidationError(
                     "invalid_feedback_scalar",
                     f"{scalar_field} must be a bounded JSON scalar",
                 )
+            scalar_bytes = json.dumps(
+                scalar_value, ensure_ascii=False, allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if len(scalar_bytes) > _MAX_FEEDBACK_VALUE_BYTES:
+                raise FeedbackValidationError(
+                    "feedback_scalar_size_limit",
+                    f"{scalar_field} exceeds the scalar byte limit",
+                )
             if review_value_contains_sensitive_text(scalar_value):
                 raise FeedbackValidationError(
                     "unsafe_feedback_value",
                     "feedback contains an unsafe value",
+                )
+        for text_field in _FEEDBACK_TEXT_FIELDS:
+            if text_field not in raw:
+                continue
+            text_value = raw[text_field]
+            if type(text_value) is not str:
+                raise FeedbackValidationError(
+                    "invalid_feedback_text", f"{text_field} must be a string",
+                )
+            if len(text_value.encode("utf-8")) > _MAX_FEEDBACK_VALUE_BYTES:
+                raise FeedbackValidationError(
+                    "feedback_text_size_limit", f"{text_field} exceeds the byte limit",
+                )
+            if review_value_contains_sensitive_text(text_value):
+                raise FeedbackValidationError(
+                    "unsafe_feedback_value", "feedback contains an unsafe value",
                 )
         try:
             validate_json_tree(raw)
@@ -2744,14 +2775,30 @@ class DataCleaningTools:
                 or item["feedback_id"] in identifiers
             ):
                 raise ArchiveRunArtifactError("feedback history item")
-            identifiers.add(item["feedback_id"])
-            if type(item.get("payload_hash")) is not str:
-                semantic = {
-                    key: value for key, value in item.items()
-                    if key not in {"feedback_id", "created_at", "payload_hash"}
-                }
+            input_projection = {
+                key: value for key, value in item.items()
+                if key in _FEEDBACK_INPUT_FIELDS
+            }
+            try:
+                self._validate_feedback_input(input_projection)
+            except FeedbackValidationError:
+                raise ArchiveRunArtifactError("feedback history item") from None
+            semantic = {
+                key: value for key, value in item.items()
+                if key not in {"feedback_id", "created_at", "payload_hash"}
+            }
+            expected_hash = self._canonical_feedback_hash(semantic)
+            stored_hash = item.get("payload_hash")
+            if stored_hash is None:
                 item = dict(item)
-                item["payload_hash"] = self._canonical_feedback_hash(semantic)
+                item["payload_hash"] = expected_hash
+            elif (
+                type(stored_hash) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", stored_hash) is None
+                or stored_hash != expected_hash
+            ):
+                raise ArchiveRunArtifactError("feedback history payload hash")
+            identifiers.add(item["feedback_id"])
             result.append(item)
         return result
 
