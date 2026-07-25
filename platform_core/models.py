@@ -9,6 +9,7 @@ class DocumentRef:
     storage_provider: str
     object_key: str
     logical_uri: str
+    binding_id: str = ""
 
 
 @dataclass(frozen=True)

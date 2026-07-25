@@ -3,6 +3,18 @@ from pathlib import Path
 
 import pytest
 
+def test_legacy_root_becomes_one_binding(tmp_path):
+    from platform_core.settings import load_app_settings
+
+    settings = load_app_settings(
+        config_file="",
+        environ={"PROJECT_MANAGER_BUSINESS_ROOT": str(tmp_path / "business")},
+    )
+
+    assert [item.binding_id for item in settings.storage_bindings] == [
+        "legacy-business-root"
+    ]
+
 
 def test_explicit_missing_config_is_rejected_without_path_leak(tmp_path):
     from platform_core.settings import SettingsError, load_app_settings
@@ -284,3 +296,66 @@ def test_invalid_settings_fail_with_stable_message(environ, message):
 
     with pytest.raises(SettingsError, match=message):
         load_app_settings(config_file="", environ=environ)
+
+def test_explicit_storage_bindings_do_not_add_legacy_root(tmp_path):
+    from platform_core.settings import load_app_settings
+
+    config_file = tmp_path / "project-manager.local.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "storage_bindings": [
+                    {
+                        "binding_id": "source",
+                        "provider": "local",
+                        "node_id": "node-a",
+                        "logical_root": "business://source/",
+                        "physical_root": str(tmp_path / "source"),
+                        "roles": ["source"],
+                        "readable": True,
+                        "writable": False,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_app_settings(config_file=config_file, environ={})
+
+    assert [item.binding_id for item in settings.storage_bindings] == ["source"]
+
+def test_runtime_workspace_cannot_be_inside_an_explicit_storage_binding(tmp_path):
+    from platform_core.settings import SettingsError, load_app_settings
+
+    source_root = tmp_path / "source"
+    config_file = tmp_path / "project-manager.local.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "storage_bindings": [
+                    {
+                        "binding_id": "source",
+                        "provider": "local",
+                        "node_id": "node-a",
+                        "logical_root": "business://source/",
+                        "physical_root": str(source_root),
+                        "roles": ["source"],
+                        "readable": True,
+                        "writable": False,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        SettingsError, match="runtime_workspace must not be inside storage binding"
+    ):
+        load_app_settings(
+            config_file=config_file,
+            environ={},
+            business_root=tmp_path / "legacy",
+            runtime_workspace=source_root / "runtime",
+        )

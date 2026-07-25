@@ -6,12 +6,14 @@ from dataclasses import dataclass
 from typing import Optional
 
 from integrations.document_store import DisabledDocumentStore, LocalDocumentStore
+from integrations.document_store import DocumentStoreRouter
 from integrations.pageindex import PageIndexStructureIndex
 from integrations.projections import FilesystemProjectionWriter
 from platform_core.models import CapabilityReport, StructureIndexRequest, StructureIndexResult
 from platform_core.ports import DocumentStore, ProjectionWriter, StructureIndex
 from platform_core.registry import AdapterKind, AdapterRegistry
 from platform_core.settings import AppSettings
+from platform_core.storage_bindings import StorageBindingRegistry
 
 
 class DisabledStructureIndex:
@@ -38,6 +40,8 @@ class RuntimeAdapters:
     """The concrete port implementations selected for one application runtime."""
 
     document_store: DocumentStore
+    storage_binding_registry: StorageBindingRegistry
+    document_store_router: DocumentStoreRouter
     structure_index: StructureIndex
     projection_writer: ProjectionWriter
 
@@ -89,12 +93,21 @@ def build_runtime_adapters(
 ) -> RuntimeAdapters:
     """Build the adapters configured by ``settings`` without implicit discovery."""
     selected = registry or build_default_registry()
+    storage_binding_registry = StorageBindingRegistry(settings.storage_bindings)
+    stores_by_binding = {
+        binding.binding_id: LocalDocumentStore(binding.physical_root)
+        for binding in storage_binding_registry.bindings
+        if binding.enabled and binding.provider == "local"
+    }
+    document_store_router = DocumentStoreRouter(stores_by_binding)
     return RuntimeAdapters(
         document_store=selected.build(
             AdapterKind.DOCUMENT_STORE,
             settings.providers.document_store,
             settings,
         ),
+        storage_binding_registry=storage_binding_registry,
+        document_store_router=document_store_router,
         structure_index=selected.build(
             AdapterKind.STRUCTURE_INDEX,
             settings.providers.structure_index,

@@ -62,3 +62,24 @@ def test_unknown_provider_remains_an_explicit_configuration_error(tmp_path):
 
     with pytest.raises(AdapterRegistryError, match="unknown document_store adapter"):
         build_runtime_adapters(settings)
+
+def test_runtime_exposes_binding_registry_and_router(tmp_path):
+    from app_bootstrap.composition import build_runtime_adapters
+    from integrations.document_store import DocumentStoreRouter
+    from platform_core.storage_bindings import StorageBindingRegistry
+
+    settings = load_app_settings(
+        config_file="",
+        environ={
+            "PROJECT_MANAGER_BUSINESS_ROOT": str(tmp_path / "business"),
+            "PROJECT_MANAGER_WORKSPACE_DIR": str(tmp_path / "runtime"),
+        },
+    )
+
+    adapters = build_runtime_adapters(settings)
+
+    assert isinstance(adapters.storage_binding_registry, StorageBindingRegistry)
+    assert isinstance(adapters.document_store_router, DocumentStoreRouter)
+    assert set(adapters.document_store_router.stores_by_binding) == {
+        "legacy-business-root"
+    }

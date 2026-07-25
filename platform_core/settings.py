@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
 
 from .path_locality import NodeLocalPathError, ensure_node_local_path
+from .storage_bindings import StorageBinding
 
 
 PathLike = Union[str, os.PathLike]
@@ -20,6 +21,7 @@ _CONFIG_TOP_LEVEL_KEYS = frozenset(
         "deployment_mode",
         "business_root",
         "runtime_workspace",
+        "storage_bindings",
         "database",
         "providers",
     }
@@ -191,6 +193,97 @@ def _validate_config_schema(payload: Mapping[str, Any]) -> None:
         )
 
 
+
+_STORAGE_BINDING_KEYS = frozenset(
+    {
+        "binding_id",
+        "provider",
+        "node_id",
+        "logical_root",
+        "physical_root",
+        "roles",
+        "readable",
+        "writable",
+        "enabled",
+    }
+)
+_REQUIRED_STORAGE_BINDING_KEYS = _STORAGE_BINDING_KEYS - {"enabled"}
+
+
+def _load_storage_bindings(raw_bindings: Any) -> tuple[StorageBinding, ...]:
+    if not isinstance(raw_bindings, list):
+        raise SettingsError("storage_bindings must be a list")
+
+    bindings: list[StorageBinding] = []
+    for index, raw_binding in enumerate(raw_bindings):
+        field_prefix = f"storage_bindings[{index}]"
+        if not isinstance(raw_binding, dict):
+            raise SettingsError(f"{field_prefix} must be an object")
+        if not set(raw_binding).issubset(_STORAGE_BINDING_KEYS):
+            raise SettingsError(f"{field_prefix} contains unknown fields")
+        if not _REQUIRED_STORAGE_BINDING_KEYS.issubset(raw_binding):
+            raise SettingsError(f"{field_prefix} is missing required fields")
+
+        string_values = {}
+        for field_name in (
+            "binding_id",
+            "provider",
+            "node_id",
+            "logical_root",
+            "physical_root",
+        ):
+            value = raw_binding[field_name]
+            if not isinstance(value, str) or not value.strip():
+                raise SettingsError(f"{field_prefix}.{field_name} must be a non-empty string")
+            string_values[field_name] = value
+
+        raw_roles = raw_binding["roles"]
+        if (
+            not isinstance(raw_roles, list)
+            or not all(isinstance(role, str) and role.strip() for role in raw_roles)
+        ):
+            raise SettingsError(f"{field_prefix}.roles must be a list of non-empty strings")
+        for field_name in ("readable", "writable", "enabled"):
+            if field_name in raw_binding and not isinstance(raw_binding[field_name], bool):
+                raise SettingsError(f"{field_prefix}.{field_name} must be a boolean")
+
+        physical_root = _path(
+            string_values["physical_root"],
+            field_name=f"{field_prefix}.physical_root",
+        )
+        assert physical_root is not None
+        try:
+            bindings.append(
+                StorageBinding(
+                    binding_id=string_values["binding_id"],
+                    provider=string_values["provider"],
+                    node_id=string_values["node_id"],
+                    logical_root=string_values["logical_root"],
+                    physical_root=physical_root,
+                    roles=tuple(raw_roles),
+                    readable=raw_binding["readable"],
+                    writable=raw_binding["writable"],
+                    enabled=raw_binding.get("enabled", True),
+                )
+            )
+        except ValueError as exc:
+            raise SettingsError(str(exc)) from None
+    return tuple(bindings)
+
+def _ensure_outside_storage_bindings(
+    *,
+    field_name: str,
+    path: Path,
+    storage_bindings: tuple[StorageBinding, ...],
+) -> Path:
+    for binding in storage_bindings:
+        try:
+            path.relative_to(binding.physical_root)
+        except ValueError:
+            continue
+        raise SettingsError(f"{field_name} must not be inside storage binding")
+    return path
+
 def _pick(
     explicit: Any,
     env: Mapping[str, str],
@@ -235,6 +328,7 @@ class ProviderSettings:
 class AppSettings:
     deployment_mode: str
     business_root: Optional[Path]
+    storage_bindings: tuple[StorageBinding, ...]
     runtime_workspace: Path
     database: DatabaseSettings
     providers: ProviderSettings
@@ -295,6 +389,27 @@ def load_app_settings(
         ),
         field_name="business_root",
     )
+    storage_bindings = (
+        _load_storage_bindings(local["storage_bindings"])
+        if "storage_bindings" in local
+        else (
+            (
+                StorageBinding(
+                    "legacy-business-root",
+                    "local",
+                    "legacy",
+                    "business://legacy-business-root/",
+                    resolved_business_root,
+                    ("source",),
+                    True,
+                    False,
+                ),
+            )
+            if resolved_business_root is not None
+            else ()
+        )
+    )
+
     default_runtime = Path.home() / ".project_manager"
     raw_runtime_workspace = _pick(
         runtime_workspace,
@@ -422,6 +537,16 @@ def load_app_settings(
         )
     except NodeLocalPathError as exc:
         raise SettingsError(str(exc)) from exc
+    resolved_runtime = _ensure_outside_storage_bindings(
+        field_name="runtime_workspace",
+        path=resolved_runtime,
+        storage_bindings=storage_bindings,
+    )
+    projection_root = _ensure_outside_storage_bindings(
+        field_name="projection_root",
+        path=projection_root,
+        storage_bindings=storage_bindings,
+    )
 
     if database_provider == "sqlite":
         assert raw_sqlite_path is not None
@@ -435,6 +560,11 @@ def load_app_settings(
             )
         except NodeLocalPathError as exc:
             raise SettingsError(str(exc)) from exc
+        sqlite_path = _ensure_outside_storage_bindings(
+            field_name="sqlite_path",
+            path=sqlite_path,
+            storage_bindings=storage_bindings,
+        )
     if structure_index == "pageindex" and pageindex_dir is None:
         raise SettingsError("pageindex_dir is required when structure_index is pageindex")
     if document_store == "local" and resolved_business_root is None:
@@ -443,6 +573,7 @@ def load_app_settings(
     return AppSettings(
         deployment_mode=mode,
         business_root=resolved_business_root,
+        storage_bindings=storage_bindings,
         runtime_workspace=resolved_runtime,
         database=DatabaseSettings(
             provider=database_provider,

@@ -1,6 +1,19 @@
 {
   "deployment_mode": "local",
   "business_root": "~/ProjectManagerData",
+  "storage_bindings": [
+    {
+      "binding_id": "business-source",
+      "provider": "local",
+      "node_id": "local-node",
+      "logical_root": "business://business-source/",
+      "physical_root": "~/ProjectManagerData",
+      "roles": ["source"],
+      "readable": true,
+      "writable": false,
+      "enabled": true
+    }
+  ],
   "runtime_workspace": "~/.project_manager",
   "database": {
     "provider": "sqlite",

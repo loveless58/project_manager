@@ -7,6 +7,13 @@ from .models import (
     StructureIndexRequest,
     StructureIndexResult,
 )
+from .storage_bindings import (
+    AmbiguousStorageBindingError,
+    StorageBinding,
+    StorageBindingError,
+    StorageBindingNotFoundError,
+    StorageBindingRegistry,
+)
 from .ports import DocumentStore, ProjectionWriter, Repository, StructureIndex, UnitOfWork
 from .registry import AdapterKind, AdapterRegistry, AdapterRegistryError
 
@@ -24,6 +31,11 @@ __all__ = [
     "AdapterRegistry",
     "AdapterRegistryError",
     "AppSettings",
+    "AmbiguousStorageBindingError",
+    "StorageBinding",
+    "StorageBindingError",
+    "StorageBindingNotFoundError",
+    "StorageBindingRegistry",
     "CapabilityReport",
     "DatabaseSettings",
     "DocumentRef",
