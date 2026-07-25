@@ -55,6 +55,7 @@ class TestArchiveDecision(unittest.TestCase):
                     "filename": "random.md",
                     "file_type": ".md",
                     "document_type": "项目投标",
+                    "classification": {"document_type": "项目投标", "business_domain": "bid_project", "project_phase": None, "archive_phase": None, "confidence": 0.5, "evidence": [], "requires_review": False},
                     "extracted_text": "unstructured notes",
                     "fields": {},
                 },
@@ -76,6 +77,7 @@ class TestArchiveDecision(unittest.TestCase):
                     "filename": "项目记录.md",
                     "file_type": ".md",
                     "document_type": "项目记录",
+                    "classification": {"document_type": "项目记录", "business_domain": "bid_project", "project_phase": "项目丢标", "archive_phase": "项目丢标", "confidence": 0.9, "evidence": [], "requires_review": False},
                     "extracted_text": "# 项目记录：合成终端采购项目\n报名状态：已弃标",
                     "fields": {
                         "project_name": "合成终端采购项目",
@@ -107,6 +109,7 @@ class TestArchiveDecision(unittest.TestCase):
                     "filename": "docling_invoice_extract.json",
                     "file_type": ".json",
                     "document_type": "数据资产",
+                    "classification": {"document_type": "数据资产", "business_domain": "bid_project", "project_phase": "项目执行", "archive_phase": "项目执行", "confidence": 0.9, "evidence": [], "requires_review": False},
                     "extracted_text": "",
                     "fields": {
                         "project_name": "合成数字资产项目",
@@ -134,6 +137,7 @@ class TestArchiveDecision(unittest.TestCase):
                     "filename": "项目记录.md",
                     "file_type": ".md",
                     "document_type": "项目记录",
+                    "classification": {"document_type": "项目记录", "business_domain": "bid_project", "project_phase": "项目执行", "archive_phase": "项目执行", "confidence": 0.9, "evidence": [], "requires_review": False},
                     "extracted_text": f"# 项目记录：{project_name}",
                     "fields": {
                         "project_name": project_name,
@@ -160,6 +164,7 @@ class TestArchiveDecision(unittest.TestCase):
                     "filename": "项目记录.md",
                     "file_type": ".md",
                     "document_type": "项目记录",
+                    "classification": {"document_type": "项目记录", "business_domain": "bid_project", "project_phase": "项目执行", "archive_phase": "项目执行", "confidence": 0.9, "evidence": [], "requires_review": False},
                     "extracted_text": "# 项目记录：合成服务系统项目",
                     "fields": {
                         "project_name": "合成服务系统项目",

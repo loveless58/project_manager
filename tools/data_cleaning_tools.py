@@ -246,10 +246,7 @@ class DataCleaningTools:
         )
         text = result.get("extracted_text", "")
         if result.get("status") == "success":
-            classification = self._classify_document(file_path, text)
-            provider_document_type = result.get("document_type")
-            if provider_document_type:
-                classification["document_type"] = provider_document_type
+            classification = self._classify_document(file_path, text, result.get("document_type") or "")
             document_type = classification["document_type"]
             fields = self._extract_fields_for_document(text, document_type)
             if document_type != "发票":
@@ -906,16 +903,16 @@ class DataCleaningTools:
         return fields
 
 
-    def _classify_document(self, file_path: str, text: str) -> Dict[str, Any]:
+    def _classify_document(self, file_path: str, text: str, document_type_hint: str = "") -> Dict[str, Any]:
         """Build one classification payload for extraction and archive planning."""
         filename = os.path.basename(file_path)
         haystack = f"{filename}\n{text[:5000]}".lower()
-        if "project_manager" in haystack or filename.lower().startswith("prd-project-manager"):
+        if not document_type_hint and ("project_manager" in haystack or filename.lower().startswith("prd-project-manager")):
             return DocumentClassification("项目治理文档", "internal_project", None, None, 0.98, [f"filename:{filename}", "text:project_manager"], True).payload()
 
-        document_type = self._classify_text_document(file_path, text)
+        document_type = document_type_hint or self._classify_text_document(file_path, text)
         phase = self._business_phase_from_path(file_path)
-        domain = "finance" if document_type == "发票" else ("bid_project" if phase else "unknown")
+        domain = "finance" if document_type == "发票" else ("bid_project" if phase or document_type != "未分类" or "项目名称" in text else "unknown")
         requires_review = domain == "unknown" or (document_type == "发票" and not phase)
         return DocumentClassification(document_type, domain, phase or None, phase or None, 0.9 if document_type != "未分类" else 0.3, [f"filename:{filename}"], requires_review).payload()
     def _classify_text_document(self, file_path: str, text: str) -> str:

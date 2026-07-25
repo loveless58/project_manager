@@ -31,6 +31,7 @@ def _run(source_file: str, project_name: str = "测试项目"):
         source_file=source_file,
         project_name=project_name,
         extracted={
+            "classification": {"document_type": "测试文档", "business_domain": "bid_project", "project_phase": None, "archive_phase": None, "confidence": 0.5, "evidence": [], "requires_review": False},
             "document_type": "测试文档",
             "fields": {"project_name": project_name},  # evaluate_archive_decision 从 fields 取
         },

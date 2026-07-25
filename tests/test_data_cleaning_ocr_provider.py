@@ -304,3 +304,22 @@ class TestDataCleaningOcrProvider(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+def test_provider_invoice_type_rebuilds_complete_classification():
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    with tempfile.TemporaryDirectory() as td:
+        source = os.path.join(td, "notice.pdf")
+        with open(source, "wb") as handle:
+            handle.write(b"%PDF-1.4")
+        provider_result = {
+            "status": "success", "file": source, "filename": "notice.pdf", "file_type": ".pdf",
+            "document_type": "发票", "extracted_text": "采购公告\n项目名称：合成非项目", "fields": {},
+        }
+        with patch("ocr.provider_registry.extract_pdf_or_image", return_value=provider_result):
+            extracted = DataCleaningTools(workspace_dir=td).extract_document(source)
+
+    assert extracted["document_type"] == "发票"
+    assert extracted["classification"]["business_domain"] == "finance"
+    assert extracted["classification"]["requires_review"] is True
+    assert "project_name" not in extracted["fields"]

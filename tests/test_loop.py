@@ -1462,12 +1462,10 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
 
             self.assertEqual(result["status"], "success")
             action = result["archive_actions"][0]
-            self.assertEqual(action["status"], "ready")
-            self.assertEqual(action["project_name"], project_name)
-            self.assertEqual(action["archive_decision"]["archive_phase"], "项目丢标")
-            self.assertEqual(action["blockers"], [])
-            self.assertIn(os.path.join("项目丢标", project_name, "原始文件"), action["target_path"])
-            self.assertIn(project_name, action["target_path"])
+            self.assertEqual(action["status"], "needs_review")
+            self.assertIsNone(action["archive_decision"]["archive_phase"])
+            self.assertIsNone(action["target_path"])
+            self.assertIn("missing_document_classification", action["blockers"])
             self.assertEqual(result["failures"], [])
             self.assertFalse((Path(tools.project_files_dir) / project_name / "数字资产" / "project_ledger.json").exists())
 
@@ -1490,10 +1488,11 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             self.assertEqual(result["status"], "success")
             self.assertEqual(result["failures"], [])
             action = result["archive_actions"][0]
-            self.assertEqual(action["status"], "ready")
-            self.assertEqual(action["project_name"], project_name)
-            self.assertEqual(action["archive_decision"]["archive_phase"], "项目执行")
-            self.assertIn(os.path.join("项目执行", project_name, "原始文件"), action["target_path"])
+            self.assertEqual(action["status"], "needs_review")
+            self.assertEqual(action["project_name"], "待确认")
+            self.assertIsNone(action["archive_decision"]["archive_phase"])
+            self.assertIsNone(action["target_path"])
+            self.assertIn("missing_document_classification", action["blockers"])
             self.assertEqual(result["review_queue"]["items"][0]["type"], "extraction_quality_review")
             self.assertEqual(result["review_queue"]["items"][0]["reason"], "metadata_passthrough_archive_only")
 
@@ -1582,6 +1581,7 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
                 "filename": material.name,
                 "file_type": ".png",
                 "document_type": "项目投标",
+                "classification": {"document_type": "项目投标", "business_domain": "bid_project", "project_phase": "项目丢标", "archive_phase": "项目丢标", "confidence": 0.8, "evidence": [], "requires_review": False},
                 "extract_method": "easyocr",
                 "text_length": 12,
                 "extracted_text": '合成项目029 合成客户004',
@@ -1955,6 +1955,7 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
                 "filename": image.name,
                 "file_type": ".png",
                 "document_type": "付款凭证",
+                "classification": {"document_type": "付款凭证", "business_domain": "bid_project", "project_phase": "项目执行", "archive_phase": "项目执行", "confidence": 0.8, "evidence": [], "requires_review": False},
                 "extract_method": "ocr",
                 "text_length": 20,
                 "extracted_text": "付款人：噪声客户\n交易金额：48OOO",

@@ -44,6 +44,25 @@ def evaluate_archive_decision(
             "reasons": ["pm_internal_archive_needs_redesign"],
         }
 
+    if classification["requires_review"]:
+        errors = classification.get("validation_errors", [])
+        blockers = ["classification_requires_review", *errors]
+        return {
+            "schema_version": "archive_decision.v1",
+            "subject_type": "review_pending",
+            "subject_name": "待确认",
+            "archive_phase": None,
+            "document_type": classification["document_type"],
+            "confidence": classification["confidence"],
+            "classification": classification,
+            "target_dir": None,
+            "target_path": None,
+            "blockers": blockers,
+            "human_review_required": True,
+            "reasons": ["classification_requires_review"],
+        }
+
+
     project_name = fields.get("project_name") or ""
     if not project_name and filename == "项目记录.md":
         parent_name = Path(source_file).parent.name
