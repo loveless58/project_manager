@@ -256,3 +256,109 @@ def test_blocked_structure_index_is_diagnostic_not_evidence(tmp_path):
         "status": "blocked",
         "error_code": "INDEX.PROVIDER_UNAVAILABLE",
     }
+
+
+def test_unrelated_tax_id_mismatch_does_not_block_a_real_candidate(tmp_path):
+    index = RecordingIndex()
+    document = {
+        "path": str(tmp_path / "contract.pdf"),
+        "document_version_id": "contract-v1",
+        "content_hash": "a" * 64,
+        "media_type": "application/pdf",
+        "page_count": 30,
+    }
+    candidates = [
+        {
+            "id": "real-candidate",
+            "parties": {"buyer": {"tax_id": "91310001"}, "seller": {}},
+            "facts": {},
+            "documents": [document],
+        },
+        {
+            "id": "unrelated-candidate",
+            "parties": {"buyer": {"tax_id": "99990000"}, "seller": {}},
+            "facts": {},
+            "documents": [dict(document, document_version_id="unrelated-v1")],
+        },
+    ]
+
+    result = RetrievalService(
+        StaticContext(candidates), index
+    ).find_business_candidates(
+        BusinessContextQuery("invoice", {"buyer": {"tax_id": "91310001"}}, ())
+    )
+
+    assert result.status == "matched"
+    assert [candidate["id"] for candidate in result.candidates] == ["real-candidate"]
+    assert result.conflicts == ()
+    assert [request.document_version_id for request in index.requests] == ["contract-v1"]
+
+
+def test_invalid_document_before_valid_same_version_does_not_shadow_valid_identity(tmp_path):
+    index = RecordingIndex()
+    documents = [
+        {
+            "path": str(tmp_path / "invalid.pdf"),
+            "document_version_id": "contract-v1",
+            "content_hash": "not-a-sha256",
+            "media_type": "application/pdf",
+            "page_count": 30,
+        },
+        {
+            "path": str(tmp_path / "valid.pdf"),
+            "document_version_id": "contract-v1",
+            "content_hash": "a" * 64,
+            "media_type": "application/pdf",
+            "page_count": 30,
+        },
+    ]
+    candidate = {
+        "id": "candidate-1",
+        "parties": {"buyer": {"tax_id": "91310001"}, "seller": {}},
+        "facts": {},
+        "documents": documents,
+    }
+
+    result = RetrievalService(
+        StaticContext([candidate]), index
+    ).find_business_candidates(
+        BusinessContextQuery("invoice", {"buyer": {"tax_id": "91310001"}}, ())
+    )
+
+    assert [request.content_hash for request in index.requests] == ["a" * 64]
+    assert result.diagnostics[-1]["code"] == "BUSINESS_CONTEXT.DOCUMENT_INVALID"
+
+
+def test_conflicting_valid_identity_for_same_version_is_not_indexed(tmp_path):
+    index = RecordingIndex()
+    candidate = {
+        "id": "candidate-1",
+        "parties": {"buyer": {"tax_id": "91310001"}, "seller": {}},
+        "facts": {},
+        "documents": [
+            {
+                "path": str(tmp_path / "first.pdf"),
+                "document_version_id": "contract-v1",
+                "content_hash": "a" * 64,
+                "media_type": "application/pdf",
+                "page_count": 30,
+            },
+            {
+                "path": str(tmp_path / "second.pdf"),
+                "document_version_id": "contract-v1",
+                "content_hash": "b" * 64,
+                "media_type": "application/pdf",
+                "page_count": 30,
+            },
+        ],
+    }
+
+    result = RetrievalService(
+        StaticContext([candidate]), index
+    ).find_business_candidates(
+        BusinessContextQuery("invoice", {"buyer": {"tax_id": "91310001"}}, ())
+    )
+
+    assert result.status == "matched"
+    assert index.requests == []
+    assert result.diagnostics[-1]["code"] == "BUSINESS_CONTEXT.DOCUMENT_IDENTITY_CONFLICT"

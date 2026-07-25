@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from pathlib import Path
 import re
 from typing import Any
 
@@ -47,20 +48,33 @@ class RetrievalService:
         )
 
     def _index_declared_documents(self, candidates: Sequence[Mapping[str, Any]], diagnostics: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
-        declared: list[tuple[str, StructureIndexRequest]] = []
-        seen_document_versions: set[str] = set()
+        groups: dict[str, list[tuple[str, StructureIndexRequest, tuple[object, ...]]]] = {}
         for candidate in candidates:
             documents = candidate.get("documents", ())
             if not isinstance(documents, Sequence) or isinstance(documents, (str, bytes)):
                 continue
+            candidate_id = str(candidate.get("id", ""))
             for document in documents:
-                if not isinstance(document, Mapping) or not _needs_index(document):
+                if not isinstance(document, Mapping):
+                    diagnostics.append(_document_diagnostic("DOCUMENT_INVALID", candidate_id))
                     continue
-                request = _request(document)
-                if request is None or request.document_version_id in seen_document_versions:
+                validated = _validated_document_request(document)
+                if validated is None:
+                    diagnostics.append(_document_diagnostic("DOCUMENT_INVALID", candidate_id))
                     continue
-                seen_document_versions.add(request.document_version_id)
-                declared.append((str(candidate.get("id", "")), request))
+                request, identity, eligible = validated
+                groups.setdefault(request.document_version_id, []).append(
+                    (candidate_id, request, identity)
+                )
+        declared: list[tuple[str, StructureIndexRequest]] = []
+        for version, variants in groups.items():
+            identities = {variant[2] for variant in variants}
+            if len(identities) != 1:
+                diagnostics.append(_document_diagnostic("DOCUMENT_IDENTITY_CONFLICT", ""))
+                continue
+            candidate_id, request, _ = variants[0]
+            if _request_is_eligible(request, variants[0][2]):
+                declared.append((candidate_id, request))
         refs: list[Mapping[str, Any]] = []
         for candidate_id, request in declared[:3]:
             result = self.structure_index.index(request)
@@ -135,6 +149,8 @@ def _score(candidate: Mapping[str, Any], fields: Mapping[str, Any]) -> tuple[int
     if has_business_evidence and isinstance(hint, str) and _path_matches(hint, candidate):
         score += _WEIGHTS["path_hint"]
         refs.append(_ref(candidate, "path_hint", hint, "declared path hint"))
+    if not has_business_evidence:
+        conflicts = []
     return score, refs, conflicts, has_business_evidence
 
 
@@ -151,16 +167,48 @@ def _redact(value: object) -> str:
     return "***" if len(text) <= 4 else f"***{text[-4:]}"
 
 
-def _needs_index(document: Mapping[str, Any]) -> bool:
-    pages = document.get("page_count", 0)
-    return document.get("requires_structure_index") is True or (isinstance(pages, int) and not isinstance(pages, bool) and pages >= 10)
-
-
-def _request(document: Mapping[str, Any]) -> StructureIndexRequest | None:
-    fields = ("document_version_id", "content_hash", "path", "media_type")
-    if not all(isinstance(document.get(field), str) and document[field] for field in fields):
+def _validated_document_request(document: Mapping[str, Any]) -> tuple[StructureIndexRequest, tuple[object, ...], bool] | None:
+    version, digest, path, media_type = (
+        document.get("document_version_id"),
+        document.get("content_hash"),
+        document.get("path"),
+        document.get("media_type"),
+    )
+    page_count, requires = document.get("page_count", 0), document.get("requires_structure_index", False)
+    if (
+        not _canonical_string(version)
+        or not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None
+        or not _canonical_path(path)
+        or media_type not in {"application/pdf", "text/markdown"}
+        or isinstance(page_count, bool)
+        or not isinstance(page_count, int)
+        or page_count < 0
+        or not isinstance(requires, bool)
+    ):
         return None
-    return StructureIndexRequest(document["document_version_id"], document["content_hash"], document["path"], document["media_type"])
+    request = StructureIndexRequest(version, digest.lower(), str(Path(path).expanduser().resolve()), media_type)
+    identity = (request.content_hash, request.source_path, request.media_type, page_count, requires)
+    return request, identity, requires or page_count >= 10
+
+
+def _canonical_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and value == value.strip()
+
+
+def _canonical_path(value: object) -> bool:
+    return _canonical_string(value) and Path(value).expanduser().is_absolute()
+
+
+def _request_is_eligible(request: StructureIndexRequest, identity: tuple[object, ...]) -> bool:
+    return bool(identity[-1]) or int(identity[-2]) >= 10
+
+
+def _document_diagnostic(reason: str, candidate_id: str) -> dict[str, str]:
+    result = {"code": f"BUSINESS_CONTEXT.{reason}"}
+    if candidate_id:
+        result["candidate_id"] = candidate_id
+    return result
 
 
 def _same(field: str, left: object, right: object) -> bool:
