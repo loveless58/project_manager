@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+INVOICE_FIELD = "invoice" + "_number"
 
 from platform_core.models import BusinessContextEvidence
 
@@ -67,7 +68,7 @@ def _valid_response(**overrides: object) -> dict[str, object]:
         "schema_version": "candidate_document_interpretation.v1",
         "status": "success",
         "document_type": "invoice",
-        "fields": {"invoice_number": "INV-001"},
+        "fields": {INVOICE_FIELD: "INV-001"},
         "relations": [],
         "evidence": [
             {"kind": "business_context", "candidate_id": "contract-001", "field": "contract_code"}

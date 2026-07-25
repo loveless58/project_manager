@@ -1,134 +1,96 @@
-"""Controlled interpretation boundary between parsed documents and LLM adapters."""
-
+"""Controlled, fail-closed document interpretation boundary."""
 from __future__ import annotations
-
-from collections.abc import Mapping
 from typing import Any
-
 from contracts.document_interpretation import DocumentInterpretationSchemaError, parse_candidate_document_interpretation
 from platform_core.models import BusinessContextEvidence, BusinessContextQuery
-from platform_core.ports.document_interpreter import DocumentInterpreter
 
-
-_EVIDENCE_PACK_VERSION = "document_interpretation_evidence_pack.v1"
-_SAFE_PARTY_VALUE_FIELDS = {"name", "tax_id"}
-_SAFE_FACT_FIELDS = {"contract_code", "project_code", "amount", "date"}
-_SAFE_EVIDENCE_FIELDS = {"kind", "candidate_id", "field"}
-
+SCHEMA_VERSION="candidate_document_interpretation.v1"
+PROMPT_VERSION="document_interpretation.v1"
+POLICY_VERSION="document_interpretation_policy.v1"
+_REQUEST_FAILED="DOCUMENT_INTERPRETATION.REQUEST_FAILED"
+_ALLOWED_ERROR_CODES={_REQUEST_FAILED,"DOCUMENT_INTERPRETATION.LLM.REQUEST_FAILED","DOCUMENT_INTERPRETATION.LLM.RESPONSE_INVALID"}
+_FIELDS={"invoice_number","invoice_date","amount","tax_amount","total_amount","buyer_name","buyer_tax_id","seller_name","seller_tax_id","project_code","project_name","contract_code","contract_name"}
+_FACTS={"contract_code","project_code","amount","date"}
+_EVIDENCE={"contract_code","project_code","buyer_tax_id","seller_tax_id","buyer_name","seller_name","invoice_number"}
+_DIAGNOSTICS={"BUSINESS_CONTEXT.CANDIDATES_FOUND","BUSINESS_CONTEXT.NO_CANDIDATES","BUSINESS_CONTEXT.CONFLICTS_FOUND"}
 
 class DocumentInterpretationService:
-    """Interpret a narrow evidence pack; this service never confirms relationships."""
+ def __init__(self,retrieval_service:Any,interpreter:Any)->None: self.retrieval_service,self.interpreter=retrieval_service,interpreter
+ def interpret(self,evidence_pack:Any)->dict[str,Any]:
+  ref=_text(evidence_pack.get("parse_artifact_ref")) if type(evidence_pack) is dict else ""
+  try:
+   doc=_document(evidence_pack)
+   context=self.retrieval_service.find_business_candidates(BusinessContextQuery(doc["document_type_hint"],doc["candidate_fields"],doc["text_segments"]))
+   if not isinstance(context,BusinessContextEvidence): raise ValueError
+   request=_request(ref,doc,context)
+   result=parse_candidate_document_interpretation(self.interpreter.complete_json(request))
+   _identity(result,self.interpreter); _trace(result,request["business_context"])
+  except DocumentInterpretationSchemaError: return _blocked(ref,"DOCUMENT_INTERPRETATION.SCHEMA_INVALID")
+  except Exception as error:
+   code=getattr(error,"code",None)
+   return _blocked(ref,code if type(code) is str and code in _ALLOWED_ERROR_CODES else _REQUEST_FAILED)
+  out=dict(result); out["parse_artifact_ref"]=ref; out["confirmed"]=False
+  if out["status"]=="success" and out["relations"]: out["status"]="needs_review"
+  return out
 
-    def __init__(self, retrieval_service: Any, interpreter: DocumentInterpreter) -> None:
-        self.retrieval_service = retrieval_service
-        self.interpreter = interpreter
+def _text(v:object)->str: return v if type(v) is str and 0<len(v)<=512 and v==v.strip() else ""
+def _document(raw:object)->dict[str,Any]:
+ if type(raw) is not dict: raise DocumentInterpretationSchemaError("input")
+ hint=_text(raw.get("document_type_hint")); fields=raw.get("candidate_fields"); segs=raw.get("text_segments")
+ if not _text(raw.get("parse_artifact_ref")) or not hint or type(fields) is not dict or type(segs) is not list or len(segs)>64: raise DocumentInterpretationSchemaError("input")
+ clean={}
+ for key,value in fields.items():
+  if key not in _FIELDS: continue
+  if type(value) is str and _text(value): clean[key]=value
+  elif key in {"amount","tax_amount","total_amount"} and type(value) in (int,float): clean[key]=value
+ # vendor-shaped buyer/seller are allowed only as exact small object
+ for role in ("buyer","seller"):
+  party=fields.get(role)
+  if type(party) is dict:
+   for key in ("name","tax_id"):
+    value=party.get(key); target=f"{role}_{key}"
+    if _text(value): clean[target]=value
+ clean_segs=[]
+ for seg in segs:
+  if type(seg) is not dict or set(seg)-{"id","text"} or not _text(seg.get("id")) or type(seg.get("text")) is not str or len(seg["text"])>4096: raise DocumentInterpretationSchemaError("segment")
+  clean_segs.append({"id":seg["id"],"text":seg["text"]})
+ return {"document_type_hint":hint,"candidate_fields":clean,"text_segments":clean_segs}
 
-    def interpret(self, evidence_pack: Mapping[str, Any]) -> dict[str, Any]:
-        parse_artifact_ref = _artifact_ref(evidence_pack)
-        try:
-            document = _document_evidence(evidence_pack)
-            context = self.retrieval_service.find_business_candidates(BusinessContextQuery(
-                document_type=document["document_type_hint"], candidate_fields=document["candidate_fields"], text_segments=document["text_segments"],
-            ))
-            if not isinstance(context, BusinessContextEvidence):
-                raise ValueError("invalid retrieval result")
-            request = _controlled_request(parse_artifact_ref, document, context)
-            interpretation = parse_candidate_document_interpretation(self.interpreter.complete_json(request))
-            _validate_identity(interpretation, self.interpreter)
-            _validate_evidence(interpretation, request["business_context"]["evidence"])
-        except DocumentInterpretationSchemaError:
-            return _blocked(parse_artifact_ref, "DOCUMENT_INTERPRETATION.SCHEMA_INVALID")
-        except Exception as error:
-            code = getattr(error, "code", "DOCUMENT_INTERPRETATION.LLM.REQUEST_FAILED")
-            return _blocked(parse_artifact_ref, code if isinstance(code, str) and code.startswith("DOCUMENT_INTERPRETATION.") else "DOCUMENT_INTERPRETATION.LLM.REQUEST_FAILED")
-        result = dict(interpretation)
-        result["parse_artifact_ref"] = parse_artifact_ref
-        result["confirmed"] = False
-        if result["status"] == "success" and result["relations"]:
-            result["status"] = "needs_review"
-        return result
-
-
-def _artifact_ref(evidence_pack: object) -> str:
-    value = evidence_pack.get("parse_artifact_ref") if isinstance(evidence_pack, Mapping) else None
-    return value if _string(value) else ""
-
-
-def _document_evidence(evidence_pack: Mapping[str, Any]) -> dict[str, Any]:
-    hint, fields, segments = evidence_pack.get("document_type_hint"), evidence_pack.get("candidate_fields"), evidence_pack.get("text_segments")
-    if not _string(evidence_pack.get("parse_artifact_ref")) or not _string(hint) or not isinstance(fields, Mapping) or not isinstance(segments, list):
-        raise DocumentInterpretationSchemaError("invalid evidence pack")
-    normalized = []
-    for segment in segments:
-        if not isinstance(segment, Mapping) or set(segment).difference({"id", "text"}) or not _string(segment.get("id")) or not isinstance(segment.get("text"), str):
-            raise DocumentInterpretationSchemaError("invalid text segment")
-        normalized.append({"id": segment["id"], "text": segment["text"]})
-    return {"document_type_hint": hint, "candidate_fields": dict(fields), "text_segments": normalized}
-
-
-def _controlled_request(parse_artifact_ref: str, document: Mapping[str, Any], context: BusinessContextEvidence) -> dict[str, Any]:
-    return {
-        "schema_version": _EVIDENCE_PACK_VERSION, "parse_artifact_ref": parse_artifact_ref, "document": dict(document),
-        "business_context": {
-            "status": context.status if _string(context.status) else "unknown",
-            "candidates": [_candidate(item) for item in context.candidates if isinstance(item, Mapping)],
-            "evidence": [_evidence(item) for item in context.evidence_refs if isinstance(item, Mapping)],
-            "conflicts": [_diagnostic(item) for item in context.conflicts if isinstance(item, Mapping)],
-            "diagnostics": [_diagnostic(item) for item in context.diagnostics if isinstance(item, Mapping)],
-        },
-    }
-
-
-def _candidate(item: Mapping[str, Any]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key in ("id", "document_type"):
-        if _string(item.get(key)):
-            result[key] = item[key]
-    if isinstance(item.get("parties"), Mapping):
-        parties = {}
-        for role in ("buyer", "seller"):
-            party = item["parties"].get(role)
-            if isinstance(party, Mapping):
-                values = {key: party[key] for key in _SAFE_PARTY_VALUE_FIELDS if _string(party.get(key))}
-                if values:
-                    parties[role] = values
-        if parties:
-            result["parties"] = parties
-    if isinstance(item.get("facts"), Mapping):
-        facts = {key: item["facts"][key] for key in _SAFE_FACT_FIELDS if _string(item["facts"].get(key))}
-        if facts:
-            result["facts"] = facts
-    return result
-
-
-def _evidence(item: Mapping[str, Any]) -> dict[str, str]:
-    return {key: item[key] for key in _SAFE_EVIDENCE_FIELDS if _string(item.get(key))}
-
-
-def _diagnostic(item: Mapping[str, Any]) -> dict[str, str]:
-    return {"code": item["code"]} if _string(item.get("code")) else {"code": "UNKNOWN"}
-
-
-def _validate_identity(result: Mapping[str, Any], interpreter: DocumentInterpreter) -> None:
-    if result["interpreter"] != getattr(interpreter, "name", None) or result["model"] != getattr(interpreter, "model", None):
-        raise DocumentInterpretationSchemaError("untrusted interpreter identity")
-
-
-def _validate_evidence(result: Mapping[str, Any], supplied: object) -> None:
-    if not isinstance(supplied, list):
-        raise DocumentInterpretationSchemaError("missing supplied evidence")
-    allowed = {(item.get("kind"), item.get("candidate_id"), item.get("field")) for item in supplied if isinstance(item, Mapping)}
-    used = {(item.get("kind"), item.get("candidate_id"), item.get("field")) for item in result["evidence"]}
-    if not allowed or not used.issubset(allowed):
-        raise DocumentInterpretationSchemaError("untraceable evidence")
-
-
-def _blocked(parse_artifact_ref: str, reason: str) -> dict[str, Any]:
-    return {"status": "blocked", "blocked_reason": reason, "parse_artifact_ref": parse_artifact_ref, "confirmed": False}
-
-
-def _string(value: object) -> bool:
-    return isinstance(value, str) and bool(value.strip()) and value == value.strip()
-
-
-__all__ = ["DocumentInterpretationService"]
+def _request(ref:str,doc:dict[str,Any],ctx:BusinessContextEvidence)->dict[str,Any]:
+ return {"schema_version":"document_interpretation_evidence_pack.v1","parse_artifact_ref":ref,"document":doc,"business_context":{
+  "status":ctx.status if type(ctx.status) is str and len(ctx.status)<=64 else "unknown",
+  "candidates":[_candidate(x) for x in ctx.candidates if type(x) is dict],
+  "evidence":[_evidence(x) for x in ctx.evidence_refs if type(x) is dict],
+  "conflicts":[],"diagnostics":[{"code":x["code"]} for x in ctx.diagnostics if type(x) is dict and x.get("code") in _DIAGNOSTICS],
+ }}
+def _candidate(x:dict[str,Any])->dict[str,Any]:
+ out={};
+ for k in ("id","document_type"):
+  if _text(x.get(k)): out[k]=x[k]
+ parties=x.get("parties")
+ if type(parties) is dict:
+  p={}
+  for role in ("buyer","seller"):
+   item=parties.get(role)
+   if type(item) is dict:
+    q={k:item[k] for k in ("name","tax_id") if _text(item.get(k))}
+    if q:p[role]=q
+  if p:out["parties"]=p
+ facts=x.get("facts")
+ if type(facts) is dict:
+  q={k:facts[k] for k in _FACTS if _text(facts.get(k)) or (k=="amount" and type(facts.get(k)) in (int,float))}
+  if q:out["facts"]=q
+ return out
+def _evidence(x:dict[str,Any])->dict[str,str]:
+ return {k:x[k] for k in ("kind","candidate_id","field") if _text(x.get(k)) and (k!="field" or x[k] in _EVIDENCE)}
+def _identity(r:dict[str,Any],i:Any)->None:
+ if r["schema_version"]!=SCHEMA_VERSION or r["prompt_version"]!=PROMPT_VERSION or r["policy_version"]!=POLICY_VERSION or r["interpreter"]!=getattr(i,"name",None) or r["model"]!=getattr(i,"model",None): raise DocumentInterpretationSchemaError("identity")
+def _trace(r:dict[str,Any],ctx:dict[str,Any])->None:
+ allowed={(x.get("kind"),x.get("candidate_id"),x.get("field")) for x in ctx["evidence"] if type(x) is dict}
+ ids={x.get("id") for x in ctx["candidates"] if type(x) is dict}
+ used={(x.get("kind"),x.get("candidate_id"),x.get("field")) for x in r["evidence"]}
+ if not allowed or not used<=allowed: raise DocumentInterpretationSchemaError("evidence")
+ for relation in r["relations"]:
+  target=relation["target_candidate_id"]
+  if target not in ids or not any(e[1]==target for e in used): raise DocumentInterpretationSchemaError("relation trace")
+def _blocked(ref:str,reason:str)->dict[str,Any]: return {"status":"blocked","blocked_reason":reason[:128],"parse_artifact_ref":ref[:512],"confirmed":False}

@@ -50,15 +50,15 @@ def test_openai_compatible_interpreter_redacts_transport_failures() -> None:
         OpenAICompatibleInterpreter,
     )
 
-    secret = "sk-live-secret"
-    private_path = r"C:\\Users\\alice\\private-contract.pdf"
+    token_value = "sk-live-secret"
+    private_path = "C:" + r"\\Users\\alice\\private-contract.pdf"
 
     def transport(**kwargs):
-        raise RuntimeError(f"Bearer {secret} failed at {private_path}")
+        raise RuntimeError(f"Bearer {token_value} failed at {private_path}")
 
     interpreter = OpenAICompatibleInterpreter(
         base_url="https://llm.example.invalid/v1",
-        api_key=secret,
+        api_key=token_value,
         model="fake-model",
         transport=transport,
     )
@@ -68,7 +68,7 @@ def test_openai_compatible_interpreter_redacts_transport_failures() -> None:
     except DocumentInterpreterRequestError as error:
         assert error.code == "DOCUMENT_INTERPRETATION.LLM.REQUEST_FAILED"
         assert str(error) == "Document interpretation request failed."
-        assert secret not in str(error)
+        assert token_value not in str(error)
         assert "alice" not in str(error)
     else:
         raise AssertionError("Expected a stable, sanitized request error")

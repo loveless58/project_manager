@@ -1,154 +1,112 @@
-"""Fail-closed contract for ``candidate_document_interpretation.v1``."""
-
+"""Fail-closed contract for candidate_document_interpretation.v1."""
 from __future__ import annotations
-
-from collections.abc import Mapping, Sequence
 import json
 import math
+import re
 from typing import Any
 
-
 DOCUMENT_INTERPRETATION_SCHEMA_VERSION = "candidate_document_interpretation.v1"
-_MAX_RESPONSE_BYTES = 32_000
-_ROOT_FIELDS = {
-    "schema_version", "status", "document_type", "fields", "relations", "evidence",
-    "confidence", "interpreter", "model", "prompt_version", "policy_version", "blocked_reason",
+MAX_RESPONSE_BYTES, MAX_DEPTH, MAX_NODES, MAX_ARRAY, MAX_STRING = 32_000, 32, 2_048, 256, 512
+_ROOT = {"schema_version","status","document_type","fields","relations","evidence","confidence","interpreter","model","prompt_version","policy_version","blocked_reason"}
+_STATUSES = {"success","needs_review","blocked"}
+_DOCUMENT_TYPES = {"invoice","project","contract","bid","tender","other"}
+_FIELD_TYPES = {
+ "invoice_number":str,"invoice_date":str,"amount":(int,float),"tax_amount":(int,float),"total_amount":(int,float),
+ "buyer_name":str,"buyer_tax_id":str,"seller_name":str,"seller_tax_id":str,
+ "project_code":str,"project_name":str,"contract_code":str,"contract_name":str,
 }
-_EVIDENCE_FIELDS = {"kind", "candidate_id", "field"}
-_RELATION_FIELDS = {"relation_type", "target_candidate_id"}
-_STATUSES = {"success", "needs_review", "blocked"}
-
+_RELATION_TYPES = {"invoice_contract","invoice_project","contract_project"}
+_EVIDENCE_FIELDS = {"contract_code","project_code","buyer_tax_id","seller_tax_id","buyer_name","seller_name","invoice_number"}
+_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 class DocumentInterpretationSchemaError(ValueError):
-    """Raised when a model response does not satisfy the public contract."""
-
+    """Public fail-closed schema error."""
 
 def parse_candidate_document_interpretation(payload: object) -> dict[str, Any]:
-    """Parse a complete JSON response, rejecting duplicate keys and extensions."""
-    decoded = _decode(payload)
-    _validate_response_size(decoded)
-    _validate_value(decoded)
-    root = _mapping(decoded)
-    _only(root, _ROOT_FIELDS)
-    _required(root, _ROOT_FIELDS - {"blocked_reason"})
-    if root["schema_version"] != DOCUMENT_INTERPRETATION_SCHEMA_VERSION:
-        raise DocumentInterpretationSchemaError("unsupported schema version")
-    if root["status"] not in _STATUSES:
-        raise DocumentInterpretationSchemaError("invalid status")
-    if not _string(root["document_type"]):
-        raise DocumentInterpretationSchemaError("invalid document type")
-    _fields(root["fields"])
-    _relations(root["relations"])
-    _evidence(root["evidence"])
-    _confidence(root["confidence"])
-    for key in ("interpreter", "model", "prompt_version", "policy_version"):
-        if not _string(root[key]):
-            raise DocumentInterpretationSchemaError(f"invalid {key}")
-    if root["status"] == "blocked":
-        if not _string(root.get("blocked_reason")):
-            raise DocumentInterpretationSchemaError("blocked status requires a reason")
-    elif "blocked_reason" in root:
-        raise DocumentInterpretationSchemaError("non-blocked status cannot include a reason")
-    return dict(root)
-
+    try:
+        value = _decode(payload)
+        _tree(value)
+        if type(value) is not dict: raise DocumentInterpretationSchemaError("root")
+        _only(value, _ROOT); _required(value, _ROOT-{"blocked_reason"})
+        if value["schema_version"] != DOCUMENT_INTERPRETATION_SCHEMA_VERSION: raise DocumentInterpretationSchemaError("version")
+        if type(value["status"]) is not str or value["status"] not in _STATUSES: raise DocumentInterpretationSchemaError("status")
+        if type(value["document_type"]) is not str or value["document_type"] not in _DOCUMENT_TYPES: raise DocumentInterpretationSchemaError("document type")
+        _fields(value["fields"]); _relations(value["relations"]); _evidence(value["evidence"])
+        confidence=value["confidence"]
+        if type(confidence) not in (int,float) or not math.isfinite(confidence) or not 0 <= confidence <= 1: raise DocumentInterpretationSchemaError("confidence")
+        for key in ("interpreter","model","prompt_version","policy_version"):
+            if not _text(value[key]): raise DocumentInterpretationSchemaError(key)
+        if value["status"] == "blocked":
+            if not _text(value.get("blocked_reason")): raise DocumentInterpretationSchemaError("blocked")
+        elif "blocked_reason" in value: raise DocumentInterpretationSchemaError("blocked reason")
+        return value
+    except DocumentInterpretationSchemaError: raise
+    except Exception as error: raise DocumentInterpretationSchemaError("invalid interpretation") from None
 
 def _decode(payload: object) -> object:
-    if isinstance(payload, str):
-        try:
-            return json.loads(payload, object_pairs_hook=_without_duplicate_keys, parse_constant=_reject_non_finite)
-        except (TypeError, ValueError, json.JSONDecodeError) as error:
-            raise DocumentInterpretationSchemaError("invalid JSON response") from error
+    if type(payload) is str:
+        if len(payload.encode("utf-8")) > MAX_RESPONSE_BYTES: raise DocumentInterpretationSchemaError("size")
+        try: return json.loads(payload, object_pairs_hook=_pairs, parse_constant=lambda _: (_ for _ in ()).throw(DocumentInterpretationSchemaError("nonfinite")))
+        except DocumentInterpretationSchemaError: raise
+        except Exception: raise DocumentInterpretationSchemaError("json") from None
     return payload
 
-def _validate_response_size(value: object) -> None:
-    try:
-        serialized = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
-    except (TypeError, ValueError) as error:
-        raise DocumentInterpretationSchemaError("non-JSON response") from error
-    if len(serialized.encode("utf-8")) > _MAX_RESPONSE_BYTES:
-        raise DocumentInterpretationSchemaError("response exceeds the safe size limit")
+def _pairs(pairs: list[tuple[str,object]]) -> dict[str,object]:
+    out={}
+    for key,value in pairs:
+        if key in out: raise DocumentInterpretationSchemaError("duplicate")
+        out[key]=value
+    return out
 
+def _tree(root: object) -> None:
+    stack=[(root,1)]; nodes=0; bytes_=0
+    while stack:
+        value,depth=stack.pop(); nodes+=1
+        if nodes > MAX_NODES or depth > MAX_DEPTH: raise DocumentInterpretationSchemaError("tree limit")
+        if type(value) is str:
+            if len(value)>MAX_STRING: raise DocumentInterpretationSchemaError("string limit")
+            bytes_+=len(value.encode("utf-8"))
+        elif type(value) in (int,bool) or value is None: pass
+        elif type(value) is float:
+            if not math.isfinite(value): raise DocumentInterpretationSchemaError("nonfinite")
+        elif type(value) is list:
+            if len(value)>MAX_ARRAY: raise DocumentInterpretationSchemaError("array limit")
+            stack.extend((child,depth+1) for child in value)
+        elif type(value) is dict:
+            if len(value)>MAX_ARRAY: raise DocumentInterpretationSchemaError("object limit")
+            for key,child in value.items():
+                if type(key) is not str: raise DocumentInterpretationSchemaError("key")
+                stack.append((key,depth+1)); stack.append((child,depth+1))
+        else: raise DocumentInterpretationSchemaError("non-json type")
+        if bytes_ > MAX_RESPONSE_BYTES: raise DocumentInterpretationSchemaError("size")
 
+def _only(value: dict[str,Any], allowed:set[str]) -> None:
+    if set(value)-allowed: raise DocumentInterpretationSchemaError("unknown field")
+def _required(value:dict[str,Any], required:set[str]) -> None:
+    if not required <= set(value): raise DocumentInterpretationSchemaError("missing field")
+def _text(value:object) -> bool:
+    return type(value) is str and 0 < len(value) <= MAX_STRING and value == value.strip()
+def _id(value:object) -> bool: return _text(value) and bool(_ID.fullmatch(value))
 
-def _without_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise DocumentInterpretationSchemaError("duplicate JSON key")
-        result[key] = value
-    return result
+def _fields(value:object) -> None:
+    if type(value) is not dict: raise DocumentInterpretationSchemaError("fields")
+    _only(value,set(_FIELD_TYPES))
+    for key,item in value.items():
+        allowed=_FIELD_TYPES[key]
+        if allowed is str:
+            if not _text(item): raise DocumentInterpretationSchemaError("field")
+        elif type(item) not in allowed or not math.isfinite(item): raise DocumentInterpretationSchemaError("field")
 
+def _relations(value:object) -> None:
+    if type(value) is not list: raise DocumentInterpretationSchemaError("relations")
+    for item in value:
+        if type(item) is not dict: raise DocumentInterpretationSchemaError("relation")
+        _only(item,{"relation_type","target_candidate_id"}); _required(item,{"relation_type","target_candidate_id"})
+        if type(item["relation_type"]) is not str or item["relation_type"] not in _RELATION_TYPES or not _id(item["target_candidate_id"]): raise DocumentInterpretationSchemaError("relation")
 
-def _reject_non_finite(value: str) -> None:
-    raise DocumentInterpretationSchemaError(f"non-finite number: {value}")
-
-
-def _validate_value(value: object) -> None:
-    if isinstance(value, float) and not math.isfinite(value):
-        raise DocumentInterpretationSchemaError("non-finite number")
-    if isinstance(value, Mapping):
-        if not all(isinstance(key, str) for key in value):
-            raise DocumentInterpretationSchemaError("non-string JSON key")
-        for item in value.values():
-            _validate_value(item)
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        for item in value:
-            _validate_value(item)
-
-
-def _mapping(value: object) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise DocumentInterpretationSchemaError("expected object")
-    return value
-
-
-def _only(value: Mapping[str, Any], allowed: set[str]) -> None:
-    if set(value).difference(allowed):
-        raise DocumentInterpretationSchemaError("unknown field")
-
-
-def _required(value: Mapping[str, Any], required: set[str]) -> None:
-    if not required.issubset(value):
-        raise DocumentInterpretationSchemaError("missing required field")
-
-
-def _string(value: object) -> bool:
-    return isinstance(value, str) and bool(value.strip()) and value == value.strip()
-
-
-def _fields(value: object) -> None:
-    fields = _mapping(value)
-    if not all(isinstance(key, str) and key.strip() == key for key in fields):
-        raise DocumentInterpretationSchemaError("invalid field name")
-
-
-def _relations(value: object) -> None:
-    if not isinstance(value, list):
-        raise DocumentInterpretationSchemaError("relations must be an array")
-    for relation in value:
-        item = _mapping(relation)
-        _only(item, _RELATION_FIELDS)
-        _required(item, _RELATION_FIELDS)
-        if not all(_string(item[key]) for key in _RELATION_FIELDS):
-            raise DocumentInterpretationSchemaError("invalid relation")
-
-
-def _evidence(value: object) -> None:
-    if not isinstance(value, list) or not value:
-        raise DocumentInterpretationSchemaError("evidence is required")
-    for evidence in value:
-        item = _mapping(evidence)
-        _only(item, _EVIDENCE_FIELDS)
-        _required(item, _EVIDENCE_FIELDS)
-        if not all(_string(item[key]) for key in _EVIDENCE_FIELDS):
-            raise DocumentInterpretationSchemaError("invalid evidence")
-
-
-def _confidence(value: object) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise DocumentInterpretationSchemaError("invalid confidence")
-    if not math.isfinite(value) or not 0.0 <= value <= 1.0:
-        raise DocumentInterpretationSchemaError("confidence out of range")
-
-
-__all__ = ["DOCUMENT_INTERPRETATION_SCHEMA_VERSION", "DocumentInterpretationSchemaError", "parse_candidate_document_interpretation"]
+def _evidence(value:object) -> None:
+    if type(value) is not list or not value: raise DocumentInterpretationSchemaError("evidence")
+    for item in value:
+        if type(item) is not dict: raise DocumentInterpretationSchemaError("evidence")
+        _only(item,{"kind","candidate_id","field"}); _required(item,{"kind","candidate_id","field"})
+        if item["kind"]!="business_context" or not _id(item["candidate_id"]) or item["field"] not in _EVIDENCE_FIELDS: raise DocumentInterpretationSchemaError("evidence")

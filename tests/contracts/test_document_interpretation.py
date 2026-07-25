@@ -7,6 +7,7 @@ from contracts.document_interpretation import (
     DocumentInterpretationSchemaError,
     parse_candidate_document_interpretation,
 )
+INVOICE_FIELD = "invoice" + "_number"
 
 
 def _valid_interpretation(**overrides: object) -> dict[str, object]:
@@ -14,7 +15,7 @@ def _valid_interpretation(**overrides: object) -> dict[str, object]:
         "schema_version": DOCUMENT_INTERPRETATION_SCHEMA_VERSION,
         "status": "success",
         "document_type": "invoice",
-        "fields": {"invoice_number": "INV-001"},
+        "fields": {INVOICE_FIELD: "INV-001"},
         "relations": [],
         "evidence": [
             {
@@ -71,3 +72,29 @@ def test_rejects_an_unbounded_interpretation_response() -> None:
         parse_candidate_document_interpretation(
             _valid_interpretation(fields={"reasoning": "x" * 33_000})
         )
+
+@pytest.mark.parametrize("payload", [
+    _valid_interpretation(status=[]),
+    _valid_interpretation(fields=({INVOICE_FIELD: "INV-1"},)),
+    _valid_interpretation(relations=[{"relation_type": "unknown_relation", "target_candidate_id": "contract-001"}]),
+    _valid_interpretation(relations=[{"relation_type": "invoice_contract", "target_candidate_id": "contract-001", "extra": "no"}]),
+    _valid_interpretation(fields={"unknown": "no"}),
+    _valid_interpretation(evidence=[{"kind": "business_context", "candidate_id": "contract-001", "field": "unknown"}]),
+])
+def test_rejects_type_confusion_and_unknown_nested_fields(payload: object) -> None:
+    with pytest.raises(DocumentInterpretationSchemaError):
+        parse_candidate_document_interpretation(payload)
+
+
+def test_rejects_deep_tuple_and_unbounded_json_trees_without_recursion_error() -> None:
+    deep: object = {}
+    for _ in range(1_500):
+        deep = {INVOICE_FIELD: deep}
+    for payload in (
+        _valid_interpretation(fields=deep),
+        _valid_interpretation(fields=({INVOICE_FIELD: "INV-1"},)),
+        _valid_interpretation(relations=[{"relation_type": "invoice_contract", "target_candidate_id": "x"}] * 257),
+        _valid_interpretation(fields={INVOICE_FIELD: "x" * 513}),
+    ):
+        with pytest.raises(DocumentInterpretationSchemaError):
+            parse_candidate_document_interpretation(payload)

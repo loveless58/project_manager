@@ -24,6 +24,9 @@ class DocumentInterpreterRequestError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__("Document interpretation request failed.")
+    schema_version = "candidate_document_interpretation.v1"
+    prompt_version = "document_interpretation.v1"
+    policy_version = "document_interpretation_policy.v1"
 
 
 class OpenAICompatibleInterpreter:
