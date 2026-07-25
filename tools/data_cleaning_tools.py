@@ -21,6 +21,9 @@ import json
 import shutil
 import hashlib
 import re
+import stat
+import tempfile
+import uuid
 import html
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -36,6 +39,15 @@ from business_rules.field_quality import filter_business_facts
 from business_rules.invoice_fields import extract_invoice_fields
 from business_rules.semantic_document import DocumentClassification, apply_semantic_guardrail, normalize_document_classification, normalize_semantic_response
 from contracts.archive_intent import ArchiveIntent
+from contracts.archive_run_artifacts import (
+    normalize_business_context,
+    normalize_interpretation_output,
+    strict_json_load,
+    validate_archive_action,
+    validate_archive_intent,
+    validate_candidate_interpretation,
+    validate_task5_collection_artifact,
+)
 from contracts.feedback_schema import (
     FeedbackValidationError,
     build_parser_test_candidates,
@@ -1415,12 +1427,8 @@ class DataCleaningTools:
 
     @staticmethod
     def _retrieval_payload(context: BusinessContextEvidence) -> Dict[str, Any]:
-        return {
-            "status": context.status,
-            "candidate_ids": [str(item.get("id", "")) for item in context.candidates if isinstance(item, dict)],
-            "conflicts": list(context.conflicts),
-            "diagnostics": list(context.diagnostics),
-        }
+        _, payload = normalize_business_context(context)
+        return payload
 
     @staticmethod
     def _business_relation(interpretation: Dict[str, Any]) -> Dict[str, str]:
@@ -1453,17 +1461,14 @@ class DataCleaningTools:
         if hasattr(service, "interpreter"):
             return DocumentInterpretationService(FixedRetrieval(), service.interpreter).interpret(evidence_pack)
         result = service.interpret(evidence_pack)
-        if not isinstance(result, dict):
-            return {
-                "status": "blocked",
-                "blocked_reason": "DOCUMENT_INTERPRETATION.SCHEMA_INVALID",
-                "parse_artifact_ref": evidence_pack["parse_artifact_ref"],
-                "confirmed": False,
-            }
-        result = dict(result)
-        result.setdefault("parse_artifact_ref", evidence_pack["parse_artifact_ref"])
-        result["confirmed"] = False
-        return result
+        if isinstance(result, dict):
+            result = dict(result)
+            result.setdefault("parse_artifact_ref", evidence_pack["parse_artifact_ref"])
+            result.setdefault("confirmed", False)
+        return normalize_interpretation_output(
+            result,
+            parse_artifact_ref=evidence_pack["parse_artifact_ref"],
+        )
 
     @staticmethod
     def _interpretation_blockers(
@@ -1496,11 +1501,74 @@ class DataCleaningTools:
         blockers.extend(resolution.diagnostics)
         return list(dict.fromkeys(blockers))
 
+    @staticmethod
+    def _source_identity(path: str) -> tuple[int, int, int, int]:
+        details = os.lstat(path)
+        attributes = getattr(details, "st_file_attributes", 0)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if stat.S_ISLNK(details.st_mode) or attributes & reparse_flag:
+            raise ValueError("DOCUMENT_SOURCE.SYMLINK_REJECTED")
+        if not stat.S_ISREG(details.st_mode):
+            raise ValueError("DOCUMENT_SOURCE.NOT_REGULAR")
+        return (
+            details.st_dev, details.st_ino, details.st_size,
+            getattr(details, "st_mtime_ns", int(details.st_mtime * 1_000_000_000)),
+        )
+
+    def _read_source_snapshot(
+        self, path: str, source_ref: Any, run_dir: str,
+    ) -> tuple[str, str, tuple[int, int, int, int]]:
+        if self.document_store_router is None:
+            raise ValueError("DOCUMENT_STORE.CAPABILITY_DISABLED")
+        before = self._source_identity(path)
+        try:
+            with self.document_store_router.open_read(source_ref) as stream:
+                try:
+                    opened = os.fstat(stream.fileno())
+                except (AttributeError, OSError, ValueError):
+                    opened = None
+                if opened is not None and (
+                    opened.st_dev != before[0]
+                    or opened.st_ino != before[1]
+                    or opened.st_size != before[2]
+                ):
+                    raise ValueError("DOCUMENT_SOURCE.REPLACED")
+                content = stream.read(16 * 1024 * 1024 + 1)
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError("DOCUMENT_SOURCE.READ_FAILED") from exc
+        if not isinstance(content, bytes) or len(content) > 16 * 1024 * 1024:
+            raise ValueError("DOCUMENT_SOURCE.SIZE_LIMIT")
+        if self._source_identity(path) != before:
+            raise ValueError("DOCUMENT_SOURCE.REPLACED")
+        content_hash = hashlib.sha256(content).hexdigest()
+        snapshot_dir = os.path.join(run_dir, ".source_snapshots")
+        os.makedirs(snapshot_dir, exist_ok=True)
+        source_name = os.path.basename(path)
+        snapshot_path = os.path.join(snapshot_dir, f"{content_hash[:24]}__{source_name}")
+        descriptor, temporary = tempfile.mkstemp(prefix=".snapshot-", dir=snapshot_dir)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, snapshot_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return snapshot_path, content_hash, before
+
+    def _save_task5_collection(
+        self, output_path: str, payload: Dict[str, Any], *, kind: str, run_id: str,
+    ) -> None:
+        validate_task5_collection_artifact(payload, kind=kind, run_id=run_id)
+        self._save_structured_json(output_path, payload)
+
     def _prepare_interpreted_file_organization_run(self, file_paths: List[str]) -> Dict[str, Any]:
-        run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")
-        run_dir = os.path.join(self.workspace_dir, "runs", run_id)
+        run_id, run_dir = self._claim_archive_intent_run()
         extracted_dir = os.path.join(run_dir, "extracted")
-        os.makedirs(extracted_dir, exist_ok=True)
+        os.makedirs(extracted_dir, exist_ok=False)
         candidate_interpretations: List[Dict[str, Any]] = []
         archive_intents: List[Dict[str, Any]] = []
         archive_actions: List[Dict[str, Any]] = []
@@ -1510,6 +1578,14 @@ class DataCleaningTools:
         manifest_files: List[Dict[str, Any]] = []
 
         for path in file_paths:
+            try:
+                self._source_identity(path)
+            except (OSError, ValueError) as exc:
+                code = str(exc) if isinstance(exc, ValueError) else "DOCUMENT_SOURCE.READ_FAILED"
+                failures.append({"source": os.path.basename(path), "stage": "source_snapshot", "status": "blocked", "blocked_reason": code})
+                archive_actions.append(self._review_only_archive_action(run_id, None, [code]))
+                trace.append({"stage": "source_snapshot", "source": os.path.basename(path), "status": "blocked", "blocked_reason": code})
+                continue
             try:
                 source_ref = self.storage_binding_registry.document_ref_from_path(path)
             except AmbiguousStorageBindingError:
@@ -1526,8 +1602,26 @@ class DataCleaningTools:
                 continue
 
             ref_payload = self._logical_ref_payload(source_ref)
-            manifest_files.append({"source_ref": ref_payload, "name": os.path.basename(path)})
-            extracted = self.extract_document(path)
+            try:
+                snapshot_path, content_hash, source_identity = self._read_source_snapshot(
+                    path, source_ref, run_dir,
+                )
+            except ValueError as exc:
+                code = str(exc)
+                failures.append({"source_ref": ref_payload, "stage": "source_snapshot", "status": "blocked", "blocked_reason": code})
+                archive_actions.append(self._review_only_archive_action(run_id, source_ref, [code]))
+                trace.append({"stage": "source_snapshot", "source_ref": ref_payload, "status": "blocked", "blocked_reason": code})
+                continue
+            extracted = self.extract_document(snapshot_path)
+            try:
+                if self._source_identity(path) != source_identity:
+                    raise ValueError("DOCUMENT_SOURCE.REPLACED")
+            except (OSError, ValueError) as exc:
+                code = str(exc) if isinstance(exc, ValueError) else "DOCUMENT_SOURCE.REPLACED"
+                failures.append({"source_ref": ref_payload, "stage": "source_snapshot", "status": "blocked", "blocked_reason": code})
+                archive_actions.append(self._review_only_archive_action(run_id, source_ref, [code]))
+                trace.append({"stage": "source_snapshot", "source_ref": ref_payload, "status": "blocked", "blocked_reason": code})
+                continue
             if "error" in extracted or extracted.get("status") == "blocked":
                 code = str(extracted.get("blocked_reason") or "DOCUMENT_PARSE.FAILED")
                 failures.append({"source_ref": ref_payload, "stage": "native_parse", "status": "blocked", "blocked_reason": code})
@@ -1535,8 +1629,10 @@ class DataCleaningTools:
                 trace.append({"stage": "native_parse", "source_ref": ref_payload, "status": "blocked", "blocked_reason": code})
                 continue
 
-            with open(path, "rb") as source_stream:
-                content_hash = hashlib.sha256(source_stream.read()).hexdigest()
+            manifest_files.append({
+                "run_id": run_id, "source_ref": ref_payload,
+                "name": os.path.basename(path), "content_hash": content_hash,
+            })
             parse_ref = f"artifact:parsed:{content_hash[:24]}"
             classification = normalize_document_classification(
                 extracted.get("classification"),
@@ -1578,11 +1674,18 @@ class DataCleaningTools:
                     context = BusinessContextEvidence(
                         "blocked", (), (), (), ({"code": "BUSINESS_CONTEXT.NO_CANDIDATES"},),
                     )
+            context, context_payload = normalize_business_context(context)
             interpretation = self._fixed_context_interpretation(self.interpretation_service, evidence_pack, context)
+            interpretation = normalize_interpretation_output(
+                interpretation, parse_artifact_ref=parse_ref,
+            )
             interpretation_entry = dict(interpretation)
+            interpretation_entry["run_id"] = run_id
             interpretation_entry["source_ref"] = ref_payload
-            interpretation_entry["business_context"] = self._retrieval_payload(context)
+            interpretation_entry["content_hash"] = content_hash
+            interpretation_entry["business_context"] = context_payload
             interpretation_entry["business_relation"] = self._business_relation(interpretation)
+            validate_candidate_interpretation(interpretation_entry, run_id)
             candidate_interpretations.append(interpretation_entry)
 
             relations = interpretation.get("relations") if isinstance(interpretation.get("relations"), list) else []
@@ -1609,13 +1712,17 @@ class DataCleaningTools:
             blockers = self._interpretation_blockers(classification, context, interpretation, resolution)
             intent_payload = intent.payload()
             intent_payload.update({
+                "run_id": run_id,
                 "intent_id": f"archive-intent:{content_hash[:24]}",
                 "normalized_status": "blocked" if context.status == "blocked" or interpretation.get("status") == "blocked" else "needs_review",
                 "blockers": blockers,
                 "classification": classification,
             })
+            validate_archive_intent(intent_payload, run_id)
             archive_intents.append(intent_payload)
-            archive_actions.append(self._review_only_archive_action(run_id, source_ref, blockers, intent_payload))
+            action = self._review_only_archive_action(run_id, source_ref, blockers, intent_payload)
+            validate_archive_action(action, run_id)
+            archive_actions.append(action)
             trace.extend([
                 {"stage": "native_parse", "source_ref": ref_payload, "status": "success", "parse_artifact_ref": parse_ref},
                 {"stage": "retrieval", "source_ref": ref_payload, "status": context.status},
@@ -1644,20 +1751,20 @@ class DataCleaningTools:
             "trace": os.path.join(run_dir, "trace.json"),
             "run_dir": run_dir,
         }
-        self._save_structured_json(artifacts["input_manifest"], {
+        self._save_task5_collection(artifacts["input_manifest"], {
             "schema_version": "file_organization.input_manifest.v1", "run_id": run_id, "files": manifest_files,
-        })
-        self._save_structured_json(artifacts["candidate_interpretations"], {
+        }, kind="input_manifest", run_id=run_id)
+        self._save_task5_collection(artifacts["candidate_interpretations"], {
             "schema_version": "candidate_interpretations.v1", "run_id": run_id, "items": candidate_interpretations,
-        })
-        self._save_structured_json(artifacts["archive_intents"], {
+        }, kind="candidate_interpretations", run_id=run_id)
+        self._save_task5_collection(artifacts["archive_intents"], {
             "schema_version": "archive_intents.v1", "run_id": run_id, "items": archive_intents,
-        })
+        }, kind="archive_intents", run_id=run_id)
         self._save_structured_json(artifacts["review_queue"], review_queue)
-        self._save_structured_json(artifacts["planned_archive_actions"], {
+        self._save_task5_collection(artifacts["planned_archive_actions"], {
             "schema_version": "archive_plan.v1", "run_id": run_id,
             "archive_intent_required": True, "actions": archive_actions,
-        })
+        }, kind="planned_archive_actions", run_id=run_id)
         self._save_structured_json(artifacts["trace"], {
             "schema_version": "file_organization.trace.v1", "run_id": run_id, "events": trace,
         })
@@ -2584,15 +2691,119 @@ class DataCleaningTools:
             "artifacts": artifacts,
         }
 
+    @staticmethod
+    def _is_reparse_point(path: str) -> bool:
+        try:
+            details = os.lstat(path)
+        except OSError:
+            return False
+        attributes = getattr(details, "st_file_attributes", 0)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        return stat.S_ISLNK(details.st_mode) or bool(attributes & reparse_flag)
+
+    @staticmethod
+    def _blocked_archive_execution(
+        run_id: str, blocker: str, detail: str = "", *, failed: int = 0,
+    ) -> Dict[str, Any]:
+        gate = {
+            "schema_version": "archive_intent_execution_gate.v1",
+            "status": "blocked",
+            "blockers": [blocker],
+        }
+        if detail:
+            gate["detail"] = detail[:256]
+        return {
+            "schema_version": "archive_plan.execute.v1",
+            "status": "blocked",
+            "run_id": run_id,
+            "moved": 0,
+            "failed": failed,
+            "results": [],
+            "gate": gate,
+        }
+
+    def _runs_root(self) -> Path:
+        return Path(self.workspace_dir).expanduser().resolve() / "runs"
+
+    def _resolve_archive_run_dir(self, run_id: str) -> str:
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", run_id):
+            raise ValueError("run_id must be a bounded ASCII identifier")
+        runs_root = self._runs_root()
+        if self._is_reparse_point(str(runs_root)):
+            raise ValueError("runs root must not be a symlink or reparse point")
+        run_dir = runs_root / run_id
+        if self._is_reparse_point(str(run_dir)):
+            raise ValueError("run directory must not be a symlink or reparse point")
+        resolved = run_dir.resolve()
+        if resolved.parent != runs_root:
+            raise ValueError("run directory escapes workspace/runs")
+        return str(resolved)
+
+    def _intent_registry_path(self, run_id: str) -> Path:
+        return self._runs_root() / ".archive_intent_registry" / f"{run_id}.json"
+
+    def _is_registered_archive_intent_run(self, run_id: str) -> bool:
+        marker = self._intent_registry_path(run_id)
+        registry = marker.parent
+        if self._is_reparse_point(str(registry)) or self._is_reparse_point(str(marker)):
+            return True
+        return marker.is_file()
+
+    def _claim_archive_intent_run(self) -> tuple[str, str]:
+        runs_root = self._runs_root()
+        runs_root.mkdir(parents=True, exist_ok=True)
+        if self._is_reparse_point(str(runs_root)):
+            raise ValueError("runs root must not be a symlink or reparse point")
+        registry = runs_root / ".archive_intent_registry"
+        registry.mkdir(exist_ok=True)
+        if self._is_reparse_point(str(registry)):
+            raise ValueError("archive intent registry must not be a reparse point")
+        while True:
+            run_id = f"run_{uuid.uuid4().hex}"
+            run_dir = runs_root / run_id
+            try:
+                run_dir.mkdir(exist_ok=False)
+            except FileExistsError:
+                continue
+            break
+        self._save_structured_json(str(registry / f"{run_id}.json"), {
+            "schema_version": "archive_intent_run_registration.v1",
+            "run_id": run_id,
+        })
+        return run_id, str(run_dir)
+
     def execute_archive_plan(self, run_id: str, confirmed: bool = False) -> Dict[str, Any]:
-        """Execute a prepared archive plan only after explicit confirmation."""
-        run_dir = os.path.join(self.workspace_dir, "runs", run_id)
+        """Execute only legacy local plans; archive intents are never authorization."""
+        try:
+            run_dir = self._resolve_archive_run_dir(run_id)
+        except ValueError as exc:
+            return self._blocked_archive_execution(str(run_id), "invalid_run_boundary", str(exc))
         plan_path = os.path.join(run_dir, "planned_archive_actions.json")
-        if not os.path.exists(plan_path):
-            return {"error": f"Archive plan not found for run_id: {run_id}"}
-        with open(plan_path, "r", encoding="utf-8") as f:
-            plan = json.load(f)
-        actions = plan.get("actions", [])
+        if not os.path.isfile(plan_path) or self._is_reparse_point(plan_path):
+            return self._blocked_archive_execution(run_id, "archive_plan_not_found")
+        try:
+            plan = self._load_json_file(plan_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return self._blocked_archive_execution(run_id, "archive_plan_invalid", str(exc))
+        actions = plan.get("actions")
+        if plan.get("run_id") != run_id or not isinstance(actions, list) or any(
+            not isinstance(action, dict)
+            or ("run_id" in action and action.get("run_id") != run_id)
+            for action in actions
+        ):
+            return self._blocked_archive_execution(run_id, "archive_plan_run_id_mismatch")
+
+        registered_intent_run = self._is_registered_archive_intent_run(run_id)
+        if re.fullmatch(r"run_[0-9a-f]{32}", run_id) and not registered_intent_run:
+            return self._blocked_archive_execution(run_id, "archive_intent_run_not_registered")
+        strict_intent_plan = registered_intent_run or plan.get("archive_intent_required") is True or any(
+            "archive_intent" in action
+            or "archive_intent_ref" in action
+            or any(str(value).startswith(("STORAGE_BINDING.", "BUSINESS_CONTEXT.", "DOCUMENT_INTERPRETATION.", "ARCHIVE_TARGET.")) for value in action.get("blockers", []))
+            for action in actions
+        )
+        if strict_intent_plan:
+            return self._blocked_archive_execution(run_id, "archive_intent_not_executable", failed=len(actions))
         if not confirmed:
             return {
                 "schema_version": "archive_plan.execute.v1",
@@ -2601,32 +2812,6 @@ class DataCleaningTools:
                 "planned": len(actions),
                 "message": "Archive plan prepared but not executed. Call with confirmed=True to move files.",
             }
-
-        strict_intent_plan = plan.get("archive_intent_required") is True or any(
-            "archive_intent" in action
-            or any(str(value).startswith(("STORAGE_BINDING.", "BUSINESS_CONTEXT.", "DOCUMENT_INTERPRETATION.", "ARCHIVE_TARGET.")) for value in action.get("blockers", []))
-            for action in actions
-        )
-        if strict_intent_plan:
-            unsafe_actions = []
-            for action in actions:
-                intent = action.get("archive_intent")
-                blockers = [str(value) for value in action.get("blockers", [])]
-                if (
-                    action.get("status") not in {"ready", "already_archived"}
-                    or action.get("confirmed") is not True
-                    or not isinstance(intent, dict)
-                    or intent.get("schema_version") != "archive_intent.v1"
-                    or intent.get("destination_status") != "resolved"
-                    or any(value.startswith(("STORAGE_BINDING.", "BUSINESS_CONTEXT.", "DOCUMENT_INTERPRETATION.", "ARCHIVE_TARGET.")) for value in blockers)
-                ):
-                    unsafe_actions.append(action)
-            if unsafe_actions:
-                return {
-                    "schema_version": "archive_plan.execute.v1", "status": "blocked", "run_id": run_id,
-                    "moved": 0, "failed": len(actions), "results": [],
-                    "gate": {"schema_version": "archive_intent_execution_gate.v1", "status": "blocked", "blockers": ["archive_intent_not_executable"]},
-                }
 
         gate = self._evaluate_archive_execution_gate(run_id=run_id, run_dir=run_dir, confirmed=confirmed)
         if gate["status"] != "passed":
@@ -2756,6 +2941,17 @@ class DataCleaningTools:
         review_queue_path = os.path.join(run_dir, "review_queue.json")
         audit_review = self._load_json_file(audit_path) if os.path.exists(audit_path) else {}
         review_queue = self._load_json_file(review_queue_path) if os.path.exists(review_queue_path) else {}
+        if any(
+            payload and payload.get("run_id") != run_id
+            for payload in (audit_review, review_queue)
+        ):
+            return {
+                "schema_version": "archive_execution_gate.v1",
+                "status": "blocked",
+                "run_id": run_id,
+                "blockers": ["artifact_run_id_mismatch"],
+                "pending_required_feedback_items": [],
+            }
         gate = evaluate_archive_execution_gate(
             run_id=run_id,
             confirmed=confirmed,
@@ -3690,15 +3886,25 @@ class DataCleaningTools:
         return safe or "unnamed"
 
     def _save_structured_json(self, output_path: str, data: Dict[str, Any]) -> None:
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        output_dir = os.path.dirname(output_path)
+        os.makedirs(output_dir, exist_ok=True)
+        encoded = json.dumps(
+            data, ensure_ascii=False, indent=2, allow_nan=False,
+        ).encode("utf-8")
+        descriptor, temporary = tempfile.mkstemp(prefix=".artifact-", dir=output_dir)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, output_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     @staticmethod
     def _load_json_file(path: str) -> Dict[str, Any]:
-        with open(path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        return payload if isinstance(payload, dict) else {}
+        return strict_json_load(path)
 
     def classify_document(self, file_path: str) -> Dict:
         """根据文件名/内容分类文档到业务领域"""

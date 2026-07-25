@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
+import math
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -104,8 +108,18 @@ def test_preparation_builds_review_only_interpretation_and_intent_artifacts(tmp_
         archive_target_resolver=ArchiveTargetResolver(registry),
     )
 
-    result = tools.prepare_file_organization_run([str(source)])
+    with patch.object(router, "open_read", wraps=router.open_read) as routed_read:
+        result = tools.prepare_file_organization_run([str(source)])
 
+    assert routed_read.call_count == 1
+    assert re.fullmatch(r"run_[0-9a-f]{32}", result["run_id"])
+    interpretation_item = result["candidate_interpretations"][0]
+    intent_item = result["archive_intents"][0]
+    action_item = result["archive_actions"][0]
+    assert interpretation_item["run_id"] == intent_item["run_id"] == action_item["run_id"] == result["run_id"]
+    assert interpretation_item["source_ref"] == intent_item["source_ref"] == action_item["source_ref"]
+    assert interpretation_item["content_hash"] == intent_item["content_hash"]
+    assert interpretation_item["parse_artifact_ref"].endswith(interpretation_item["content_hash"][:24])
     assert result["candidate_interpretations"][0]["business_relation"]["candidate_contract_id"] == CANDIDATE_ID
     assert result["archive_intents"][0]["schema_version"] == "archive_intent.v1"
     assert result["archive_intents"][0]["destination_status"] == "unresolved"
@@ -169,6 +183,250 @@ def test_nested_binding_ambiguity_stops_before_parse_retrieval_and_interpretatio
     assert result["candidate_interpretations"] == []
     assert result["archive_actions"][0]["status"] == "needs_review"
     assert not list(tmp_path.rglob("archive_result.json"))
+
+
+class ReplacingRouter:
+    def __init__(self, delegate, source: Path) -> None:
+        self.delegate = delegate
+        self.source = source
+        self.calls = 0
+
+    def open_read(self, ref):
+        self.calls += 1
+        with self.delegate.open_read(ref) as stream:
+            snapshot = stream.read()
+        self.source.write_text("replacement", encoding="utf-8")
+        return io.BytesIO(snapshot)
+
+
+class MaliciousInterpretation:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def interpret(self, evidence_pack):
+        return dict(self.payload)
+
+
+def _configured_tools(tmp_path: Path, *, retrieval=None, interpretation=None, router_wrapper=None):
+    from integrations.document_store import DocumentStoreRouter, LocalDocumentStore
+    from services.archive_targets import ArchiveTargetResolver
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = source_root / "contract.md"
+    source.write_text(f"合同\n合同编号：{CONTRACT_CODE}", encoding="utf-8")
+    registry = StorageBindingRegistry([
+        _binding("source", source_root, ("source",)),
+        _binding("archive", tmp_path / "archive", ("archive_target",), readable=False, writable=True),
+    ])
+    router = DocumentStoreRouter(registry, {"source": LocalDocumentStore(source_root)})
+    if router_wrapper is not None:
+        router = router_wrapper(router, source)
+    retrieval = retrieval or StaticRetrieval(_matched_context())
+    tools = DataCleaningTools(
+        workspace_dir=str(tmp_path / "runtime"), storage_binding_registry=registry,
+        document_store_router=router, retrieval_service=retrieval,
+        interpretation_service=interpretation,
+        archive_target_resolver=ArchiveTargetResolver(registry),
+    )
+    return tools, source, retrieval, router
+
+
+@pytest.mark.skipif(not hasattr(Path, "is_symlink"), reason="symlink unavailable")
+def test_source_symlink_is_rejected_before_parse_retrieval_and_interpretation(tmp_path: Path) -> None:
+    target = tmp_path / "target.md"
+    target.write_text("合同", encoding="utf-8")
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = source_root / "contract.md"
+    try:
+        source.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+    retrieval = StaticRetrieval(_matched_context())
+    interpretation = CountingInterpretation()
+    from integrations.document_store import DocumentStoreRouter, LocalDocumentStore
+    from services.archive_targets import ArchiveTargetResolver
+    from tools.data_cleaning_tools import DataCleaningTools
+    registry = StorageBindingRegistry([_binding("source", source_root, ("source",))])
+    tools = DataCleaningTools(
+        workspace_dir=str(tmp_path / "runtime"), storage_binding_registry=registry,
+        document_store_router=DocumentStoreRouter(registry, {"source": LocalDocumentStore(source_root)}),
+        retrieval_service=retrieval, interpretation_service=interpretation,
+        archive_target_resolver=ArchiveTargetResolver(registry),
+    )
+
+    with patch.object(tools, "extract_document", wraps=tools.extract_document) as native_parse:
+        result = tools.prepare_file_organization_run([str(source)])
+
+    assert "DOCUMENT_SOURCE.SYMLINK_REJECTED" in json.dumps(result, ensure_ascii=False)
+    assert native_parse.call_count == retrieval.calls == interpretation.calls == 0
+    assert not result["structured_outputs"]
+
+
+def test_source_replacement_during_single_router_snapshot_fails_closed(tmp_path: Path) -> None:
+    interpretation = CountingInterpretation()
+    tools, source, retrieval, router = _configured_tools(
+        tmp_path, interpretation=interpretation, router_wrapper=ReplacingRouter,
+    )
+
+    with patch.object(tools, "extract_document", wraps=tools.extract_document) as native_parse:
+        result = tools.prepare_file_organization_run([str(source)])
+
+    assert "DOCUMENT_SOURCE.REPLACED" in json.dumps(result, ensure_ascii=False)
+    assert router.calls == 1
+    assert native_parse.call_count == retrieval.calls == interpretation.calls == 0
+    assert not result["structured_outputs"]
+
+
+def test_malicious_interpretation_output_is_rejected_and_not_persisted(tmp_path: Path) -> None:
+    sentinel = "unexpected-field-sentinel"
+    payload = {
+        "schema_version": "candidate_document_interpretation.v1",
+        "status": "success",
+        "document_type": "contract",
+        "fields": {"contract_code": CONTRACT_CODE},
+        "relations": [{"relation_type": "contract_project", "target_candidate_id": CANDIDATE_ID}],
+        "evidence": [{"kind": "business_context", "candidate_id": CANDIDATE_ID, "field": "contract_code"}],
+        "confidence": 0.9,
+        "interpreter": "fake", "model": "fake-model",
+        "prompt_version": "document_interpretation.v1",
+        "policy_version": "document_interpretation_policy.v1",
+        "unknown": sentinel,
+    }
+    tools, source, _, _ = _configured_tools(
+        tmp_path, interpretation=MaliciousInterpretation(payload),
+    )
+
+    result = tools.prepare_file_organization_run([str(source)])
+
+    persisted = Path(result["artifacts"]["candidate_interpretations"]).read_text(encoding="utf-8")
+    assert result["candidate_interpretations"][0]["status"] == "blocked"
+    assert result["candidate_interpretations"][0]["blocked_reason"] == "DOCUMENT_INTERPRETATION.SCHEMA_INVALID"
+    assert sentinel not in persisted
+
+
+def test_malicious_retrieval_diagnostics_are_rejected_and_not_persisted(tmp_path: Path) -> None:
+    unsafe_value = "Bearer" + " " + "-".join(("synthetic", "credential"))
+    context = BusinessContextEvidence(
+        "matched",
+        ({"id": CANDIDATE_ID, "document_type": "contract", "parties": {},
+          "facts": {"contract_code": CONTRACT_CODE}},),
+        ({"kind": "business_context", "candidate_id": CANDIDATE_ID, "field": "contract_code"},),
+        (),
+        ({"code": "BUSINESS_CONTEXT.CANDIDATES_FOUND", "credential": unsafe_value},),
+    )
+    tools, source, _, _ = _configured_tools(
+        tmp_path, retrieval=StaticRetrieval(context), interpretation=MaliciousInterpretation({}),
+    )
+
+    result = tools.prepare_file_organization_run([str(source)])
+
+    all_json = "\n".join(
+        item.read_text(encoding="utf-8") for item in Path(result["artifacts"]["run_dir"]).glob("*.json")
+    )
+    assert result["candidate_interpretations"][0]["business_context"]["status"] == "blocked"
+    assert "BUSINESS_CONTEXT.SCHEMA_INVALID" in all_json
+    assert unsafe_value not in all_json
+
+
+def test_registered_intent_run_cannot_be_downgraded_to_legacy_execution(tmp_path: Path) -> None:
+    tools, source, _, _ = _configured_tools(
+        tmp_path, interpretation=MaliciousInterpretation({}),
+    )
+    prepared = tools.prepare_file_organization_run([str(source)])
+    run_id = prepared["run_id"]
+    run_dir = Path(prepared["artifacts"]["run_dir"])
+    target = tmp_path / "legacy-target" / source.name
+    (run_dir / "planned_archive_actions.json").write_text(json.dumps({
+        "schema_version": "archive_plan.v1",
+        "run_id": run_id,
+        "actions": [{
+            "schema_version": "archive_action.v1", "run_id": run_id,
+            "status": "ready", "source_file": str(source),
+            "target_path": str(target), "blockers": [],
+        }],
+    }), encoding="utf-8")
+
+    result = tools.execute_archive_plan(run_id, confirmed=True)
+
+    assert result["status"] == "blocked"
+    assert result["gate"]["blockers"] == ["archive_intent_not_executable"]
+    assert source.exists()
+    assert not target.exists()
+    assert not (run_dir / "archive_result.json").exists()
+
+
+def test_interpretation_boundary_rejects_nan_deep_and_absolute_path(tmp_path: Path) -> None:
+    from contracts.archive_run_artifacts import normalize_interpretation_output
+
+    base = {
+        "schema_version": "candidate_document_interpretation.v1",
+        "status": "success", "document_type": "contract",
+        "fields": {"contract_code": CONTRACT_CODE},
+        "relations": [{"relation_type": "contract_project", "target_candidate_id": CANDIDATE_ID}],
+        "evidence": [{"kind": "business_context", "candidate_id": CANDIDATE_ID, "field": "contract_code"}],
+        "confidence": 0.9, "interpreter": "fake", "model": "fake-model",
+        "prompt_version": "document_interpretation.v1",
+        "policy_version": "document_interpretation_policy.v1",
+    }
+    deep = value = {}
+    for _ in range(40):
+        value["child"] = {}
+        value = value["child"]
+    variants = []
+    nan_payload = dict(base)
+    nan_payload["confidence"] = float("nan")
+    variants.append(nan_payload)
+    path_payload = dict(base)
+    path_payload["fields"] = {"contract_name": str(tmp_path.resolve())}
+    variants.append(path_payload)
+    deep_payload = dict(base)
+    deep_payload["unexpected"] = deep
+    variants.append(deep_payload)
+
+    for payload in variants:
+        result = normalize_interpretation_output(
+            payload, parse_artifact_ref="artifact:parsed:0123456789abcdef01234567",
+        )
+        assert result["status"] == "blocked"
+        assert result["blocked_reason"] == "DOCUMENT_INTERPRETATION.SCHEMA_INVALID"
+        assert all(not (isinstance(item, float) and not math.isfinite(item)) for item in result.values())
+
+
+def test_task5_collection_schema_rejects_unknown_root_field() -> None:
+    from contracts.archive_run_artifacts import (
+        ArchiveRunArtifactError,
+        validate_task5_collection_artifact,
+    )
+
+    run_id = "run_44444444444444444444444444444444"
+    with pytest.raises(ArchiveRunArtifactError, match="root fields"):
+        validate_task5_collection_artifact(
+            {
+                "schema_version": "candidate_interpretations.v1",
+                "run_id": run_id,
+                "items": [],
+                "unexpected": True,
+            },
+            kind="candidate_interpretations",
+            run_id=run_id,
+        )
+
+
+def test_atomic_json_publish_rejects_nan_without_overwriting_existing_file(tmp_path: Path) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    target = tmp_path / "artifact.json"
+    target.write_text('{"stable":true}', encoding="utf-8")
+    tools = DataCleaningTools(workspace_dir=str(tmp_path / "runtime"))
+
+    with pytest.raises(ValueError):
+        tools._save_structured_json(str(target), {"score": float("nan")})
+
+    assert target.read_text(encoding="utf-8") == '{"stable":true}'
+    assert not list(tmp_path.glob(".artifact-*"))
 
 
 @pytest.mark.parametrize(

@@ -130,16 +130,13 @@ print(json.dumps(result, ensure_ascii=False))
     assert observation["source"] == str(data_workspace / "00-原始文件（待处理）")
 
 
-def test_central_data_cleaning_without_explicit_workspace_has_capability_error(tmp_path):
+def test_central_data_cleaning_without_explicit_workspace_uses_runtime_workspace(tmp_path):
     script = """
+import json
 from main import run
 
-try:
-    run("扫描文件", planner_mode="rule")
-except Exception as exc:
-    print(f"{type(exc).__name__}: {exc}")
-    raise SystemExit(0)
-raise SystemExit("expected legacy workspace capability error")
+result = run("扫描文件", planner_mode="rule")
+print(json.dumps(result, ensure_ascii=False))
 """
 
     completed = subprocess.run(
@@ -153,5 +150,10 @@ raise SystemExit("expected legacy workspace capability error")
     )
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "RuntimeCapabilityError" in completed.stdout
-    assert "PROJECT_MANAGER_BUSINESS_ROOT" in completed.stdout
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    expected = tmp_path / "runtime" / "数据清洗工作台"
+    assert result["status"] == "completed"
+    assert result["metadata"]["data_workspace_dir"] == str(expected)
+    observation = ast.literal_eval(result["rounds"][0]["observation"])
+    assert observation["source"] == str(expected / "00-原始文件（待处理）")
+    assert "PROJECT_MANAGER_BUSINESS_ROOT" not in completed.stdout

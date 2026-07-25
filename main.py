@@ -394,8 +394,11 @@ def run(
     effective_data_workspace_dir = data_workspace_dir
     if active_skill == "data_cleaning_file_organization":
         if effective_data_workspace_dir is None:
-            workspace_config = _resolve_legacy_workspace_for_skill(active_skill, app_settings)
-            effective_data_workspace_dir = str(workspace_config.data_cleaning_workspace)
+            if app_settings.deployment_mode == "central":
+                effective_data_workspace_dir = str(app_settings.runtime_workspace / "数据清洗工作台")
+            else:
+                workspace_config = _resolve_legacy_workspace_for_skill(active_skill, app_settings)
+                effective_data_workspace_dir = str(workspace_config.data_cleaning_workspace)
     else:
         _resolve_legacy_workspace_for_skill(active_skill, app_settings)
 
