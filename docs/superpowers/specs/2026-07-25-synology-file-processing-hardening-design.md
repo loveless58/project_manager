@@ -3,9 +3,9 @@
 ## 1. 背景与目标
 
 2026-07-25 使用仓库中的 `data_cleaning_file_organization` Skill 对
-`E:\SynologyDrive` 的五个真实样本进行了一次隔离、只读试运行。运行包位于
-`C:\tmp\project_manager_synology_pilot_20260725_01`，源文件处理前后 SHA-256
-一致，归档调用停在 `confirmed=False`，没有发生文件移动。
+“受控业务文件源中的五个真实样本”进行了一次隔离、只读试运行。运行包位于
+“受控临时试运行目录”（不记录真实物理路径），源文件处理前后 SHA-256 一致，归档调用
+停在 `confirmed=False`，没有发生文件移动。
 
 试运行验证了 PDF 原生文本、扫描 PDF OCR、候选事实、复核队列、归档计划和
 确认门能够运行，也暴露出以下问题：
@@ -18,7 +18,7 @@
 3. 文件类型、业务归属和归档阶段主要由纯函数判断，没有结合项目账本、合同
    证据、PageIndex 和 LLM 做可审计的业务裁决。
 4. `DataCleaningTools(workspace_dir=...)` 同时改变运行目录和归档根，导致隔离
-   试运行生成指向 `C:\tmp\...\项目文件` 的非生产目标。
+   试运行生成指向“受控临时试运行目录下项目文件子目录”的非生产目标。
 5. 项目内部 PRD 在解析阶段和归档阶段得到不同分类。
 6. `review_queue` 规范化后又追加原始验证异常，生成了空 ID、空问题的反馈项；
    `verification_verdict` 也没有兼容验证产物中的 `overall_verdict`。
@@ -326,7 +326,7 @@ SynologyDrive 只是当前试运行使用的一个业务文件源，不是领域
   "provider": "local_filesystem",
   "node_id": "windows-office-01",
   "logical_root": "business://office-primary/",
-  "physical_root": "E:\\SynologyDrive",
+  "physical_root": "<由执行节点配置的受控业务文件源物理根目录>",
   "roles": ["source", "archive_target"],
   "readable": true,
   "writable": true,
