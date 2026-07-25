@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class ReviewQueueContractTests(unittest.TestCase):
-    def test_known_and_unknown_review_types_cannot_override_decision_policy(self):
+    def test_known_review_types_cannot_override_decision_policy(self):
         from contracts.review_queue_schema import normalize_review_queue
 
         cases = (
@@ -33,12 +33,6 @@ class ReviewQueueContractTests(unittest.TestCase):
                 ["approve", "reject", "edit_target", "defer"],
                 "defer",
             ),
-            (
-                "future_review_type",
-                "rule_exception",
-                ["accept", "reject", "defer"],
-                "defer",
-            ),
         )
         for item_type, feedback_type, allowed, recommended in cases:
             with self.subTest(item_type=item_type):
@@ -53,6 +47,48 @@ class ReviewQueueContractTests(unittest.TestCase):
                 self.assertEqual(item["allowed_decisions"], allowed)
                 self.assertEqual(item["recommended_decision"], recommended)
                 self.assertNotIn("force_ready", item["allowed_decisions"])
+
+    def test_normalize_review_queue_rejects_unregistered_type(self):
+        from contracts.review_queue_schema import normalize_review_queue
+
+        with self.assertRaisesRegex(ValueError, "^unknown_review_item_type$"):
+            normalize_review_queue("run-closed-normalize", [{
+                "type": "future_review_type",
+            }])
+
+    def test_review_policy_rejects_unregistered_type(self):
+        from contracts.review_queue_schema import review_policy_for_type
+
+        with self.assertRaisesRegex(ValueError, "^unknown_review_item_type$"):
+            review_policy_for_type("future_review_type")
+
+    def test_persisted_review_queue_rejects_unregistered_type(self):
+        from contracts.archive_run_artifacts import (
+            ArchiveRunArtifactError,
+            validate_review_queue,
+        )
+
+        run_id = "run-closed-persisted"
+        queue = {
+            "schema_version": "review_queue.v2",
+            "run_id": run_id,
+            "status": "needs_review",
+            "items": [{
+                "id": "R001",
+                "run_id": run_id,
+                "type": "future_review_type",
+                "severity": "unknown",
+                "risk": "P2",
+                "question": "Future review",
+                "feedback_type": "rule_exception",
+                "allowed_decisions": ["accept", "reject", "defer"],
+                "recommended_decision": "defer",
+                "evidence": [],
+            }],
+        }
+
+        with self.assertRaises(ArchiveRunArtifactError):
+            validate_review_queue(queue, run_id)
 
     def test_review_projection_recursively_drops_embedded_sensitive_text(self):
         from contracts.review_queue_schema import normalize_review_queue
@@ -161,6 +197,102 @@ class ReviewQueueContractTests(unittest.TestCase):
             "binding_id": "source",
         })
         self.assertEqual(ref.logical_uri, safe_provider_uri)
+
+    def test_sensitive_scanner_preserves_safe_authority_ports(self):
+        from platform_core.sensitive_text import contains_sensitive_text
+
+        safe_uris = (
+            "https://token:443/docs",
+            "https://key:443/docs",
+            "https://session:8443/docs",
+        )
+
+        self.assertEqual(
+            [contains_sensitive_text(value) for value in safe_uris],
+            [False] * len(safe_uris),
+        )
+
+    def test_sensitive_scanner_rejects_structurally_unsafe_uris(self):
+        from platform_core.sensitive_text import contains_sensitive_text
+
+        unsafe_uris = (
+            "custom://operator@example.invalid/inbox/item.md",
+            "https://operator:synthetic@example.invalid/inbox/item.md",
+            "custom://source/inbox/../private/item.md",
+            "custom://source/inbox/%2e%2e/private/item.md",
+            "custom://source/inbox/%2E%2E%2Fprivate/item.md",
+            "custom:///%25252e%25252e/private/item.md",
+            "custom:///etc/passwd",
+            "custom://source/item?path=/etc/passwd",
+            "custom://source/item#trace=/etc/passwd",
+            "custom://../private",
+            "custom://%2e%2e/private",
+            "custom://%25252e%25252e/private",
+            "custom://server\\share/private",
+            "custom://source/%EF%BC%852e%EF%BC%852e/private",
+            "custom://source/%25EF%25BC%25852e%25EF%25BC%25852e/private",
+        )
+
+        self.assertEqual(
+            [contains_sensitive_text(value) for value in unsafe_uris],
+            [True] * len(unsafe_uris),
+        )
+
+    def test_sensitive_scanner_normalizes_common_secret_mapping_keys(self):
+        from platform_core.sensitive_text import contains_sensitive_text
+
+        sensitive_keys = (
+            "private_key",
+            "auth_token",
+            "id_token",
+            "csrf_token",
+            "db_password",
+            "aws_session_token",
+            "proxy-authorization",
+            "PrivateKey",
+            "authToken",
+            "IDToken",
+            "AWSSessionToken",
+            "XAmzSecurityToken",
+            "proxyAuthorization",
+            "AWS-Session-Token",
+            "ＰＲＯＸＹ－ＡＵＴＨＯＲＩＺＡＴＩＯＮ",
+        )
+
+        self.assertEqual(
+            [contains_sensitive_text({key: "synthetic-value"}) for key in sensitive_keys],
+            [True] * len(sensitive_keys),
+        )
+
+    def test_sensitive_scanner_preserves_compact_compound_key_detection(self):
+        from platform_core.sensitive_text import contains_sensitive_text
+
+        compact_sensitive_keys = (
+            "privatekey",
+            "apikey",
+            "accesstoken",
+            "refreshtoken",
+            "authtoken",
+            "idtoken",
+            "csrftoken",
+            "clientsecret",
+            "dbpassword",
+            "secretaccesskey",
+            "awssessiontoken",
+            "proxyauthorization",
+            "sessionid",
+            "cookievalue",
+            "xamzsecuritytoken",
+            "primaryapikey",
+        )
+        for key in compact_sensitive_keys:
+            with self.subTest(compact_sensitive_key=key):
+                self.assertTrue(contains_sensitive_text({key: "synthetic-value"}))
+
+        for key in ("monkey", "hockey", "keynote", "tokenizer", "sessional"):
+            with self.subTest(non_sensitive_key=key):
+                self.assertFalse(contains_sensitive_text({key: "synthetic-value"}))
+
     def test_review_projection_requires_canonical_bound_document_ref(self):
         from contracts.review_queue_schema import normalize_review_queue
 

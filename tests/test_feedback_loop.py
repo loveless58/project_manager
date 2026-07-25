@@ -212,7 +212,7 @@ class FeedbackLoopTests(unittest.TestCase):
         cases = (
             ("missing", None, False, "feedback_snapshot_hash_required"),
             ("malformed", "not-a-sha256", False, "invalid_feedback_snapshot_hash"),
-            ("stale-queue-status", None, True, "feedback_snapshot_mismatch"),
+            ("stale-queue-status", None, True, "invalid_feedback_review_state"),
         )
         for name, supplied_hash, mutate_status, expected_error in cases:
             with self.subTest(case=name), tempfile.TemporaryDirectory() as td:
@@ -1188,6 +1188,112 @@ class FeedbackLoopTests(unittest.TestCase):
                 }]
                 path.write_text(json.dumps(payload), encoding="utf-8")
 
+            def mutate_queue_extra_pair():
+                path = run_dir / "review_queue.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                item = payload["items"][0]
+                item["feedback_ids"].append("FB-history-extra")
+                item["feedback_decisions"].append("reject")
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            def mutate_queue_wrong_order():
+                path = run_dir / "review_queue.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                item = payload["items"][0]
+                item["feedback_ids"].insert(0, "FB-history-extra")
+                item["feedback_decisions"].insert(0, "reject")
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            def mutate_queue_duplicate_pair():
+                path = run_dir / "review_queue.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                item = payload["items"][0]
+                item["feedback_ids"].append(item["feedback_ids"][0])
+                item["feedback_decisions"].append(item["feedback_decisions"][0])
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            def mutate_queue_feedback_status():
+                path = run_dir / "review_queue.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["items"][0]["feedback_status"] = "pending"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            def mutate_queue_root_status():
+                path = run_dir / "review_queue.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["status"] = "reviewed"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            def mutate_queue_summary_updated():
+                path = run_dir / "review_queue.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["feedback_summary"]["updated"] += 1
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            def mutate_queue_summary_pending():
+                path = run_dir / "review_queue.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["feedback_summary"]["pending"] = []
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            def mutate_queue_summary_updated_at():
+                path = run_dir / "review_queue.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["feedback_summary"]["updated_at"] = "2000-01-01T00:00:00Z"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            def mutate_reviewed_item_updated_at():
+                path = run_dir / "review_queue.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["items"][0]["feedback_updated_at"] = "2000-01-01T00:00:00Z"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            def mutate_unreviewed_item_updated_at():
+                path = run_dir / "review_queue.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["items"][1]["feedback_updated_at"] = "2000-01-01T00:00:00Z"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            def mutate_unreviewed_item_metadata():
+                path = run_dir / "review_queue.json"
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                item = payload["items"][1]
+                item["feedback_status"] = "feedback_received"
+                item["feedback_ids"] = ["FB-history-forged"]
+                item["feedback_decisions"] = ["reject"]
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            def mutate_duplicate_item_history():
+                history_path = run_dir / "human_feedback_decisions.json"
+                history = json.loads(history_path.read_text(encoding="utf-8"))
+                duplicate = json.loads(json.dumps(history["decisions"][0]))
+                duplicate["feedback_id"] = "FB-history-duplicate"
+                history["decisions"].append(duplicate)
+                history_path.write_text(json.dumps(history), encoding="utf-8")
+
+                event_path = run_dir / "feedback_events.jsonl"
+                event = json.loads(event_path.read_text(encoding="utf-8").strip())
+                event["feedback_id"] = duplicate["feedback_id"]
+                event_path.write_text(
+                    event_path.read_text(encoding="utf-8")
+                    + json.dumps(event)
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+                candidates_path = run_dir / "rule_candidates.json"
+                candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
+                candidate = json.loads(json.dumps(candidates["items"][0]))
+                candidate["feedback_id"] = duplicate["feedback_id"]
+                candidates["items"].append(candidate)
+                candidates_path.write_text(json.dumps(candidates), encoding="utf-8")
+
+                queue_path = run_dir / "review_queue.json"
+                queue = json.loads(queue_path.read_text(encoding="utf-8"))
+                queue["items"][0]["feedback_ids"].append(duplicate["feedback_id"])
+                queue["items"][0]["feedback_decisions"].append(duplicate["decision"])
+                queue_path.write_text(json.dumps(queue), encoding="utf-8")
+
             mutations = (
                 ("history_missing_hash", lambda: mutate_history(drop_hash=True)),
                 ("history_resigned_policy", lambda: mutate_history(resign=True)),
@@ -1197,6 +1303,18 @@ class FeedbackLoopTests(unittest.TestCase):
                 ("rule_root", mutate_rule_root),
                 ("rule_status", mutate_rule_status),
                 ("parser_candidate", mutate_parser_candidate),
+                ("queue_extra_pair", mutate_queue_extra_pair),
+                ("queue_wrong_order", mutate_queue_wrong_order),
+                ("queue_duplicate_pair", mutate_queue_duplicate_pair),
+                ("queue_feedback_status", mutate_queue_feedback_status),
+                ("queue_root_status", mutate_queue_root_status),
+                ("queue_summary_updated", mutate_queue_summary_updated),
+                ("queue_summary_pending", mutate_queue_summary_pending),
+                ("queue_summary_updated_at", mutate_queue_summary_updated_at),
+                ("reviewed_item_updated_at", mutate_reviewed_item_updated_at),
+                ("unreviewed_item_updated_at", mutate_unreviewed_item_updated_at),
+                ("unreviewed_item_metadata", mutate_unreviewed_item_metadata),
+                ("duplicate_item_history", mutate_duplicate_item_history),
             )
             for name, mutate in mutations:
                 with self.subTest(case=name):
@@ -1228,6 +1346,139 @@ class FeedbackLoopTests(unittest.TestCase):
                         before,
                     )
                     self.assertEqual(list(run_dir.glob(".feedback-txn-*")), [])
+
+    def test_feedback_rejects_queue_metadata_without_history_before_staging(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            run_id = "run-queue-metadata-without-history"
+            run_dir = Path(td) / "runs" / run_id
+            run_dir.mkdir(parents=True)
+            _register_archive_intent_run(td, run_id)
+            item = _canonical_review_item(run_id, "R001", "archive_decision")
+            item.update({
+                "feedback_status": "feedback_received",
+                "feedback_ids": ["FB-forged-without-history"],
+                "feedback_decisions": ["approve"],
+            })
+            (run_dir / "review_queue.json").write_text(json.dumps({
+                "schema_version": "review_queue.v2",
+                "run_id": run_id,
+                "status": "reviewed",
+                "items": [item],
+            }), encoding="utf-8")
+            artifact_names = (
+                "human_feedback_decisions.json",
+                "feedback_events.jsonl",
+                "rule_candidates.json",
+                "parser_test_candidates.json",
+                "review_queue.json",
+            )
+
+            def snapshot():
+                return {
+                    name: (
+                        (run_dir / name).read_bytes()
+                        if (run_dir / name).exists()
+                        else None
+                    )
+                    for name in artifact_names
+                }
+
+            before = snapshot()
+            result = _apply_bound_feedback(
+                DataCleaningTools(workspace_dir=td),
+                run_id,
+                [{
+                    "feedback_id": "FB-new",
+                    "feedback_type": "archive_decision",
+                    "item_id": "R001",
+                    "decision": "reject",
+                }],
+            )
+
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(
+                result["errors"][0]["error"],
+                "invalid_feedback_review_state",
+            )
+            self.assertEqual(snapshot(), before)
+            self.assertEqual(list(run_dir.glob(".feedback-txn-*")), [])
+
+    def test_feedback_rejects_isolated_queue_metadata_without_history(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        cases = (
+            ("root_status", "reviewed", None, None),
+            (
+                "root_summary",
+                "needs_review",
+                {
+                    "updated": 0,
+                    "pending": ["R001"],
+                    "updated_at": "2000-01-01T00:00:00Z",
+                },
+                None,
+            ),
+            ("item_updated_at", "needs_review", None, "2000-01-01T00:00:00Z"),
+        )
+        for case, status, summary, item_updated_at in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as td:
+                run_id = f"run-isolated-metadata-{case}"
+                run_dir = Path(td) / "runs" / run_id
+                run_dir.mkdir(parents=True)
+                _register_archive_intent_run(td, run_id)
+                item = _canonical_review_item(run_id, "R001", "archive_decision")
+                if item_updated_at is not None:
+                    item["feedback_updated_at"] = item_updated_at
+                queue = {
+                    "schema_version": "review_queue.v2",
+                    "run_id": run_id,
+                    "status": status,
+                    "items": [item],
+                }
+                if summary is not None:
+                    queue["feedback_summary"] = summary
+                queue_path = run_dir / "review_queue.json"
+                queue_path.write_text(json.dumps(queue), encoding="utf-8")
+                artifact_names = (
+                    "human_feedback_decisions.json",
+                    "feedback_events.jsonl",
+                    "rule_candidates.json",
+                    "parser_test_candidates.json",
+                    "review_queue.json",
+                )
+
+                def snapshot():
+                    return {
+                        name: (
+                            (run_dir / name).read_bytes()
+                            if (run_dir / name).exists()
+                            else None
+                        )
+                        for name in artifact_names
+                    }
+
+                before = snapshot()
+                result = _apply_bound_feedback(
+                    DataCleaningTools(workspace_dir=td),
+                    run_id,
+                    [{
+                        "feedback_id": "FB-new",
+                        "feedback_type": "archive_decision",
+                        "item_id": "R001",
+                        "decision": "reject",
+                    }],
+                )
+
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(
+                    result["errors"][0]["error"],
+                    "invalid_feedback_review_state",
+                )
+                self.assertEqual(snapshot(), before)
+                self.assertEqual(list(run_dir.glob(".feedback-txn-*")), [])
+
     def test_feedback_transaction_rolls_back_every_artifact_when_replace_fails(self):
         from contracts.feedback_form_schema import review_item_snapshot_hash
         from tools.data_cleaning_tools import DataCleaningTools

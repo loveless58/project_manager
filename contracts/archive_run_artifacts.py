@@ -277,7 +277,7 @@ def validate_audit_review(payload: dict[str, Any], run_id: str) -> None:
 
 
 def validate_review_queue(payload: dict[str, Any], run_id: str) -> None:
-    from contracts.review_queue_schema import review_policy_for_type
+    from contracts.review_queue_schema import TYPE_DEFAULTS, review_policy_for_type
 
     validate_json_tree(payload, inspect_sensitive=False)
     required = {"schema_version", "run_id", "status", "items"}
@@ -312,7 +312,7 @@ def validate_review_queue(payload: dict[str, Any], run_id: str) -> None:
         if "run_id" in item and item["run_id"] != run_id:
             raise ArchiveRunArtifactError("review queue item run identity")
         item_type = item.get("type")
-        if type(item_type) is not str or not item_type:
+        if type(item_type) is not str or item_type not in TYPE_DEFAULTS:
             raise ArchiveRunArtifactError("review queue item type")
         policy = review_policy_for_type(item_type)
         if (

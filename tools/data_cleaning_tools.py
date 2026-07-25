@@ -2810,6 +2810,9 @@ class DataCleaningTools:
     ) -> List[Dict[str, Any]]:
         path = os.path.join(run_dir, "human_feedback_decisions.json")
         if not os.path.exists(path):
+            self._validate_feedback_queue_replay(
+                review_queue, queue_items, [],
+            )
             return []
         payload = strict_json_load(path)
         if (
@@ -2861,16 +2864,6 @@ class DataCleaningTools:
                 or item.get("target_path") != trace.get("target_path", "")
             ):
                 raise ArchiveRunArtifactError("feedback history trusted path")
-            feedback_ids = queue_item.get("feedback_ids", [])
-            feedback_decisions = queue_item.get("feedback_decisions", [])
-            if (
-                type(feedback_ids) is not list
-                or type(feedback_decisions) is not list
-                or len(feedback_ids) != len(feedback_decisions)
-                or feedback_id not in feedback_ids
-                or feedback_decisions[feedback_ids.index(feedback_id)] != item["decision"]
-            ):
-                raise ArchiveRunArtifactError("feedback history queue replay")
             input_projection = {
                 key: value for key, value in item.items()
                 if key in _FEEDBACK_INPUT_FIELDS
@@ -2899,7 +2892,78 @@ class DataCleaningTools:
                 raise ArchiveRunArtifactError("feedback history review snapshot")
             identifiers.add(feedback_id)
             result.append(item)
+        self._validate_feedback_queue_replay(
+            review_queue, queue_items, result,
+        )
         return result
+
+    @staticmethod
+    def _validate_feedback_queue_replay(
+        review_queue: Dict[str, Any],
+        queue_items: Dict[str, Dict[str, Any]],
+        decisions: List[Dict[str, Any]],
+    ) -> None:
+        expected_by_item: Dict[
+            str, tuple[List[str], List[str], str]
+        ] = {}
+        for decision in decisions:
+            item_id = decision["item_id"]
+            if item_id in expected_by_item:
+                raise ArchiveRunArtifactError("feedback history item replay")
+            expected_by_item[item_id] = (
+                [decision["feedback_id"]],
+                [decision["decision"]],
+                decision["created_at"],
+            )
+
+        has_history = bool(decisions)
+        pending: List[str] = []
+        for item_id, queue_item in queue_items.items():
+            expected = expected_by_item.get(item_id)
+            if expected is not None:
+                expected_ids, expected_decisions, expected_updated_at = expected
+                if (
+                    queue_item.get("feedback_ids") != expected_ids
+                    or queue_item.get("feedback_decisions") != expected_decisions
+                    or queue_item.get("feedback_status") != "feedback_received"
+                    or queue_item.get("feedback_updated_at") != expected_updated_at
+                ):
+                    raise ArchiveRunArtifactError("feedback history queue replay")
+                continue
+
+            pending.append(item_id)
+            if (
+                "feedback_ids" in queue_item
+                or "feedback_decisions" in queue_item
+                or "feedback_updated_at" in queue_item
+                or (
+                    queue_item.get("feedback_status")
+                    != ("pending" if has_history else None)
+                )
+            ):
+                raise ArchiveRunArtifactError("feedback history queue replay")
+
+        expected_status = (
+            "clear"
+            if not queue_items
+            else ("needs_review" if pending else "reviewed")
+        )
+        if review_queue.get("status") != expected_status:
+            raise ArchiveRunArtifactError("feedback history queue replay")
+        if not has_history:
+            if "feedback_summary" in review_queue:
+                raise ArchiveRunArtifactError("feedback history queue replay")
+            return
+
+        expected_summary = {
+            "updated": len(expected_by_item),
+            "pending": pending,
+            "updated_at": max(
+                expected[2] for expected in expected_by_item.values()
+            ),
+        }
+        if review_queue.get("feedback_summary") != expected_summary:
+            raise ArchiveRunArtifactError("feedback history queue replay")
 
     @staticmethod
     def _validate_feedback_artifact(payload: Dict[str, Any]) -> None:
@@ -3125,7 +3189,6 @@ class DataCleaningTools:
 
         updated = 0
         pending: List[str] = []
-        now = datetime.now().isoformat()
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -3141,19 +3204,26 @@ class DataCleaningTools:
                 item["feedback_status"] = "feedback_received"
                 item["feedback_ids"] = feedback_ids
                 item["feedback_decisions"] = feedback_values
-                item["feedback_updated_at"] = now
+                item["feedback_updated_at"] = max(
+                    decision["created_at"] for decision in decisions
+                )
                 updated += 1
             else:
                 item.setdefault("feedback_status", "pending")
             if item.get("feedback_status") != "feedback_received":
                 pending.append(item_id)
 
+        received_timestamps = [
+            item["feedback_updated_at"]
+            for item in items
+            if item.get("feedback_status") == "feedback_received"
+        ]
         queue["items"] = items
         queue["status"] = "reviewed" if items and not pending else ("needs_review" if items else "clear")
         queue["feedback_summary"] = {
-            "updated": updated,
+            "updated": len(received_timestamps),
             "pending": pending,
-            "updated_at": now,
+            "updated_at": max(received_timestamps),
         }
         validate_review_queue(queue, str(queue.get("run_id") or ""))
         if persist:

@@ -132,14 +132,10 @@ def normalize_review_queue(run_id: str, raw_items: List[Dict[str, Any]]) -> Dict
 
 
 def review_policy_for_type(item_type: object) -> Dict[str, Any]:
-    """Return a caller-isolated copy of the fixed decision policy."""
-    defaults = TYPE_DEFAULTS.get(item_type)
-    if defaults is None:
-        return {
-            "feedback_type": "rule_exception",
-            "allowed_decisions": ["accept", "reject", "defer"],
-            "recommended_decision": "defer",
-        }
+    """Return a caller-isolated copy of a registered fixed decision policy."""
+    if type(item_type) is not str or item_type not in TYPE_DEFAULTS:
+        raise ValueError("unknown_review_item_type")
+    defaults = TYPE_DEFAULTS[item_type]
     return {
         key: list(defaults[key]) if key == "allowed_decisions" else defaults[key]
         for key in ("feedback_type", "allowed_decisions", "recommended_decision")
@@ -147,13 +143,10 @@ def review_policy_for_type(item_type: object) -> Dict[str, Any]:
 
 
 def normalize_review_queue_item(run_id: str, raw_item: Dict[str, Any], index: int) -> Dict[str, Any]:
-    item_type = raw_item.get("type") if _safe_text(raw_item.get("type")) else "review_item"
-    defaults = TYPE_DEFAULTS.get(item_type, {
-        "feedback_type": "rule_exception",
-        "allowed_decisions": ["accept", "reject", "defer"],
-        "recommended_decision": "defer",
-        "question": "该复核项需要人工判断。",
-    })
+    item_type = raw_item.get("type")
+    if type(item_type) is not str or item_type not in TYPE_DEFAULTS:
+        raise ValueError("unknown_review_item_type")
+    defaults = TYPE_DEFAULTS[item_type]
     severity = raw_item.get("severity") if _safe_text(raw_item.get("severity")) else "unknown"
     projected = review_trace_projection(raw_item)
     policy = review_policy_for_type(item_type)
