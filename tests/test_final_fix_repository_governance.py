@@ -336,3 +336,80 @@ def test_scheme_urls_are_not_misclassified_as_forward_slash_unc(tmp_path):
     )
 
     assert report.errors == 0
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "content"),
+    [
+        (
+            "config/provider.py",
+            "database"
+            + "Pass"
+            + "word = "
+            + repr("-".join(("production", "value", "0123456789"))),
+        ),
+        (
+            "config/provider.js",
+            'const servicePassword = "production-value-0123456789";',
+        ),
+        (
+            "config/provider.js",
+            'let databasePasswd = "production-value-0123456789";',
+        ),
+        (
+            "config/provider.js",
+            'var adminPassword = "production-value-0123456789";',
+        ),
+        (
+            "deploy/provider.yaml",
+            "env:\n  - name: SERVICE_PASSWORD\n    value: production-value-0123456789\n",
+        ),
+    ],
+)
+def test_main_scanner_rejects_password_js_and_kubernetes_credentials(
+    tmp_path, relative_path, content
+):
+    report = _scan_bytes(tmp_path, relative_path, content.encode())
+
+    assert "REPO-HARDCODED-CREDENTIAL" in _finding_ids(report), content
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        'const servicePassword = process.env.SERVICE_PASSWORD;',
+        'let databasePasswd = "${DATABASE_PASSWD}";',
+        "env:\n  - name: SERVICE_PASSWORD\n    value: ${SERVICE_PASSWORD}\n",
+        'const cacheKey = "document-version-content-hash";',
+    ],
+)
+def test_main_scanner_preserves_dynamic_js_yaml_and_benign_keys(tmp_path, content):
+    report = _scan_bytes(tmp_path, "config/provider.yaml", content.encode())
+
+    assert report.errors == 0, report.findings
+
+
+@pytest.mark.parametrize(
+    "encoded_json",
+    [
+        r'{"path":"\/\/nas01\/share\/customer\/contract.pdf"}',
+        r'{"deep":{"items":[{"path":"\u005c\u005cnas01\u005cshare\u005ccustomer\u005ccontract.pdf"}]}}',
+        r'{"paths":["\u005c\u005c?\u005cUNC/nas01\u005cshare/customer/contract.pdf"]}',
+    ],
+)
+def test_main_scanner_rejects_decoded_json_unc_variants(tmp_path, encoded_json):
+    report = _scan_bytes(
+        tmp_path,
+        "config/provider.json",
+        encoded_json.encode(),
+    )
+
+    assert "REPO-BUSINESS-ABSOLUTE-PATH" in _finding_ids(report), encoded_json
+
+
+def test_main_scanner_allows_decoded_json_relative_paths(tmp_path):
+    encoded_json = r'{"deep":[{"path":"relative\/folder\/contract.pdf"}]}'
+
+    report = _scan_bytes(tmp_path, "config/provider.json", encoded_json.encode())
+
+    assert report.errors == 0, report.findings

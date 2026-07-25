@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import warnings
 from typing import Iterable, Iterator, List, Mapping, Optional
 from urllib.parse import unquote, urlsplit
 
@@ -56,6 +57,13 @@ _UNC_FORWARD_PATH = re.compile(
     r"(?:/[^/\s\"'`]*)?",
     re.IGNORECASE,
 )
+_UNC_CANONICAL_PATH = re.compile(
+    r"(?<![A-Za-z0-9:/])"
+    r"(?://\?/UNC/|//(?![/?]))"  # repo-hygiene: allow=synthetic-path
+    r"[^/\s\"'`?]+/[^/\s\"'`]+"
+    r"(?:/[^/\s\"'`]*)?",
+    re.IGNORECASE,
+)
 _CREDENTIAL_DSN = re.compile(
     r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|amqps?)://"
     r"[^:/\s]+:(?P<secret>[^@/\s]+)@",
@@ -89,7 +97,7 @@ _PRIVATE_KEY_HEADER = re.compile(
     re.IGNORECASE,
 )
 _STATIC_TEXT_BINDING = re.compile(
-    r"^\s*(?:(?:export|set)\s+|-\s*)?"
+    r"^\s*(?:(?:export|set|const|let|var)\s+|-\s*)?"
     r"(?:[\"'])?(?P<name>[A-Za-z][A-Za-z0-9_.-]*)(?:[\"'])?"
     r"\s*[:=]\s*(?:"
     r"(?P<quote>[\"'])(?P<quoted>[^\"'\r\n]+)(?P=quote)"
@@ -102,6 +110,8 @@ _CREDENTIAL_TERMINALS = {
     "key",
     "credential",
     "credentials",
+    "password",
+    "passwd",
     "cookie",
     "session",
 }
@@ -434,20 +444,39 @@ def _unc_scan_views(line: str) -> Iterator[str]:
         candidate = unescaped
 
 
+def _contains_unc_path(value: str, *, decoded_json: bool = False) -> bool:
+    for view in _unc_scan_views(value):
+        if _UNC_BACKSLASH_PATH.search(view) or _UNC_FORWARD_PATH.search(view):
+            return True
+        if decoded_json and _UNC_CANONICAL_PATH.search(
+            view.replace("\\", "/")
+        ):
+            return True
+    return False
+
+
+def _decoded_json_strings(text: str) -> Iterator[str]:
+    try:
+        pending = [json.loads(text)]
+    except (TypeError, ValueError, RecursionError):
+        return
+    while pending:
+        value = pending.pop()
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+
+
 def _contains_business_absolute_path(text: str, synthetic_fixture: bool) -> bool:
     for line in text.splitlines():
         strictly_exempt = bool(_SYNTHETIC_PATH_EXEMPTION_LINE.search(line))
         if strictly_exempt:
             continue
-        for view in _unc_scan_views(line):
-            for pattern in (_UNC_BACKSLASH_PATH, _UNC_FORWARD_PATH):
-                for match in pattern.finditer(view):
-                    value = match.group(0)
-                    if _POSIX_PERSONAL_PATH.search(value) or _WINDOWS_PERSONAL_PATH.search(
-                        value
-                    ):
-                        continue
-                    return True
+        if _contains_unc_path(line):
+            return True
         if synthetic_fixture:
             continue
         for pattern in (
@@ -461,6 +490,51 @@ def _contains_business_absolute_path(text: str, synthetic_fixture: bool) -> bool
                 ):
                     continue
                 return True
+    for value in _decoded_json_strings(text):
+        if _contains_unc_path(value, decoded_json=True):
+            return True
+    return False
+
+
+_YAML_ENV_NAME_LINE = re.compile(
+    r"^(?P<indent>[ \t]*)-\s*name\s*:\s*(?:"
+    r"(?P<quote>[\"'])(?P<quoted>[A-Za-z_][A-Za-z0-9_.-]*)(?P=quote)"
+    r"|(?P<bare>[A-Za-z_][A-Za-z0-9_.-]*))\s*(?:#.*)?$",
+    re.IGNORECASE,
+)
+_YAML_ENV_VALUE_LINE = re.compile(
+    r"^(?P<indent>[ \t]*)value\s*:\s*(?:"
+    r"(?P<quote>[\"'])(?P<quoted>[^\"'\r\n]+)(?P=quote)"
+    r"|(?P<bare>[^\s#;,]+))\s*(?:#.*)?$",
+    re.IGNORECASE,
+)
+
+
+def _contains_yaml_env_credential(text: str) -> bool:
+    pending: Optional[tuple[int, str]] = None
+    for line in text.splitlines():
+        name_match = _YAML_ENV_NAME_LINE.match(line)
+        if name_match:
+            pending = (
+                len(name_match.group("indent")),
+                name_match.group("quoted") or name_match.group("bare") or "",
+            )
+            continue
+        if pending is None or not line.strip() or line.lstrip().startswith("#"):
+            continue
+        value_match = _YAML_ENV_VALUE_LINE.match(line)
+        current_indent = len(line) - len(line.lstrip(" \t"))
+        if value_match and current_indent > pending[0]:
+            value = value_match.group("quoted") or value_match.group("bare") or ""
+            if _binding_contains_credential(
+                pending[1],
+                value,
+                quoted=value_match.group("quoted") is not None,
+            ):
+                return True
+            pending = None
+            continue
+        pending = None
     return False
 
 
@@ -602,7 +676,9 @@ def _analyze_json_document(text: str) -> tuple[bool, bool]:
 
 def _contains_static_python_credential(text: str) -> bool:
     try:
-        tree = ast.parse(text)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(text)
     except SyntaxError:
         return False
     for node in ast.walk(tree):
@@ -623,6 +699,9 @@ def _contains_hardcoded_credential(text: str) -> bool:
             return True
 
     if _contains_static_python_credential(text):
+        return True
+
+    if _contains_yaml_env_credential(text):
         return True
 
     for match in _STATIC_TEXT_BINDING.finditer(text):

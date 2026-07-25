@@ -107,7 +107,8 @@ SWIFT_BRIDGE_MACHO_ARM64_EXECUTABLE_HEADER = bytes.fromhex(
 )
 
 _CREDENTIAL_TERMINALS = {
-    "token", "secret", "key", "credential", "credentials", "cookie", "session",
+    "token", "secret", "key", "credential", "credentials", "password",
+    "passwd", "cookie", "session",
 }
 _BENIGN_KEY_PREFIXES = {
     "cache", "content", "dictionary", "foreign", "index", "lookup", "object",
@@ -138,7 +139,7 @@ _DIRECT_CREDENTIAL_PATTERNS = (
     ),
 )
 _TEXT_STATIC_ASSIGNMENT = re.compile(
-    r"^\s*(?:(?:export|set)\s+|-\s*)?"
+    r"^\s*(?:(?:export|set|const|let|var)\s+|-\s*)?"
     r"(?:[\"'])?(?P<name>[A-Za-z][A-Za-z0-9_.-]*)(?:[\"'])?"
     r"\s*[:=]\s*(?:"
     r"(?P<quote>[\"'])(?P<quoted>[^\"'\r\n]+)(?P=quote)"
@@ -150,6 +151,11 @@ _UNC_PATH = re.compile(
     r"\\\\\?\\UNC\\[^\\/\s\"'`?]+\\[^\\/\s\"'`]+"
     r"|\\\\[^\\/?\s\"'`]+\\[^\\/\s\"'`]+"
     r"|//(?![/?])[^/\s\"'`]+/[^/\s\"'`]+)",  # repo-hygiene: allow=synthetic-path
+    re.IGNORECASE,
+)
+_INDEPENDENT_CANONICAL_UNC = re.compile(
+    r"(?<![A-Za-z0-9:/])(?://\?/UNC/|//(?![/?]))"  # repo-hygiene: allow=synthetic-path
+    r"[^/\s\"'`?]+/[^/\s\"'`]+(?:/[^/\s\"'`]*)?",  # repo-hygiene: allow=synthetic-path
     re.IGNORECASE,
 )
 _STRICT_SYNTHETIC_PATH_COMMENT = re.compile(
@@ -214,13 +220,44 @@ def _independent_unc_views(line: str):
         candidate = unescaped
 
 
+def _independent_contains_unc(value: str, *, decoded_json: bool = False) -> bool:
+    for view in _independent_unc_views(value):
+        if _UNC_PATH.search(view):
+            return True
+        if decoded_json and _INDEPENDENT_CANONICAL_UNC.search(
+            view.replace("\\", "/")
+        ):
+            return True
+    return False
+
+
+def _independent_json_strings(text: str):
+    try:
+        pending = [json.loads(text)]
+    except (TypeError, ValueError, RecursionError):
+        return
+    while pending:
+        value = pending.pop()
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+
+
 def _independent_unc_violations(relative_path: str, text: str) -> list[str]:
     violations: list[str] = []
     for line_number, line in enumerate(text.splitlines(), 1):
         if _STRICT_SYNTHETIC_PATH_COMMENT.search(line):
             continue
-        if any(_UNC_PATH.search(view) for view in _independent_unc_views(line)):
+        if _independent_contains_unc(line):
             violations.append(f"{relative_path}:{line_number}:unc_path")
+    if Path(relative_path).suffix.casefold() == ".json" and any(
+        _independent_contains_unc(value, decoded_json=True)
+        for value in _independent_json_strings(text)
+    ):
+        violations.append(f"{relative_path}:1:decoded_json_unc_path")
     return violations
 
 
@@ -456,6 +493,48 @@ def _binding_is_credential(name: str, value: str) -> bool:
     )
 
 
+_INDEPENDENT_YAML_ENV_NAME = re.compile(
+    r"^(?P<indent>[ \t]*)-\s*name\s*:\s*(?:"
+    r"(?P<quote>[\"'])(?P<quoted>[A-Za-z_][A-Za-z0-9_.-]*)(?P=quote)"
+    r"|(?P<bare>[A-Za-z_][A-Za-z0-9_.-]*))\s*(?:#.*)?$",
+    re.IGNORECASE,
+)
+_INDEPENDENT_YAML_ENV_VALUE = re.compile(
+    r"^(?P<indent>[ \t]*)value\s*:\s*(?:"
+    r"(?P<quote>[\"'])(?P<quoted>[^\"'\r\n]+)(?P=quote)"
+    r"|(?P<bare>[^\s#;,]+))\s*(?:#.*)?$",
+    re.IGNORECASE,
+)
+
+
+def _independent_yaml_env_credentials(relative_path: str, text: str) -> list[str]:
+    violations: list[str] = []
+    pending: tuple[int, str, int] | None = None
+    for line_number, line in enumerate(text.splitlines(), 1):
+        name_match = _INDEPENDENT_YAML_ENV_NAME.match(line)
+        if name_match:
+            pending = (
+                len(name_match.group("indent")),
+                name_match.group("quoted") or name_match.group("bare") or "",
+                line_number,
+            )
+            continue
+        if pending is None or not line.strip() or line.lstrip().startswith("#"):
+            continue
+        value_match = _INDEPENDENT_YAML_ENV_VALUE.match(line)
+        current_indent = len(line) - len(line.lstrip(" \t"))
+        if value_match and current_indent > pending[0]:
+            value = value_match.group("quoted") or value_match.group("bare") or ""
+            if _binding_is_credential(pending[1], value):
+                violations.append(
+                    f"{relative_path}:{line_number}:credential_binding:{pending[1]}"
+                )
+            pending = None
+            continue
+        pending = None
+    return violations
+
+
 def _independent_credential_violations(
     relative_path: str, text: str
 ) -> list[str]:
@@ -466,6 +545,7 @@ def _independent_credential_violations(
             violations.append(
                 f"{relative_path}:{line_number}:credential_signature"
             )
+    violations.extend(_independent_yaml_env_credentials(relative_path, text))
 
     suffix = Path(relative_path).suffix.casefold()
     if suffix == ".json":
@@ -877,6 +957,61 @@ def test_independent_contract_rejects_escaped_unc_source_and_json(unc_path):
     assert _independent_unc_violations(
         "tests/fixtures/synthetic_unc.json", declared_synthetic_json
     )
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "content"),
+    [
+        ("config/provider.py", 'databasePassword = "production-value-0123456789"'),
+        ("config/provider.js", 'const servicePassword = "production-value-0123456789";'),
+        ("config/provider.js", 'let databasePasswd = "production-value-0123456789";'),
+        ("config/provider.js", 'var adminPassword = "production-value-0123456789";'),
+        (
+            "deploy/provider.yaml",
+            "env:\n  - name: SERVICE_PASSWORD\n    value: production-value-0123456789\n",
+        ),
+    ],
+)
+def test_independent_contract_rejects_password_js_and_kubernetes_credentials(
+    relative_path, content
+):
+    assert _independent_credential_violations(relative_path, content), content
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "content"),
+    [
+        ("config/provider.js", 'const servicePassword = process.env.SERVICE_PASSWORD;'),
+        ("config/provider.ts", 'let databasePasswd = "${DATABASE_PASSWD}";'),
+        (
+            "deploy/provider.yaml",
+            "env:\n  - name: SERVICE_PASSWORD\n    value: ${SERVICE_PASSWORD}\n",
+        ),
+        ("config/provider.js", 'const cacheKey = "document-version-content-hash";'),
+    ],
+)
+def test_independent_contract_preserves_dynamic_js_yaml_and_benign_keys(
+    relative_path, content
+):
+    assert _independent_credential_violations(relative_path, content) == []
+
+
+@pytest.mark.parametrize(
+    "encoded_json",
+    [
+        r'{"path":"\/\/nas01\/share\/customer\/contract.pdf"}',
+        r'{"deep":{"items":[{"path":"\u005c\u005cnas01\u005cshare\u005ccustomer\u005ccontract.pdf"}]}}',
+        r'{"paths":["\u005c\u005c?\u005cUNC/nas01\u005cshare/customer/contract.pdf"]}',
+    ],
+)
+def test_independent_contract_rejects_decoded_json_unc_variants(encoded_json):
+    assert _independent_unc_violations("config/provider.json", encoded_json)
+
+
+def test_independent_contract_allows_decoded_json_relative_paths():
+    encoded_json = r'{"deep":[{"path":"relative\/folder\/contract.pdf"}]}'
+
+    assert _independent_unc_violations("config/provider.json", encoded_json) == []
 
 
 def test_all_tracked_files_match_independent_default_deny_contract():
