@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
+
+import pytest
+
 INVOICE_FIELD = "invoice" + "_number"
 
 from platform_core.models import BusinessContextEvidence
@@ -95,7 +99,6 @@ def _input() -> dict[str, object]:
         "document_type_hint": "invoice",
         "candidate_fields": {"contract_code": "CT-001"},
         "text_segments": [{"id": "page-1", "text": "Invoice INV-001"}],
-        "untrusted_extra": "must never reach the LLM",
     }
 
 
@@ -171,6 +174,35 @@ def test_blocked_relation_response_never_downgrades_to_needs_review() -> None:
     assert result["confirmed"] is False
 
 
+def test_boundary_rejects_sensitive_or_invalid_before_interpreter() -> None:
+    from services.document_interpretation import DocumentInterpretationService
+
+    interpreter = CapturingInterpreter(_valid_response())
+    service = DocumentInterpretationService(StaticRetrieval(_evidence()), interpreter)
+    for value in (
+        "C:" + chr(92) + "Users" + chr(92) + "x",
+        chr(92) * 2 + "server" + chr(92) + "share",
+        "/private/file",
+        "Bearer abc",
+        "Authorization: Bearer abc",
+        "token=abc",
+        "api_key=abc",
+        "api_token=abc",
+        "password=abc",
+        "Ｔｏｋｅｎ=abc",
+    ):
+        result = service.interpret(
+            {
+                "parse_artifact_ref": "artifact:parsed:1",
+                "document_type_hint": "invoice",
+                "candidate_fields": {},
+                "text_segments": [{"id": "p1", "text": value}],
+            }
+        )
+        assert result["status"] == "blocked"
+    assert interpreter.requests == []
+
+
 def test_retrieval_service_evidence_maps_to_canonical_interpretation_relation() -> None:
     from services.document_interpretation import DocumentInterpretationService
     from services.retrieval_service import RetrievalService
@@ -182,3 +214,244 @@ def test_retrieval_service_evidence_maps_to_canonical_interpretation_relation() 
     result = service.interpret({"parse_artifact_ref":"artifact:parsed:1","document_type_hint":"invoice","candidate_fields":{"buyer":{"tax_id":"913100001234567890","name":"Buyer"},"contract_code":"HT-2026-001"},"text_segments":[]})
     assert result["status"] == "needs_review"
     assert result["confirmed"] is False
+
+
+def _context(**overrides: object) -> BusinessContextEvidence:
+    original = _evidence()
+    values = {
+        "status": original.status,
+        "candidates": original.candidates,
+        "evidence_refs": original.evidence_refs,
+        "conflicts": original.conflicts,
+        "diagnostics": original.diagnostics,
+    }
+    values.update(overrides)
+    return BusinessContextEvidence(**values)
+
+
+def _candidate(**overrides: object) -> dict[str, object]:
+    value = deepcopy(_evidence().candidates[0])
+    value.update(overrides)
+    return value
+
+
+def _set_candidate_field(payload: dict[str, object], key: str, value: object) -> None:
+    payload["candidate_fields"][key] = value
+
+
+def _set_buyer(payload: dict[str, object], value: object) -> None:
+    payload["candidate_fields"]["buyer"] = value
+
+
+def _set_text(payload: dict[str, object], value: object) -> None:
+    payload["text_segments"] = value
+
+
+@pytest.mark.parametrize(
+    ("case", "mutate"),
+    [
+        ("unknown root field", lambda value: value.update({"unexpected": "drop-me"})),
+        ("invalid artifact", lambda value: value.update({"parse_artifact_ref": "/tmp/a"})),
+        ("document type type confusion", lambda value: value.update({"document_type_hint": []})),
+        ("unknown document type", lambda value: value.update({"document_type_hint": "memo"})),
+        ("candidate fields type confusion", lambda value: value.update({"candidate_fields": []})),
+        ("text segments type confusion", lambda value: _set_text(value, {})),
+        ("boolean amount", lambda value: _set_candidate_field(value, "amount", True)),
+        ("infinite amount", lambda value: _set_candidate_field(value, "amount", float("inf"))),
+        ("nan amount", lambda value: _set_candidate_field(value, "amount", float("nan"))),
+        ("invalid invoice date", lambda value: _set_candidate_field(value, "invoice_date", "2026-02-30")),
+        ("invalid tax id", lambda value: _set_buyer(value, {"tax_id": "9131!", "name": "Buyer"})),
+        ("unknown candidate field", lambda value: _set_candidate_field(value, "unknown", "drop-me")),
+        ("oversized nested array", lambda value: _set_candidate_field(value, "line_items", [{}] * 300)),
+        (
+            "oversized text array",
+            lambda value: _set_text(value, [{"id": f"p-{index}", "text": "x"} for index in range(300)]),
+        ),
+        ("oversized single field", lambda value: _set_buyer(value, {"name": "x" * 65_537, "tax_id": "913100001234567890"})),
+        (
+            "oversized total json",
+            lambda value: _set_candidate_field(
+                value,
+                "line_items",
+                [{"item_name": "x" * 3_900} for _ in range(200)],
+            ),
+        ),
+    ],
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_invalid_document_input_blocks_before_interpreter(case, mutate) -> None:
+    from services.document_interpretation import DocumentInterpretationService
+
+    payload = _input()
+    mutate(payload)
+    interpreter = CapturingInterpreter(_valid_response())
+    service = DocumentInterpretationService(StaticRetrieval(_evidence()), interpreter)
+
+    result = service.interpret(payload)
+
+    assert result["status"] == "blocked", case
+    assert result["blocked_reason"] == "DOCUMENT_INTERPRETATION.SCHEMA_INVALID"
+    assert interpreter.requests == []
+
+
+def test_safe_business_identifiers_are_not_mistaken_for_credentials() -> None:
+    from services.document_interpretation import DocumentInterpretationService
+
+    interpreter = CapturingInterpreter(_valid_response())
+    service = DocumentInterpretationService(StaticRetrieval(_evidence()), interpreter)
+    company_name = "上海Token科技有限" + "公司"
+    payload = _input()
+    payload["candidate_fields"] = {
+        "buyer": {
+            "name": company_name,
+            "tax_id": "913100001234567890",
+        },
+        "contract_code": "HT-2026-001",
+        "invoice_date": "2026-07-25",
+        "amount": 12.5,
+    }
+    payload["text_segments"] = [{"id": "page-1", "text": "AUTHORIZATION-2026"}]
+
+    result = service.interpret(payload)
+
+    assert result["status"] == "success"
+    assert interpreter.requests[0]["document"]["candidate_fields"] == {
+        "amount": 12.5,
+        "buyer_name": company_name,
+        "buyer_tax_id": "913100001234567890",
+        "contract_code": "HT-2026-001",
+        "invoice_date": "2026-07-25",
+    }
+
+
+def _candidate_with_fact(key: str, value: object) -> dict[str, object]:
+    candidate = _candidate()
+    candidate["facts"] = {"contract_code": "CT-001", key: value}
+    return candidate
+
+
+@pytest.mark.parametrize(
+    ("case", "context"),
+    [
+        ("unknown status", _context(status="unknown")),
+        ("candidate count", _context(candidates=tuple(_candidate() for _ in range(300)))),
+        ("evidence count", _context(evidence_refs=_evidence().evidence_refs * 300)),
+        ("diagnostic count", _context(diagnostics=_evidence().diagnostics * 300)),
+        ("invalid candidate id", _context(candidates=(_candidate(id=True),))),
+        ("unknown candidate document type", _context(candidates=(_candidate(document_type="memo"),))),
+        (
+            "invalid candidate tax id",
+            _context(candidates=(_candidate(parties={"buyer": {"name": "Buyer", "tax_id": "9131!"}}),)),
+        ),
+        ("invalid fact date", _context(candidates=(_candidate_with_fact("date", "2026-02-30"),))),
+        ("boolean fact amount", _context(candidates=(_candidate_with_fact("amount", True),))),
+        ("infinite fact amount", _context(candidates=(_candidate_with_fact("amount", float("inf")),))),
+        (
+            "unknown evidence field",
+            _context(evidence_refs=({"kind": "business_context", "candidate_id": "contract-001", "field": "unknown"},)),
+        ),
+        ("unknown diagnostic", _context(diagnostics=({"code": "BUSINESS_CONTEXT.UNKNOWN"},))),
+    ],
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_invalid_business_context_blocks_before_interpreter(case, context) -> None:
+    from services.document_interpretation import DocumentInterpretationService
+
+    interpreter = CapturingInterpreter(_valid_response())
+    service = DocumentInterpretationService(StaticRetrieval(context), interpreter)
+
+    result = service.interpret(_input())
+
+    assert result["status"] == "blocked", case
+    assert result["blocked_reason"] == "DOCUMENT_INTERPRETATION.SCHEMA_INVALID"
+    assert interpreter.requests == []
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        ("schema_version", None),
+        ("schema_version", []),
+        ("prompt_version", ""),
+        ("policy_version", "document_interpretation_policy.v2"),
+    ],
+)
+def test_invalid_adapter_identity_blocks_before_interpreter(attribute, value) -> None:
+    from services.document_interpretation import DocumentInterpretationService
+
+    interpreter = CapturingInterpreter(_valid_response())
+    setattr(interpreter, attribute, value)
+    service = DocumentInterpretationService(StaticRetrieval(_evidence()), interpreter)
+
+    result = service.interpret(_input())
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "DOCUMENT_INTERPRETATION.SCHEMA_INVALID"
+    assert interpreter.requests == []
+
+
+def test_response_version_mismatch_is_blocked() -> None:
+    from services.document_interpretation import DocumentInterpretationService
+
+    interpreter = CapturingInterpreter(_valid_response(prompt_version="document_interpretation.v2"))
+    service = DocumentInterpretationService(StaticRetrieval(_evidence()), interpreter)
+
+    result = service.interpret(_input())
+
+    assert result["status"] == "blocked"
+    assert interpreter.requests != []
+
+
+def test_real_adapter_with_matching_versions_is_accepted_by_service() -> None:
+    from integrations.llm.openai_compatible_interpreter import OpenAICompatibleInterpreter
+    from services.document_interpretation import DocumentInterpretationService
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "choices": [
+                    {"message": {"content": json.dumps(_valid_response(interpreter="openai_compatible"))}}
+                ]
+            }
+
+    interpreter = OpenAICompatibleInterpreter(
+        base_url="https://llm.example.invalid/v1",
+        api_key="fake-key-for-test",
+        model="fake-model",
+        transport=lambda **kwargs: Response(),
+    )
+    service = DocumentInterpretationService(StaticRetrieval(_evidence()), interpreter)
+
+    result = service.interpret(_input())
+
+    assert result["status"] == "success"
+    assert result["schema_version"] == interpreter.schema_version
+    assert result["prompt_version"] == interpreter.prompt_version
+    assert result["policy_version"] == interpreter.policy_version
+
+
+def test_task3_nested_fields_are_preserved_for_retrieval_and_allowlisted_for_llm() -> None:
+    from services.document_interpretation import DocumentInterpretationService
+
+    retrieval = StaticRetrieval(_evidence())
+    interpreter = CapturingInterpreter(_valid_response())
+    service = DocumentInterpretationService(retrieval, interpreter)
+    fields = {
+        "buyer": {"name": "Buyer", "tax_id": "913100001234567890"},
+        "contract_code": "HT-2026-001",
+    }
+    payload = _input()
+    payload["candidate_fields"] = fields
+
+    result = service.interpret(payload)
+
+    assert result["status"] == "success"
+    assert retrieval.queries[0].candidate_fields == fields
+    assert interpreter.requests[0]["document"]["candidate_fields"] == {
+        "buyer_name": "Buyer",
+        "buyer_tax_id": "913100001234567890",
+        "contract_code": "HT-2026-001",
+    }

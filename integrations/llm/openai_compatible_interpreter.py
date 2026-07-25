@@ -24,13 +24,13 @@ class DocumentInterpreterRequestError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__("Document interpretation request failed.")
-    schema_version = "candidate_document_interpretation.v1"
-    prompt_version = "document_interpretation.v1"
-    policy_version = "document_interpretation_policy.v1"
 
 
 class OpenAICompatibleInterpreter:
     name = "openai_compatible"
+    schema_version = "candidate_document_interpretation.v1"
+    prompt_version = "document_interpretation.v1"
+    policy_version = "document_interpretation_policy.v1"
 
     def __init__(self, base_url: str | None = None, api_key: str | None = None, model: str | None = None, *, transport: Callable[..., Any] | None = None) -> None:
         self.base_url = resolve_llm_base_url(base_url, required=True)
