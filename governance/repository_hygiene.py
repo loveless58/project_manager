@@ -1,6 +1,7 @@
 """Repository hygiene checks bounded strictly by Git's tracked-file index."""
 from __future__ import annotations
 
+import ast
 import codecs
 from dataclasses import dataclass
 import ipaddress
@@ -123,9 +124,27 @@ _REAL_SOURCE_CLAIM = re.compile(
     r"[^\"'\r\n]{0,80}(?:真实|real)", re.IGNORECASE
 )
 _SYNTHETIC_BUSINESS_VALUE = re.compile(
-    r"(?:合成|虚构|synthetic|\bSYN[-_]|example\.invalid)",
+    r"^(?:合成|虚构|SYN[-_]|synthetic(?:[-_/]|$)|example\.invalid(?:[/:\s]|$))",
     re.IGNORECASE,
 )
+_PYTHON_BUSINESS_FIELDS = {
+    "customer_name",
+    "client_name",
+    "buyer",
+    "seller",
+    "project_name",
+    "subject_name",
+    "project_id",
+    "project_number",
+    "sales_owner",
+    "contact_name",
+    "invoice_number",
+    "invoice_id",
+    "ticket_number",
+    "ticket_id",
+    "contract_number",
+    "contract_id",
+}
 _BUSINESS_CONTENT_PLACEHOLDERS = {
     "unknown",
     "none",
@@ -362,11 +381,30 @@ _PLACEHOLDER_SECRETS = {
 }
 
 
-def _is_placeholder_secret(value: str) -> bool:
-    normalized = value.strip().lower()
+def _is_placeholder_secret(value: str, *, quoted: bool = False) -> bool:
+    raw = value.strip()
+    normalized = raw.casefold()
     if normalized in _PLACEHOLDER_SECRETS:
         return True
-    return normalized.startswith(("${", "$ {{", "{{", "<", "%(", "env:"))
+    template_references = (
+        r"\$[A-Za-z_][A-Za-z0-9_]*",
+        r"\$\{[A-Za-z_][A-Za-z0-9_]*\}",
+        r"%[A-Za-z_][A-Za-z0-9_]*%",
+        r"\{\{\s*[A-Za-z_][A-Za-z0-9_.-]*\s*\}\}",
+        r"env:[A-Za-z_][A-Za-z0-9_]*",
+        r"<[^<>\r\n]+>",
+        r"%\([A-Za-z_][A-Za-z0-9_]*\)s?",
+    )
+    if any(re.fullmatch(pattern, raw, re.IGNORECASE) for pattern in template_references):
+        return True
+    if quoted:
+        return False
+    python_references = (
+        r"os\.environ\[\s*[\"'][A-Za-z_][A-Za-z0-9_]*[\"']\s*\]",
+        r"os\.getenv\(\s*[\"'][A-Za-z_][A-Za-z0-9_]*[\"']\s*\)",
+        r"settings\.[A-Za-z_][A-Za-z0-9_]*",
+    )
+    return any(re.fullmatch(pattern, raw) for pattern in python_references)
 
 
 def _contains_hardcoded_credential(text: str) -> bool:
@@ -382,7 +420,9 @@ def _contains_hardcoded_credential(text: str) -> bool:
                 groups.get("secret") or groups.get("quoted") or groups.get("bare")
                 or match.group(0)
             )
-            if not _is_placeholder_secret(secret):
+            if not _is_placeholder_secret(
+                secret, quoted=groups.get("quoted") is not None
+            ):
                 return True
     return False
 
@@ -440,7 +480,7 @@ def _is_allowed_business_value(value: str) -> bool:
     if normalized in _BUSINESS_CONTENT_PLACEHOLDERS:
         return True
     if normalized in {
-        "str", "string", "optional", "null", "true", "false", "project_manager", "开户银行", "公司",
+        "str", "string", "optional", "null", "true", "false", "project_manager", "customer", "开户银行", "公司",
         "有限公司", "有限责任公司", "股份有限公司", "集团", "银行", "研究院", "大学",
     }:
         return True
@@ -461,11 +501,55 @@ def _is_allowed_business_value(value: str) -> bool:
         return True
     if re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*[\[(]", raw.strip("\"'`")):
         return True
-    return bool(_SYNTHETIC_BUSINESS_VALUE.search(value))
+    return bool(_SYNTHETIC_BUSINESS_VALUE.match(normalized))
+
+
+def _python_literal_business_bindings(node: ast.AST) -> list[tuple[str, str]]:
+    if isinstance(node, ast.Assign):
+        if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
+            return []
+        return [
+            (target.id.casefold(), node.value.value)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        ]
+    if isinstance(node, ast.AnnAssign):
+        if not isinstance(node.target, ast.Name):
+            return []
+        if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
+            return []
+        return [(node.target.id.casefold(), node.value.value)]
+    if isinstance(node, ast.Dict):
+        return [
+            (key.value.casefold(), value.value)
+            for key, value in zip(node.keys, node.values)
+            if isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and isinstance(value, ast.Constant)
+            and isinstance(value.value, str)
+        ]
+    return []
+
+
+def _contains_python_literal_business_binding(text: str) -> bool:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        for field, value in _python_literal_business_bindings(node):
+            if field in _PYTHON_BUSINESS_FIELDS and not _is_allowed_business_value(value):
+                return True
+            if field == "source_kind" and value.strip().casefold() == "real":
+                return True
+    return False
 
 
 def _contains_unsanitized_business_content(relative_path: str, text: str) -> bool:
     normalized_path = relative_path.replace("\\", "/")
+    if normalized_path.casefold().endswith(".py"):
+        if _contains_python_literal_business_binding(text):
+            return True
     if (
         _BUSINESS_KB_PATH.match(normalized_path)
         and _SYNTHETIC_DATA_DECLARATION not in text

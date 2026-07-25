@@ -7,7 +7,7 @@
         "file": "/tmp/fixtures/sample_bid_doc.pdf",
         "filename": "sample_bid_doc.pdf",
         "document_type": "投标文件",
-        "extracted_text": "项目名称：合成项目字段015\n预算：120万元",
+        "extracted_text": "项目名称：合成项目字段015\n预算：120万元\n客户：合成机构005有限公司\n截止日期：2026年9月30日",
         "fields": {
           "project_name": "合成项目字段015",
           "budget": "120",
@@ -22,7 +22,7 @@
         "file": "/tmp/fixtures/contract_doc.pdf",
         "filename": "合同_合成项目字段016.pdf",
         "document_type": "合同",
-        "extracted_text": "合同名称：合成项目字段016运维服务合同\n客户：合成机构006有限公司",
+        "extracted_text": "合同名称：合成项目字段016运维服务合同\n客户：合成机构006有限公司\n合同状态：已签订",
         "fields": {
           "project_name": "合成项目字段016",
           "customer": "合成机构006有限公司",

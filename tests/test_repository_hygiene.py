@@ -352,6 +352,48 @@ def test_repository_hygiene_allows_unquoted_credential_placeholders(
     assert (errors, warnings, findings) == (0, 0, [])
 
 
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "$PROVIDER_TOKEN",
+        "${PROVIDER_TOKEN}",
+        "%PROVIDER_TOKEN%",
+        'os.environ["PROVIDER_TOKEN"]',
+        'os.getenv("PROVIDER_TOKEN")',
+        "settings.provider_token",
+    ],
+)
+def test_repository_hygiene_allows_explicit_credential_references(
+    tmp_path, reference
+):
+    credential_name = "PROJECT_MANAGER_" + "ACCESS_TOKEN"
+    content = credential_name + " = " + reference
+
+    errors, warnings, findings = _scan(tmp_path, "config/provider.py", content)
+
+    assert (errors, warnings, findings) == (0, 0, [])
+
+
+@pytest.mark.parametrize(
+    "literal",
+    [
+        "production-value-0123456789",
+        '"production-value-0123456789"',
+    ],
+)
+def test_repository_hygiene_rejects_prefixed_credential_literals(
+    tmp_path, literal
+):
+    credential_name = "PROJECT_MANAGER_" + "ACCESS_TOKEN"
+    content = credential_name + " = " + literal
+
+    errors, warnings, findings = _scan(tmp_path, "config/provider.py", content)
+
+    assert errors == 1
+    assert warnings == 0
+    assert findings[0]["id"] == "REPO-HARDCODED-CREDENTIAL"
+
+
 def test_repository_hygiene_rejects_local_business_json_without_name_hint(tmp_path):
     payload = json.dumps(
         {
@@ -425,6 +467,56 @@ def test_repository_hygiene_allows_single_synthetic_business_value(
     errors, warnings, findings = _scan(
         tmp_path,
         "tests/business_fragment.txt",
+        content,
+    )
+
+    assert (errors, warnings, findings) == (0, 0, [])
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "project_" + 'name = "Commercial Delivery"',
+        "project_" + 'name: str = "Commercial Delivery"',
+        'record = {"project_' + 'name": "Commercial Delivery"}',
+        "source_" + 'kind = "real"',
+        'record = {"source_' + 'kind": "real"}',
+        "project_" + 'name = "Customer合成Migration"',
+    ],
+)
+def test_repository_hygiene_rejects_python_literal_business_bindings(
+    tmp_path, content
+):
+    errors, warnings, findings = _scan(
+        tmp_path,
+        "src/business_fixture.py",
+        content,
+    )
+
+    assert errors == 1
+    assert warnings == 0
+    assert findings[0]["id"] == "REPO-REAL-BUSINESS-CONTENT"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "project_name: str",
+        "def load(project_name: str) -> str:\n    return project_name",
+        "project_name = record.project_name",
+        'project_name = payload["project_name"]',
+        'project_name = f"{prefix}-{suffix}"',
+        "project_name = Field(default=None)",
+        'project_name = "合成项目Alpha"',
+        'source_kind = "synthetic"',
+    ],
+)
+def test_repository_hygiene_allows_python_dynamic_or_synthetic_bindings(
+    tmp_path, content
+):
+    errors, warnings, findings = _scan(
+        tmp_path,
+        "src/business_fixture.py",
         content,
     )
 

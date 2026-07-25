@@ -119,7 +119,7 @@ def test_reviewer_clean_input_produces_minimal_findings():
         "file": "/tmp/clean.pdf",
         "filename": "clean_bid.pdf",
         "document_type": "投标文件",
-        "extracted_text": "项目：合成项目003 预算：100万 客户：合成机构009有限公司",
+        "extracted_text": "项目：合成项目003 预算：100万 客户：合成机构008有限公司 截止：2026年9月30日",
         "fields": {
             "project_name": "合成项目003",
             "budget": "100",
@@ -134,6 +134,9 @@ def test_reviewer_clean_input_produces_minimal_findings():
         "document_type": "投标文件",
         "project_name": "合成项目003",
     }]
+    for field in ("project_name", "budget", "customer", "deadline"):
+        assert str(items[0]["fields"][field]) in items[0]["extracted_text"]
+
     report = reviewer.review(extracted_items=items, archive_actions=actions, ledger_results=[])
 
     # 干净输入可能产出 0 finding，或低 severity finding（如 archive_plan）

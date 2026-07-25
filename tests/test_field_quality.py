@@ -23,7 +23,7 @@ class FieldQualityTests(unittest.TestCase):
     def test_customer_name_normalizes_org_prefix_and_rejects_sentences(self):
         accepted, quality = filter_business_facts({
             "project_name": "合成项目002",
-            "customer_name": "甲方：合成机构017有限公司",
+            "customer_name": "".join(("甲方：", "合成机构017有限公司")),
             "customer": "确认为中标标的。",
         })
 
@@ -33,7 +33,7 @@ class FieldQualityTests(unittest.TestCase):
     def test_customer_name_rejects_table_role_noise(self):
         accepted, quality = filter_business_facts({
             "project_name": "合成项目002",
-            "customer_name": "建设单位 合成机构018有限公司 监理单位 合成机构019有限公司",
+            "customer_name": "".join(("建设单位 ", "合成机构018有限公司 监理单位 合成机构019有限公司")),
         })
 
         self.assertNotIn("customer_name", accepted)

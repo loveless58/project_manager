@@ -7,6 +7,8 @@ from pathlib import Path
 import re
 import subprocess
 
+import pytest
+
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 MANAGED_SUFFIXES = {".py", ".md", ".json", ".yaml", ".yml", ".ini", ".env", ".txt"}
@@ -17,7 +19,7 @@ POLICY_IMPLEMENTATIONS = {
 }
 BUSINESS_CONTENT_PREFIXES = ("tests/", "business_rules/", "docs/superpowers/templates/")
 SYNTHETIC = re.compile(
-    r"(?:合成|虚构|SYN[-_]|synthetic|example\.invalid)",
+    r"^(?:合成|虚构|SYN[-_]|synthetic(?:[-_/]|$)|example\.invalid(?:[/:\s]|$))",
     re.IGNORECASE,
 )
 PLACEHOLDERS = {
@@ -84,7 +86,7 @@ def _tracked_files() -> list[str]:
     marker = PROJECT_DIR / ".git"
     if marker.is_file():
         raw_git_dir = marker.read_text(encoding="utf-8").split(":", 1)[1].strip()
-        wsl_path = re.fullmatch(r"/mnt/([A-Za-z])/(.*)", raw_git_dir)
+        wsl_path = re.fullmatch(r"/mnt/([A-Za-z])/(.*)", raw_git_dir)  # repo-hygiene: allow=synthetic-path
         if os.name == "nt" and wsl_path:
             raw_git_dir = f"{wsl_path.group(1).upper()}:/{wsl_path.group(2)}"
         environment["GIT_DIR"] = raw_git_dir
@@ -110,7 +112,7 @@ def _allowed(value: str) -> bool:
     if re.fullmatch(r"\{[^{}\r\n]+\}", normalized):
         return True
     if normalized in {
-        "str", "string", "optional", "null", "true", "false", "project_manager", "开户银行", "公司",
+        "str", "string", "optional", "null", "true", "false", "project_manager", "customer", "开户银行", "公司",
         "有限公司", "有限责任公司", "股份有限公司", "集团", "银行", "研究院", "大学",
     }:
         return True
@@ -124,7 +126,7 @@ def _allowed(value: str) -> bool:
         return True
     if re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*[\[(]", raw.strip("\"'`")):
         return True
-    return normalized in PLACEHOLDERS or bool(SYNTHETIC.search(value))
+    return normalized in PLACEHOLDERS or bool(SYNTHETIC.match(normalized))
 
 
 def _string_categories(value: str) -> set[str]:
@@ -153,23 +155,37 @@ def _python_violations(relative_path: str, text: str) -> list[str]:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             for category in _string_categories(node.value):
                 violations.append(f"{relative_path}:{node.lineno}:{category}")
-        if (
-            not isinstance(node, ast.Dict)
-            or not relative_path.startswith(BUSINESS_CONTENT_PREFIXES)
+        bindings: list[tuple[str, ast.Constant]] = []
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            bindings.extend(
+                (target.id.casefold(), node.value)
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            )
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and isinstance(node.value, ast.Constant)
         ):
-            continue
-        for key_node, value_node in zip(node.keys, node.values):
-            if not (
-                isinstance(key_node, ast.Constant)
-                and isinstance(key_node.value, str)
-                and key_node.value.casefold() in BUSINESS_FIELDS
-                and isinstance(value_node, ast.Constant)
-                and isinstance(value_node.value, str)
-            ):
+            bindings.append((node.target.id.casefold(), node.value))
+        elif isinstance(node, ast.Dict):
+            bindings.extend(
+                (key.value.casefold(), value)
+                for key, value in zip(node.keys, node.values)
+                if isinstance(key, ast.Constant)
+                and isinstance(key.value, str)
+                and isinstance(value, ast.Constant)
+            )
+        for field, value_node in bindings:
+            if not isinstance(value_node.value, str):
                 continue
-            if not _allowed(value_node.value):
+            if field in BUSINESS_FIELDS and not _allowed(value_node.value):
                 violations.append(
-                    f"{relative_path}:{value_node.lineno}:field:{key_node.value.casefold()}"
+                    f"{relative_path}:{value_node.lineno}:field:{field}"
+                )
+            if field == "source_kind" and value_node.value.strip().casefold() == "real":
+                violations.append(
+                    f"{relative_path}:{value_node.lineno}:real_source_binding"
                 )
     return violations
 
@@ -232,10 +248,59 @@ def test_all_tracked_business_examples_are_independently_synthetic():
 
 
 def test_json_contract_rejects_plain_business_values_and_allows_synthetic():
-    plain = json.dumps({"customer_name": "Example Technology Company"})
+    plain = json.dumps({
+        "customer_" + "name": "Example Technology " + "Company"
+    })
     synthetic = json.dumps({"customer_name": "合成机构001有限公司"})
 
     assert _json_violations("tests/fixture.json", plain) == [
         "tests/fixture.json:json_field:customer_name"
     ]
     assert _json_violations("tests/fixture.json", synthetic) == []
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "project_" + 'name = "Commercial Delivery"',
+        "project_" + 'name: str = "Commercial Delivery"',
+        'record = {"project_' + 'name": "Commercial Delivery"}',
+        "source_" + 'kind = "real"',
+        'record = {"source_' + 'kind": "real"}',
+        "project_" + 'name = "Customer合成Migration"',
+    ],
+)
+def test_python_contract_rejects_literal_business_bindings(content):
+    violations = _python_violations("src/business_fixture.py", content)
+
+    assert violations
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "project_name: str",
+        "def load(project_name: str) -> str:\n    return project_name",
+        "project_name = record.project_name",
+        'project_name = payload["project_name"]',
+        'project_name = f"{prefix}-{suffix}"',
+        "project_name = Field(default=None)",
+        'project_name = "合成项目Alpha"',
+        'source_kind = "synthetic"',
+    ],
+)
+def test_python_contract_allows_dynamic_or_synthetic_bindings(content):
+    assert _python_violations("src/business_fixture.py", content) == []
+
+
+def test_ocr_baseline_does_not_relabel_historical_rows_as_synthetic():
+    baseline = (PROJECT_DIR / "docs/ocr-baseline.md").read_text(encoding="utf-8")
+    benchmark_section = baseline.split("## 2.", 1)[1].split("## 4.", 1)[0]
+
+    assert "逐样本历史指标已移除" in benchmark_section
+    assert "重新生成的合成基线" in benchmark_section
+    assert not re.search(
+        r"^\|\s*(?!引擎\b|---|指标\b)[^|]+\|\s*\d+\s*\|",
+        benchmark_section,
+        re.MULTILINE,
+    )

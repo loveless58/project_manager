@@ -38,6 +38,11 @@ def test_clean_input_passes(baseline_snapshot, tmp_workspace):
     snapshot_input = baseline_snapshot["_input"]
     expected = baseline_snapshot["_expected_output"]
 
+    for item in snapshot_input["extracted_items"]:
+        for field in ("project_name", "budget", "customer", "deadline", "contract_status"):
+            if field in item["fields"]:
+                assert str(item["fields"][field]) in item["extracted_text"]
+
     result = av.run(
         run_id="test_run_snapshot",
         extracted_items=snapshot_input["extracted_items"],

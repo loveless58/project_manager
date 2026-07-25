@@ -653,18 +653,20 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
         import tempfile
         from ledger import ProjectLedger
 
+        maintenance_placeholder = "待确认"
+        initial_facts = {
+            "project_name": '合成项目013',
+            "customer_name": maintenance_placeholder,
+            "sales_owner": maintenance_placeholder,
+            "bid_status": "已弃标",
+            "registration_status": "待报名",
+        }
         with tempfile.TemporaryDirectory() as td:
             ledger = ProjectLedger(base_dir=td)
             result = ledger.apply_patch({
                 "project_name": '合成项目013',
                 "source_type": "local_file",
-                "facts": {
-                    "project_name": '合成项目013',
-                    "customer_name": "待确认",
-                    "sales_owner": "虚构人员字段019",
-                    "bid_status": "已弃标",
-                    "registration_status": "待报名",
-                },
+                "facts": initial_facts,
             })
             with open(result["state_path"], "r", encoding="utf-8") as f:
                 state = json.load(f)
@@ -676,21 +678,50 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
             state["maintenance_events"] = [{
                 "event": "field_quality_cleanup",
                 "removed_facts": [
-                    {"field": "customer_name", "value": "待确认"},
-                    {"field": "sales_owner", "value": "待确认"},
+                    {"field": "customer_name", "value": maintenance_placeholder},
+                    {"field": "sales_owner", "value": maintenance_placeholder},
                 ],
             }, {
                 "event": "state_consistency_cleanup",
                 "updated_facts": {"registration_status": "已弃标"},
             }]
+            removed_values = {
+                item["field"]: item["value"]
+                for item in state["maintenance_events"][0]["removed_facts"]
+            }
+            self.assertEqual(
+                removed_values["sales_owner"], initial_facts["sales_owner"]
+            )
 
             ledger._save_markdown(result["markdown_path"], state)
 
             with open(result["markdown_path"], "r", encoding="utf-8") as f:
                 md = f.read()
-            self.assertNotIn("| customer_name | 待确认 |", md)
-            self.assertNotIn("| sales_owner | 待确认 |", md)
+            self.assertNotIn(f"| customer_name | {maintenance_placeholder} |", md)
+            self.assertNotIn(f"| sales_owner | {maintenance_placeholder} |", md)
             self.assertNotIn("| registration_status | 待报名 |", md)
+
+    def test_customer_detection_has_no_hardcoded_synthetic_organization(self):
+        import tempfile
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
+        fields = tools._extract_docx_business_fields(
+            ["合成机构内部有限公司", "《采购公告》", "项目名称：合成项目规则中立"],
+            [],
+            "synthetic/SYN-ORG-NEUTRAL.docx",
+        )
+
+        self.assertEqual(fields["customer_name"], "合成机构内部有限公司")
+
+    def test_sales_owner_display_name_preserves_neutral_role(self):
+        import tempfile
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
+
+        self.assertEqual(tools._sales_owner_display_name("领导"), "领导")
+        self.assertEqual(tools._sales_owner_display_name(None), "未指定")
 
     def test_import_project_detail_workbook_updates_multiple_ledgers(self):
         import tempfile
@@ -1224,7 +1255,12 @@ class TestDataCleaningFileOrganizationLedger(unittest.TestCase):
         from tools.data_cleaning_tools import DataCleaningTools
 
         tools = DataCleaningTools(workspace_dir=tempfile.mkdtemp())
-        text = '# 项目记录：合成项目010\n\n## 基本信息\n- **招标人/客户**：）合成机构021有限公司\n- **负责销售**：| | |\n'
+        text = (
+            "# 项目记录：" + "合成项目010"
+            + "\n\n## 基本信息\n- **招标人/客户**：）"
+            + "合成机构021有限公司"
+            + "\n- **负责销售**：| | |\n"
+        )
 
         fields = tools._extract_fields(text)
 

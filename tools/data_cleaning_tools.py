@@ -851,7 +851,7 @@ class DataCleaningTools:
                 break
 
         for line in all_lines[:40]:
-            if line.endswith("有限公司") and "单位名称" not in line and "合成机构内部" not in line:
+            if line.endswith("有限公司") and "单位名称" not in line:
                 fields.setdefault("customer_name", self._clean_markdown_field_value(line.strip()))
                 break
 
@@ -3251,8 +3251,7 @@ class DataCleaningTools:
         return '<div class="table-wrap"><table><thead><tr><th>负责销售</th><th>项目数</th><th>已中标</th><th>已丢标</th><th>已弃标</th><th>参与中</th><th>中标率</th></tr></thead><tbody>' + "".join(rows) + "</tbody></table></div>"
 
     def _sales_owner_display_name(self, value: Any) -> str:
-        owner = str(value or "未指定").strip() or "未指定"
-        return "虚构人员002" if owner == "领导" else owner
+        return str(value or "未指定").strip() or "未指定"
 
     def _cell_text(self, value: Any) -> str:
         return "" if value is None else str(value).strip()
