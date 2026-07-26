@@ -1,5 +1,13 @@
-"""Explicit LLM adapters."""
+"""Document interpretation adapters."""
 
-from .openai_compatible_interpreter import DocumentInterpreterRequestError, OpenAICompatibleInterpreter
+from .agent_response_interpreter import AgentResponseInterpreter
+from .openai_compatible_interpreter import (
+    DocumentInterpreterRequestError,
+    OpenAICompatibleInterpreter,
+)
 
-__all__ = ["DocumentInterpreterRequestError", "OpenAICompatibleInterpreter"]
+__all__ = [
+    "AgentResponseInterpreter",
+    "DocumentInterpreterRequestError",
+    "OpenAICompatibleInterpreter",
+]

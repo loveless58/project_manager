@@ -101,6 +101,54 @@ def _input() -> dict[str, object]:
     }
 
 
+def test_prepare_retrieves_once_and_completion_uses_same_request() -> None:
+    from services.document_interpretation import DocumentInterpretationService
+
+    retrieval = StaticRetrieval(_evidence())
+    interpreter = CapturingInterpreter(
+        _valid_response(
+            relations=[
+                {
+                    "relation_type": "invoice_contract",
+                    "target_candidate_id": "contract-001",
+                }
+            ]
+        )
+    )
+    service = DocumentInterpretationService(retrieval, interpreter)
+
+    prepared = service.prepare(_input())
+    result = service.complete_prepared(prepared, interpreter)
+
+    assert len(retrieval.queries) == 1
+    assert interpreter.requests == [prepared.request]
+    assert result["status"] == "needs_review"
+    assert result["confirmed"] is False
+
+
+def test_selected_agent_unavailability_never_falls_back_to_configured_interpreter() -> None:
+    from contracts.agent_judgement import build_agent_judgement_request
+    from integrations.llm.agent_response_interpreter import AgentResponseInterpreter
+    from services.document_interpretation import DocumentInterpretationService
+
+    configured = CapturingInterpreter(_valid_response())
+    service = DocumentInterpretationService(StaticRetrieval(_evidence()), configured)
+    prepared = service.prepare(_input())
+    request = build_agent_judgement_request(
+        run_id="run_" + "a" * 32,
+        request_id="agent-request:prepared-001",
+        interpretation_request=prepared.request,
+    )
+
+    result = service.complete_prepared(
+        prepared, AgentResponseInterpreter(None, request=request)
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "DOCUMENT_INTERPRETATION.LLM.RESPONSE_INVALID"
+    assert configured.requests == []
+
+
 def test_malformed_response_blocks_and_keeps_parse_ref() -> None:
     from services.document_interpretation import DocumentInterpretationService
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 import json
 import math
@@ -129,6 +130,13 @@ _MAX_DEPTH = 32
 _MAX_NODES = 4_096
 
 
+@dataclass(frozen=True)
+class PreparedDocumentInterpretation:
+    parse_artifact_ref: str
+    request: dict[str, Any]
+    business_context: dict[str, Any]
+
+
 class DocumentInterpretationService:
     """Build a bounded evidence request and fail closed on every boundary error."""
 
@@ -143,23 +151,57 @@ class DocumentInterpretationService:
             else ""
         )
         try:
-            _validate_adapter(self.interpreter)
-            document = _document(evidence_pack)
-            context = self.retrieval_service.find_business_candidates(
-                BusinessContextQuery(
-                    document["document_type_hint"],
-                    document["candidate_fields"],
-                    document["text_segments"],
-                )
+            prepared = self.prepare(evidence_pack)
+        except DocumentInterpretationSchemaError:
+            return _blocked(ref, "DOCUMENT_INTERPRETATION.SCHEMA_INVALID")
+        except Exception as error:
+            code = getattr(error, "code", None)
+            return _blocked(
+                ref,
+                code
+                if type(code) is str and code in _ALLOWED_ERROR_CODES
+                else _REQUEST_FAILED,
             )
-            if not isinstance(context, BusinessContextEvidence):
-                raise DocumentInterpretationSchemaError("business context")
-            request = _request(ref, document, context)
+        return self.complete_prepared(prepared, self.interpreter)
+
+    def prepare(self, evidence_pack: Any) -> PreparedDocumentInterpretation:
+        ref = (
+            _artifact(evidence_pack.get("parse_artifact_ref"))
+            if type(evidence_pack) is dict
+            else ""
+        )
+        _validate_adapter(self.interpreter)
+        document = _document(evidence_pack)
+        context = self.retrieval_service.find_business_candidates(
+            BusinessContextQuery(
+                document["document_type_hint"],
+                document["candidate_fields"],
+                document["text_segments"],
+            )
+        )
+        if not isinstance(context, BusinessContextEvidence):
+            raise DocumentInterpretationSchemaError("business context")
+        request = _request(ref, document, context)
+        return PreparedDocumentInterpretation(
+            parse_artifact_ref=ref,
+            request=request,
+            business_context=request["business_context"],
+        )
+
+    def complete_prepared(
+        self,
+        prepared: PreparedDocumentInterpretation,
+        interpreter: Any,
+    ) -> dict[str, Any]:
+        ref = _prepared_ref(prepared)
+        try:
+            _validate_prepared(prepared)
+            _validate_adapter(interpreter)
             result = parse_candidate_document_interpretation(
-                self.interpreter.complete_json(request)
+                interpreter.complete_json(prepared.request)
             )
-            _identity(result, self.interpreter)
-            _trace(result, request["business_context"])
+            _identity(result, interpreter)
+            _trace(result, prepared.business_context)
         except DocumentInterpretationSchemaError:
             return _blocked(ref, "DOCUMENT_INTERPRETATION.SCHEMA_INVALID")
         except Exception as error:
@@ -177,6 +219,65 @@ class DocumentInterpretationService:
         if output["status"] == "success" and output["relations"]:
             output["status"] = "needs_review"
         return output
+
+
+def _prepared_ref(prepared: object) -> str:
+    if isinstance(prepared, PreparedDocumentInterpretation):
+        return _artifact(prepared.parse_artifact_ref)
+    return ""
+
+
+def _validate_prepared(prepared: object) -> None:
+    if not isinstance(prepared, PreparedDocumentInterpretation):
+        raise DocumentInterpretationSchemaError("prepared interpretation")
+    if (
+        type(prepared.request) is not dict
+        or type(prepared.business_context) is not dict
+        or not _artifact(prepared.parse_artifact_ref)
+    ):
+        raise DocumentInterpretationSchemaError("prepared interpretation")
+
+    request = prepared.request
+    expected_keys = {
+        "schema_version",
+        "parse_artifact_ref",
+        "document",
+        "business_context",
+    }
+    if (
+        set(request) != expected_keys
+        or request["parse_artifact_ref"] != prepared.parse_artifact_ref
+        or request["business_context"] is not prepared.business_context
+    ):
+        raise DocumentInterpretationSchemaError("prepared interpretation")
+
+    try:
+        document = request["document"]
+        source = {
+            "parse_artifact_ref": prepared.parse_artifact_ref,
+            "document_type_hint": document["document_type_hint"],
+            "candidate_fields": document["candidate_fields"],
+            "text_segments": document["text_segments"],
+        }
+        clean_document = _document(source)
+        context = prepared.business_context
+        context_evidence = BusinessContextEvidence(
+            context["status"],
+            tuple(context["candidates"]),
+            tuple(context["evidence"]),
+            tuple(context["conflicts"]),
+            tuple(context["diagnostics"]),
+        )
+        expected_request = _request(
+            prepared.parse_artifact_ref,
+            clean_document,
+            context_evidence,
+        )
+    except (KeyError, TypeError):
+        raise DocumentInterpretationSchemaError("prepared interpretation") from None
+
+    if request != expected_request:
+        raise DocumentInterpretationSchemaError("prepared interpretation")
 
 
 def _validate_adapter(interpreter: Any) -> None:
@@ -666,4 +767,4 @@ def _blocked(ref: str, reason: str) -> dict[str, Any]:
     }
 
 
-__all__ = ["DocumentInterpretationService"]
+__all__ = ["DocumentInterpretationService", "PreparedDocumentInterpretation"]
