@@ -829,10 +829,15 @@ class DataCleaningTools:
         """Select a document-specific extractor before applying generic rules."""
         if document_type == "发票":
             fields = extract_invoice_fields(text)
-            if re.search(
-                r"(?:采购名称|标的名称)\**\s*[:：]\s*\S", text
-            ):
-                explicit_project_name = self._extract_fields(text).get("project_name")
+            explicit_project = re.search(
+                r"(?m)^[ \t]*(?:[-*][ \t]+)?(?:采购名称|标的名称)\**"
+                r"[ \t]*[:：][ \t]*(.+?)[ \t]*$",
+                text,
+            )
+            if explicit_project:
+                explicit_project_name = self._clean_markdown_field_value(
+                    explicit_project.group(1)
+                )
                 if explicit_project_name:
                     fields["project_name"] = explicit_project_name
             return fields

@@ -402,3 +402,30 @@ python.exe -m pytest tests/integration/test_local_agent_judgement_dry_run.py tes
 `py_compile` and `git diff --check` completed with exit code `0`. Fresh
 UTF-8 `governance/validate.py repository` and `all` runs still report only the
 same six upstream baseline findings; no Task 5 file is named.
+
+### Fix-round-4 review follow-up: ordered invoice labels
+
+The review found that the invoice guard only checked whether an explicit
+`采购名称` or `标的名称` existed, then delegated to the generic extractor. If an
+invoice line-item `项目名称 规格型号` header appeared first, the generic match
+could promote `规格型号` to `project_name` even though a valid explicit project
+label appeared later.
+
+Parameterized counterexamples for both explicit labels reproduced the defect:
+
+```text
+2 failed in 0.19s
+```
+
+The invoice branch now independently captures and cleans only the value bound
+to a line-anchored `采购名称` or `标的名称`. It never delegates project-name
+selection to the generic extractor. Existing no-explicit-label and explicit-
+label-before-header cases plus both ordered counterexamples passed together:
+
+```text
+4 passed in 0.21s
+```
+
+The refreshed Task 5, contract, production-verification, business-judgement,
+and invoice regression set passed `124 tests in 27.21s`. Targeted `py_compile`
+and `git diff --check` completed with exit code `0`.

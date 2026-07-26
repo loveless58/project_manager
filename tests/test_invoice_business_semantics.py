@@ -48,6 +48,27 @@ def test_invoice_explicit_procurement_name_is_business_project(tmp_path):
     ]
 
 
+@pytest.mark.parametrize("label", ["采购名称", "标的名称"])
+def test_invoice_explicit_project_after_item_header_wins(
+    tmp_path, label
+):
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    text = (
+        "电子发票\n"
+        "项目名称 规格型号\n"
+        "技术服务 标准版\n"
+        f"{label}：合成项目001"
+    )
+
+    fields = DataCleaningTools(
+        workspace_dir=str(tmp_path)
+    )._extract_fields_for_document(text, "发票")
+
+    assert fields["project_name"] == "合成项目001"
+    assert fields["project_name"] != "规格型号"
+
+
 def test_project_governance_markdown_reuses_parsed_classification_for_archive_plan(tmp_path):
     """Changing archive planning to reclassify a parsed governance document must fail this test."""
     from business_rules.archive_decision import evaluate_archive_decision
