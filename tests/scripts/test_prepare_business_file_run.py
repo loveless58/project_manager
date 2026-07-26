@@ -155,6 +155,27 @@ def test_agent_mode_does_not_report_an_invocation_target_binding(tmp_path, capsy
     assert summary["target_binding"] is None
 
 
+def test_agent_prepare_preserves_gateway_block_without_source_binding(tmp_path, capsys):
+    """Reading a missing manifest must not rewrite a gateway prepare block."""
+    module = _module()
+    config, catalog, source, _, _ = _agent_inputs(tmp_path)
+
+    exit_code = module.main(
+        [
+            "--config", str(config), "--context", str(catalog),
+            "--source-binding", "source", "--interpreter-mode", "agent",
+            str(source), str(source),
+        ]
+    )
+
+    summary = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert summary["status"] == "blocked"
+    assert summary["error_code"] == "AGENT_JUDGEMENT.REQUEST_INVALID"
+    assert summary["source_binding"] is None
+    assert summary["target_binding"] is None
+
+
 def test_agent_resume_rejects_missing_response_without_configured_llm(tmp_path, capsys):
     """Dropping the resume-response guard must remain a capability block."""
     module = _module()

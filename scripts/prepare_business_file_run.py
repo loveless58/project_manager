@@ -187,7 +187,7 @@ def _summary(*, prepared: dict[str, Any], verification: dict[str, Any], audit: d
     }
 
 
-def _agent_summary(*, result: dict[str, Any], source_binding: str) -> dict[str, Any]:
+def _agent_summary(*, result: dict[str, Any], source_binding: str | None) -> dict[str, Any]:
     """Return only host-safe identifiers and status for an agent-gateway result."""
     status = str(result.get("status", "blocked"))
     payload = {
@@ -269,11 +269,13 @@ def main(argv: Sequence[str] | None = None, *, interpreter_factory: Callable[[],
                 )
             else:
                 result = tools.prepare_agent_judgement_run(files)
-                source_binding = _agent_manifest_source_binding(
-                    _agent_manifest_entries(
-                        result["artifacts"]["run_dir"], result["run_id"],
+                source_binding = None
+                if result.get("status") == "awaiting_agent_judgement":
+                    source_binding = _agent_manifest_source_binding(
+                        _agent_manifest_entries(
+                            result["artifacts"]["run_dir"], result["run_id"],
+                        )
                     )
-                )
             _emit(
                 _agent_summary(
                     result=result,
