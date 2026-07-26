@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from types import MappingProxyType
 
 import pytest
 
@@ -126,3 +127,62 @@ def test_request_rejects_physical_paths_and_credentials(bad_value: str) -> None:
             request_id="agent-request:invoice-001",
             interpretation_request=payload,
         )
+
+
+@pytest.mark.parametrize(
+    "line_items",
+    [
+        [{"password": "real-secret"}],
+        [{"details": {"credentials": {"api_key": "real-secret"}}}],
+    ],
+)
+def test_request_rejects_sensitive_line_item_keys_at_any_depth(line_items: list[object]) -> None:
+    payload = deepcopy(VALID_INTERPRETATION_REQUEST)
+    payload["document"]["candidate_fields"]["line_items"] = line_items
+
+    with pytest.raises(AgentJudgementSchemaError):
+        build_agent_judgement_request(
+            run_id="run_" + "a" * 32,
+            request_id="agent-request:invoice-001",
+            interpretation_request=payload,
+        )
+
+
+@pytest.mark.parametrize(
+    "path_value",
+    [
+        "archive/private/invoice.pdf",
+        "ref:/private/invoice.pdf",
+        r"\\server\private\invoice.pdf",
+        "file://localhost/private/invoice.pdf",
+    ],
+)
+def test_request_rejects_physical_paths_in_transferable_and_nested_fields(path_value: str) -> None:
+    payload = deepcopy(VALID_INTERPRETATION_REQUEST)
+    payload["document"]["candidate_fields"]["contract_code"] = path_value
+
+    with pytest.raises(AgentJudgementSchemaError):
+        build_agent_judgement_request(
+            run_id="run_" + "a" * 32,
+            request_id="agent-request:invoice-001",
+            interpretation_request=payload,
+        )
+
+    payload = deepcopy(VALID_INTERPRETATION_REQUEST)
+    payload["document"]["candidate_fields"]["line_items"] = [{"description": path_value}]
+    with pytest.raises(AgentJudgementSchemaError):
+        build_agent_judgement_request(
+            run_id="run_" + "a" * 32,
+            request_id="agent-request:invoice-001",
+            interpretation_request=payload,
+        )
+
+
+def test_request_accepts_read_only_mapping_inputs() -> None:
+    request = build_agent_judgement_request(
+        run_id="run_" + "a" * 32,
+        request_id="agent-request:invoice-001",
+        interpretation_request=MappingProxyType(deepcopy(VALID_INTERPRETATION_REQUEST)),
+    )
+
+    assert request["interpretation_request"]["schema_version"] == "document_interpretation_evidence_pack.v1"

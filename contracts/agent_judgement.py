@@ -33,7 +33,7 @@ _EVIDENCE_FIELDS = {"buyer.tax_id", "seller.tax_id", "buyer.name", "seller.name"
 _DOCUMENT_TYPES = {"invoice", "project", "contract", "bid", "tender", "other", "发票", "项目", "合同", "投标", "招标", "其他"}
 _CONTEXT_STATUSES = {"matched", "needs_review", "blocked"}
 _DIAGNOSTICS = {"BUSINESS_CONTEXT.CANDIDATES_FOUND", "BUSINESS_CONTEXT.NO_CANDIDATES", "BUSINESS_CONTEXT.CONFLICTS_FOUND"}
-_FIELD_NAMES = {"invoice_number", "invoice_date", "amount", "tax_amount", "total_amount", "buyer_name", "buyer_tax_id", "seller_name", "seller_tax_id", "project_code", "project_name", "contract_code", "contract_name", "buyer", "seller", "date", "line_items"}
+_FIELD_NAMES = {"invoice_number", "invoice_date", "amount", "tax_amount", "total_amount", "buyer_name", "buyer_tax_id", "seller_name", "seller_tax_id", "project_code", "project_name", "contract_code", "contract_name"}
 
 
 class AgentJudgementSchemaError(ValueError):
@@ -42,7 +42,8 @@ class AgentJudgementSchemaError(ValueError):
 
 def canonical_hash(payload: Mapping[str, Any]) -> str:
     try:
-        encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"))
+        value = _normalize_json(payload)
+        encoded = json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"))
     except (TypeError, ValueError):
         raise AgentJudgementSchemaError("non-canonical payload") from None
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -70,7 +71,7 @@ def build_agent_judgement_request(*, run_id: str, request_id: str, interpretatio
 def parse_agent_judgement_response(payload: object, *, request: Mapping[str, Any]) -> dict[str, Any]:
     try:
         bound_request = _validate_request_envelope(request)
-        value = _decode(payload)
+        value = _normalize_json(_decode(payload))
         _validate_tree(value)
         if type(value) is not dict:
             raise AgentJudgementSchemaError("response root")
@@ -95,17 +96,18 @@ def parse_agent_judgement_response(payload: object, *, request: Mapping[str, Any
 
 def validate_interpretation_request(payload: Mapping[str, Any]) -> dict[str, Any]:
     try:
-        _validate_tree(payload)
-        if type(payload) is not dict:
+        value = _normalize_json(payload)
+        _validate_tree(value)
+        if type(value) is not dict:
             raise AgentJudgementSchemaError("interpretation request root")
-        _exact_keys(payload, {"schema_version", "parse_artifact_ref", "document", "business_context"})
-        if payload["schema_version"] != "document_interpretation_evidence_pack.v1":
+        _exact_keys(value, {"schema_version", "parse_artifact_ref", "document", "business_context"})
+        if value["schema_version"] != "document_interpretation_evidence_pack.v1":
             raise AgentJudgementSchemaError("interpretation request schema_version")
-        if type(payload["parse_artifact_ref"]) is not str or not _ARTIFACT_REF.fullmatch(payload["parse_artifact_ref"]):
+        if type(value["parse_artifact_ref"]) is not str or not _ARTIFACT_REF.fullmatch(value["parse_artifact_ref"]):
             raise AgentJudgementSchemaError("parse_artifact_ref")
-        _document(payload["document"])
-        _business_context(payload["business_context"])
-        return _copy_json(payload)
+        _document(value["document"])
+        _business_context(value["business_context"])
+        return _copy_json(value)
     except AgentJudgementSchemaError:
         raise
     except Exception:
@@ -113,19 +115,20 @@ def validate_interpretation_request(payload: Mapping[str, Any]) -> dict[str, Any
 
 
 def _validate_request_envelope(request: Mapping[str, Any]) -> dict[str, Any]:
-    _validate_tree(request)
-    if type(request) is not dict:
+    value = _normalize_json(request)
+    _validate_tree(value)
+    if type(value) is not dict:
         raise AgentJudgementSchemaError("request type")
-    _exact_keys(request, _REQUEST_ROOT)
-    if request["schema_version"] != REQUEST_SCHEMA_VERSION:
+    _exact_keys(value, _REQUEST_ROOT)
+    if value["schema_version"] != REQUEST_SCHEMA_VERSION:
         raise AgentJudgementSchemaError("request schema_version")
-    validate_run_id(request["run_id"])
-    validate_request_id(request["request_id"])
-    safe_request = validate_interpretation_request(request["interpretation_request"])
-    request_hash = request["request_hash"]
+    validate_run_id(value["run_id"])
+    validate_request_id(value["request_id"])
+    safe_request = validate_interpretation_request(value["interpretation_request"])
+    request_hash = value["request_hash"]
     if type(request_hash) is not str or not re.fullmatch(r"[0-9a-f]{64}", request_hash):
         raise AgentJudgementSchemaError("request_hash")
-    unhashed = {"schema_version": request["schema_version"], "run_id": request["run_id"], "request_id": request["request_id"], "interpretation_request": safe_request}
+    unhashed = {"schema_version": value["schema_version"], "run_id": value["run_id"], "request_id": value["request_id"], "interpretation_request": safe_request}
     if canonical_hash(unhashed) != request_hash:
         raise AgentJudgementSchemaError("request hash binding")
     return {**unhashed, "request_hash": request_hash}
@@ -153,18 +156,10 @@ def _candidate_fields(value: object) -> None:
     if type(value) is not dict or set(value) - _FIELD_NAMES:
         raise AgentJudgementSchemaError("candidate fields")
     for name, item in value.items():
-        if name in {"buyer", "seller"}:
-            if type(item) is not dict or not item or set(item) - {"name", "tax_id"}:
-                raise AgentJudgementSchemaError("candidate party")
-            for party_value in item.values():
-                _text(party_value, "candidate party")
-        elif name == "line_items":
-            if type(item) is not list:
-                raise AgentJudgementSchemaError("line_items")
-        elif name in {"amount", "tax_amount", "total_amount"}:
+        if name in {"amount", "tax_amount", "total_amount"}:
             _finite_number(item, "candidate amount")
         else:
-            _text(item, "candidate field")
+            _semantic_text(item, "candidate field")
 
 
 def _business_context(value: object) -> None:
@@ -277,6 +272,26 @@ def _nonfinite(_: str) -> None:
     raise AgentJudgementSchemaError("nonfinite number")
 
 
+def _normalize_json(value: object, depth: int = 1) -> object:
+    if depth > MAX_DEPTH:
+        raise AgentJudgementSchemaError("tree limit")
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        try:
+            for key, item in value.items():
+                if type(key) is not str or key in result:
+                    raise AgentJudgementSchemaError("key type")
+                result[key] = _normalize_json(item, depth + 1)
+        except AgentJudgementSchemaError:
+            raise
+        except Exception:
+            raise AgentJudgementSchemaError("mapping") from None
+        return result
+    if type(value) is list:
+        return [_normalize_json(item, depth + 1) for item in value]
+    return value
+
+
 def _validate_tree(root: object) -> None:
     stack: list[tuple[object, int]] = [(root, 1)]
     nodes = 0
@@ -304,6 +319,7 @@ def _validate_tree(root: object) -> None:
             for key, item in value.items():
                 if type(key) is not str:
                     raise AgentJudgementSchemaError("key type")
+                _safe_key(key)
                 stack.append((key, depth + 1))
                 stack.append((item, depth + 1))
         else:
@@ -318,7 +334,32 @@ def _safe_string(value: str) -> None:
     normalized = unicodedata.normalize("NFKC", value).casefold()
     if _CREDENTIAL.search(normalized):
         raise AgentJudgementSchemaError("credential")
-    if _PHYSICAL_PATH.search(value):
+    if _looks_physical_path(value):
+        raise AgentJudgementSchemaError("physical path")
+
+
+def _safe_key(value: str) -> None:
+    _safe_string(value)
+    if _looks_sensitive_key(unicodedata.normalize("NFKC", value).casefold()):
+        raise AgentJudgementSchemaError("credential key")
+
+
+def _looks_sensitive_key(value: str) -> bool:
+    return any(token in value for token in ("authorization", "credential", "token", "api_key", "api-key", "password"))
+
+
+def _looks_physical_path(value: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return bool(
+        _PHYSICAL_PATH.search(value)
+        or re.search(r"(?:^|[^a-z0-9_])(?:file|ref):(?:/{1,3}|\\)", normalized)
+        or re.search(r"(?:^|[\s\"'(=])(?:[^/\\\s]+[/\\])+(?:[^/\\\s]+\.(?:pdf|docx|xlsx|xls|csv|xml|json|md|txt))\b", value, re.IGNORECASE)
+    )
+
+
+def _semantic_text(value: object, label: str) -> None:
+    _text(value, label)
+    if "/" in value or "\\" in value or re.search(r"(?i)(?:file|ref):", value):
         raise AgentJudgementSchemaError("physical path")
 
 
