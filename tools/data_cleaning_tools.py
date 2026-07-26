@@ -158,6 +158,14 @@ CLASSIFICATION_KEYWORDS = {
     "项目丢标": ["弃标", "流标", "归档", "结算", "结项", "未中标"],
 }
 
+_INVOICE_DOCUMENT_TYPES = frozenset({"发票", "invoice"})
+
+
+def _is_invoice_document_type(document_type: object) -> bool:
+    """Return whether a normalized document type uses a supported invoice alias."""
+    return type(document_type) is str and document_type in _INVOICE_DOCUMENT_TYPES
+
+
 _FEEDBACK_LOCKS_GUARD = threading.Lock()
 _FEEDBACK_LOCKS: Dict[str, threading.RLock] = {}
 
@@ -406,7 +414,7 @@ class DataCleaningTools:
             classification = self._classify_document(file_path, text, result.get("document_type") or "")
             document_type = classification["document_type"]
             fields = self._extract_fields_for_document(text, document_type)
-            if document_type != "发票":
+            if not _is_invoice_document_type(document_type):
                 self._apply_ocr_field_aliases(fields, result.get("fields", {}), document_type)
             result["fields"] = fields
             result["document_type"] = document_type
@@ -491,7 +499,7 @@ class DataCleaningTools:
             classification = self._classify_document(file_path, text)
             document_type = classification["document_type"]
             fields = self._extract_fields_for_document(text, document_type)
-            if document_type != "发票":
+            if not _is_invoice_document_type(document_type):
                 fields.update(self._extract_docx_business_fields(paragraphs, table_rows, file_path))
 
             return {
@@ -827,7 +835,7 @@ class DataCleaningTools:
 
     def _extract_fields_for_document(self, text: str, document_type: str) -> Dict[str, Any]:
         """Select a document-specific extractor before applying generic rules."""
-        if document_type in {"发票", "invoice"}:
+        if _is_invoice_document_type(document_type):
             fields = extract_invoice_fields(text)
             fields.pop("project_name", None)
             return fields
@@ -1071,8 +1079,9 @@ class DataCleaningTools:
 
         document_type = document_type_hint or self._classify_text_document(file_path, text)
         phase = self._business_phase_from_path(file_path)
-        domain = "finance" if document_type == "发票" else ("bid_project" if phase or document_type != "未分类" or "项目名称" in text else "unknown")
-        requires_review = domain == "unknown" or (document_type == "发票" and not phase)
+        is_invoice = _is_invoice_document_type(document_type)
+        domain = "finance" if is_invoice else ("bid_project" if phase or document_type != "未分类" or "项目名称" in text else "unknown")
+        requires_review = domain == "unknown" or (is_invoice and not phase)
         return DocumentClassification(document_type, domain, phase or None, phase or None, 0.9 if document_type != "未分类" else 0.3, [f"filename:{filename}"], requires_review).payload()
     def _classify_text_document(self, file_path: str, text: str) -> str:
         filename = os.path.basename(file_path)

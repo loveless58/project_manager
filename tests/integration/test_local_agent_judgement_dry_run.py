@@ -187,6 +187,95 @@ def _forbid_external_providers(monkeypatch) -> None:
         monkeypatch.setattr(DataCleaningTools, method, staticmethod(forbidden))
 
 
+def _strict_extracted_artifact(root: Path, run_id: str, source_name: str) -> dict:
+    extracted_dir = root / "runtime" / "runs" / run_id / "extracted"
+    return next(
+        payload
+        for path in extracted_dir.glob("*.json")
+        for payload in [json.loads(path.read_text(encoding="utf-8"))]
+        if payload["source_ref"]["object_key"] == source_name
+    )
+
+
+def test_english_invoice_ocr_alias_cannot_reintroduce_project_name(
+    tmp_path, monkeypatch
+) -> None:
+    """The public Task5 flow must treat the provider's English alias as an invoice."""
+    _forbid_external_providers(monkeypatch)
+    from ocr import provider_registry
+    from scripts.run_local_agent_dry_run import run_local_agent_dry_run
+
+    original_extract = provider_registry.extract_pdf_or_image
+
+    def english_invoice_provider(file_path, **kwargs):
+        extracted = original_extract(file_path, **kwargs)
+        if "INV-001" not in str(extracted.get("extracted_text") or ""):
+            return extracted
+        extracted = dict(extracted)
+        extracted["document_type"] = "invoice"
+        extracted["fields"] = {
+            **dict(extracted.get("fields") or {}),
+            "project_name": "合成项目999",
+        }
+        return extracted
+
+    monkeypatch.setattr(
+        provider_registry, "extract_pdf_or_image", english_invoice_provider
+    )
+    root = tmp_path / "english-invoice-ocr"
+
+    result = run_local_agent_dry_run(root, host=StrictSyntheticAgentHost())
+
+    artifact = _strict_extracted_artifact(
+        root, result["run_id"], "synthetic-invoice.pdf"
+    )
+    assert artifact["document_type"] == "invoice"
+    assert "project_name" not in artifact["candidate_fields"]
+    assert artifact["classification"]["business_domain"] == "finance"
+    assert artifact["classification"]["requires_review"] is True
+    assert result["native_statuses"]["invoice"] == "needs_review"
+    assert result["status"] == "needs_review"
+
+
+def test_english_invoice_docx_body_cannot_reintroduce_project_name(
+    tmp_path, monkeypatch
+) -> None:
+    """DOCX enrichment must not override the invoice-specific field boundary."""
+    _forbid_external_providers(monkeypatch)
+    from docx import Document
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    source = tmp_path / "invoice.docx"
+    document = Document()
+    for paragraph in (
+        "Invoice",
+        "发票号码：SYN-INVOICE-DOCX-001",
+        "项目名称：合成项目999",
+    ):
+        document.add_paragraph(paragraph)
+    document.save(source)
+    original_classify = DataCleaningTools._classify_text_document
+
+    def classify_english_invoice(self, file_path, text):
+        if "SYN-INVOICE-DOCX-001" in text:
+            return "invoice"
+        return original_classify(self, file_path, text)
+
+    monkeypatch.setattr(
+        DataCleaningTools, "_classify_text_document", classify_english_invoice
+    )
+    tools = DataCleaningTools(workspace_dir=str(tmp_path / "runtime"))
+
+    extracted = tools.extract_document(str(source))
+    result = tools.prepare_file_organization_run([str(source)])
+
+    assert extracted["document_type"] == "invoice"
+    assert "project_name" not in extracted["fields"]
+    assert extracted["classification"]["business_domain"] == "finance"
+    assert extracted["classification"]["requires_review"] is True
+    assert result["archive_actions"][0]["status"] == "needs_review"
+
+
 def test_invalid_or_missing_host_response_fails_closed(tmp_path, monkeypatch) -> None:
     """Accepting absent, hash-altered, unsafe, or unevidenced output is a bug."""
     _forbid_external_providers(monkeypatch)
