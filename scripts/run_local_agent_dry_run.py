@@ -8,19 +8,29 @@ engines, or authorize an archive action.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import hashlib
 import json
 import os
 from pathlib import Path
 import stat
 import sys
+import tempfile
 from typing import Any, Protocol, Sequence
+import zipfile
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app_bootstrap.composition import build_runtime_adapters
+from contracts.archive_run_artifacts import (
+    strict_json_load,
+    validate_archive_execution_plan,
+    validate_audit_review,
+    validate_review_queue,
+)
+from contracts.feedback_form_schema import review_item_snapshot_hash
 from infrastructure.database.sqlite import initialize_schema_metadata
 from integrations.business_context import JsonBusinessContextProvider
 from ocr.providers import DisabledOcrProvider
@@ -50,6 +60,7 @@ SOURCE_NAMES = {
     "scan": "synthetic-scan.pdf",
 }
 _SYNTHETIC_MARKER = ".local-agent-dry-run.synthetic.v1.json"
+_FIXED_DOCUMENT_TIME = datetime(2026, 7, 26, 0, 0, 0)
 _INVOICE_CODE = "".join(("INV", "-001"))
 _CONTRACT_CODE = "".join(("CT", "-001"))
 _PROJECT_CODE = "".join(("PRJ", "-001"))
@@ -275,6 +286,8 @@ def _create_synthetic_source(source_root: Path) -> dict[str, Path]:
     )
 
     contract = Document()
+    contract.core_properties.created = _FIXED_DOCUMENT_TIME
+    contract.core_properties.modified = _FIXED_DOCUMENT_TIME
     for paragraph in _CONTRACT_PARAGRAPHS:
         contract.add_paragraph(paragraph)
     contract.save(paths["contract"])
@@ -282,6 +295,8 @@ def _create_synthetic_source(source_root: Path) -> dict[str, Path]:
     paths["markdown"].write_text(_MARKDOWN_TEXT, encoding="utf-8")
 
     workbook = Workbook()
+    workbook.properties.created = _FIXED_DOCUMENT_TIME
+    workbook.properties.modified = _FIXED_DOCUMENT_TIME
     worksheet = workbook.active
     worksheet.title = "synthetic-project"
     for row in _XLSX_ROWS:
@@ -293,87 +308,72 @@ def _create_synthetic_source(source_root: Path) -> dict[str, Path]:
     return paths
 
 
-def _has_canonical_synthetic_content(paths: dict[str, Path]) -> bool:
-    """Validate normalized fixture semantics against constants owned by this code."""
-    try:
-        import fitz
-        from docx import Document
-        from openpyxl import load_workbook
-        from xml.etree import ElementTree
+def _update_digest(digest: Any, value: bytes) -> None:
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
 
-        if paths["markdown"].read_text(encoding="utf-8") != _MARKDOWN_TEXT:
-            return False
-        if paths["xml"].read_text(encoding="utf-8") != _XML_TEXT:
-            return False
-        xml_root = ElementTree.parse(paths["xml"]).getroot()
-        if (
-            xml_root.tag != "project"
-            or xml_root.attrib
-            or [(child.tag, child.text, child.attrib) for child in xml_root]
-            != [
-                ("项目编号", _PROJECT_CODE, {}),
-                ("合同编号", _CONTRACT_CODE, {}),
-            ]
-        ):
-            return False
 
-        contract = Document(paths["contract"])
-        if tuple(item.text for item in contract.paragraphs) != _CONTRACT_PARAGRAPHS:
-            return False
-        if contract.tables or contract.inline_shapes:
-            return False
+def _package_digest(path: Path) -> str:
+    import re
 
-        workbook = load_workbook(paths["xlsx"], read_only=True, data_only=False)
-        try:
-            if workbook.sheetnames != ["synthetic-project"]:
-                return False
-            rows = tuple(
-                tuple(cell.value for cell in row)
-                for row in workbook["synthetic-project"].iter_rows()
+    digest = hashlib.sha256()
+    with zipfile.ZipFile(path) as package:
+        names = [item.filename for item in package.infolist()]
+        if len(names) != len(set(names)):
+            raise ValueError("duplicate package member")
+        for name in sorted(names):
+            _update_digest(digest, name.encode("utf-8"))
+            payload = package.read(name)
+            if path.suffix.casefold() == ".xlsx" and name == "docProps/core.xml":
+                payload = re.sub(
+                    rb"(<dcterms:modified\b[^>]*>)[^<]*(</dcterms:modified>)",
+                    rb"\1<canonical-modified-time>\2",
+                    payload,
+                    count=1,
+                )
+            _update_digest(digest, payload)
+    return digest.hexdigest()
+
+
+def _pdf_structure_digest(path: Path) -> str:
+    """Hash every PDF indirect object and stream, excluding volatile trailer IDs."""
+    import fitz
+
+    digest = hashlib.sha256()
+    with fitz.open(path) as document:
+        if document.is_encrypted or document.is_repaired:
+            raise ValueError("non-canonical PDF")
+        _update_digest(digest, str(document.page_count).encode("ascii"))
+        _update_digest(digest, str(document.xref_length()).encode("ascii"))
+        _update_digest(digest, str(document.pdf_catalog()).encode("ascii"))
+        for xref in range(1, document.xref_length()):
+            _update_digest(digest, str(xref).encode("ascii"))
+            _update_digest(
+                digest,
+                document.xref_object(xref, compressed=False).encode("utf-8"),
             )
-            if rows != _XLSX_ROWS or workbook._external_links:
-                return False
-        finally:
-            workbook.close()
+            if document.xref_is_stream(xref):
+                _update_digest(digest, document.xref_stream_raw(xref) or b"")
+    return digest.hexdigest()
 
-        with fitz.open(paths["invoice"]) as invoice:
-            if invoice.page_count != 1 or invoice.embfile_count() != 0:
-                return False
-            page = invoice[0]
-            normalized_text = "".join(page.get_text("text").split())
-            if normalized_text != "".join(_INVOICE_TEXT.split()):
-                return False
-            if page.get_images(full=True):
-                return False
 
-        with fitz.open(paths["scan"]) as scan:
-            if scan.page_count != 1 or scan.embfile_count() != 0:
-                return False
-            page = scan[0]
-            images = page.get_images(full=True)
-            if page.get_text("text").strip() or page.get_drawings():
-                return False
-            if len(images) != 1:
-                return False
-            xref, _smask, width, height, bpc = images[0][:5]
-            if (width, height, bpc) != (64, 64, 8):
-                return False
-            image_rects = page.get_image_rects(xref)
-            if len(image_rects) != 1 or image_rects[0] != page.rect:
-                return False
-            pixels = fitz.Pixmap(scan, xref)
-            try:
-                if (
-                    pixels.n != 3
-                    or pixels.alpha != 0
-                    or pixels.samples != bytes([115]) * (64 * 64 * 3)
-                ):
-                    return False
-            finally:
-                pixels = None
-    except (OSError, ValueError, KeyError, TypeError):
-        return False
-    return True
+def _canonical_file_digest(path: Path) -> str:
+    suffix = path.suffix.casefold()
+    if suffix in {".docx", ".xlsx"}:
+        return _package_digest(path)
+    if suffix == ".pdf":
+        return _pdf_structure_digest(path)
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _canonical_source_digests(paths: dict[str, Path]) -> dict[str, str]:
+    return {name: _canonical_file_digest(path) for name, path in paths.items()}
+
+
+def _trusted_canonical_source_digests() -> dict[str, str]:
+    with tempfile.TemporaryDirectory(prefix="local-agent-dry-run-canonical-") as raw:
+        reference_paths = _create_synthetic_source(Path(raw))
+        return _canonical_source_digests(reference_paths)
 
 
 def _load_existing_synthetic_source(source_root: Path) -> dict[str, Path]:
@@ -389,7 +389,12 @@ def _load_existing_synthetic_source(source_root: Path) -> dict[str, Path]:
     except (OSError, ValueError):
         raise DryRunSafetyError("DRY_RUN.SOURCE_UNSAFE") from None
     files = _validated_source_paths(source_root, list(expected.values()))
-    if not _has_canonical_synthetic_content(expected):
+    try:
+        canonical = _canonical_source_digests(expected)
+        trusted = _trusted_canonical_source_digests()
+    except Exception:
+        raise DryRunSafetyError("DRY_RUN.SOURCE_UNSAFE") from None
+    if canonical != trusted:
         raise DryRunSafetyError("DRY_RUN.SOURCE_UNSAFE")
     if recorded != {
         "schema_version": "local_agent_dry_run_source.v1",
@@ -531,6 +536,308 @@ def _confirmation_flags_are_false(*payloads: Any) -> bool:
     return all(flag is False for flag in flags)
 
 
+def _same_artifact_path(value: Any, expected: Path) -> bool:
+    if type(value) is not str:
+        return False
+    try:
+        return Path(value).resolve() == expected.resolve()
+    except OSError:
+        return False
+
+
+def _validated_review_artifact(
+    *,
+    run_dir: Path,
+    run_id: str,
+    resumed: dict[str, Any],
+    hashes_before: dict[str, str],
+) -> tuple[dict[str, Any], list[str]]:
+    review_path = run_dir / "review_queue.json"
+    if not _same_artifact_path(
+        (resumed.get("artifacts") or {}).get("review_queue"), review_path
+    ):
+        raise ValueError("review artifact path")
+    persisted = strict_json_load(str(review_path))
+    validate_review_queue(persisted, run_id)
+    if resumed.get("review_queue") != persisted:
+        raise ValueError("review artifact binding")
+    if persisted.get("status") != "needs_review":
+        raise ValueError("review status")
+
+    items = persisted.get("items")
+    if type(items) is not list or not items:
+        raise ValueError("review items")
+    identifiers: list[str] = []
+    actual_coverage: list[tuple[str, str]] = []
+    for item in items:
+        identifier = item.get("id")
+        if type(identifier) is not str or not identifier.strip():
+            raise ValueError("review identity")
+        question = item.get("question")
+        if type(question) is not str or not question.strip():
+            raise ValueError("review question")
+        identifiers.append(identifier)
+        if item.get("run_id") != run_id:
+            raise ValueError("review item run identity")
+        source_ref = item.get("source_ref")
+        if type(source_ref) is not dict:
+            raise ValueError("review source ref")
+        object_key = source_ref.get("object_key")
+        if item.get("content_hash") != hashes_before.get(object_key):
+            raise ValueError("review content hash")
+        if item.get("candidate_ids") != ["C-001"]:
+            raise ValueError("review candidate coverage")
+        actual_coverage.append((object_key, item.get("type")))
+    if len(identifiers) != len(set(identifiers)):
+        raise ValueError("duplicate review identity")
+
+    expected_sources = {
+        SOURCE_NAMES[label]
+        for label in ("invoice", "contract", "markdown", "xlsx", "xml")
+    }
+    expected_coverage = {
+        (source_name, review_type)
+        for source_name in expected_sources
+        for review_type in ("business_relation_review", "archive_target_review")
+    }
+    if len(actual_coverage) != len(expected_coverage) or set(
+        actual_coverage
+    ) != expected_coverage:
+        raise ValueError("review source coverage")
+    return persisted, identifiers
+
+
+def _validated_verification_artifact(
+    *,
+    run_dir: Path,
+    run_id: str,
+    verification: dict[str, Any],
+    archive_action_count: int,
+) -> dict[str, Any]:
+    verification_path = run_dir / "adversarial_verification.json"
+    if not _same_artifact_path(
+        verification.get("artifact_path"), verification_path
+    ):
+        raise ValueError("verification artifact path")
+    persisted = strict_json_load(str(verification_path))
+    if verification != persisted:
+        raise ValueError("verification artifact binding")
+    expected_fields = {
+        "schema_version", "status", "run_id", "timestamp",
+        "overall_verdict", "finding_count", "findings",
+        "ledger_result_count", "archive_action_count", "artifact_path",
+        "agent_role", "needs_human_review", "archive_allowed", "next_actions",
+    }
+    if set(persisted) != expected_fields:
+        raise ValueError("verification fields")
+    if (
+        persisted.get("schema_version") != "adversarial_verification.v1"
+        or persisted.get("status") != "success"
+        or persisted.get("run_id") != run_id
+        or persisted.get("overall_verdict") not in {"pass", "pass_with_warnings"}
+        or persisted.get("agent_role") != "adversarial_agent"
+        or persisted.get("needs_human_review") is not False
+        or persisted.get("archive_allowed") is not True
+    ):
+        raise ValueError("verification outcome")
+    if type(persisted.get("timestamp")) is not str or not persisted["timestamp"]:
+        raise ValueError("verification timestamp")
+    findings = persisted.get("findings")
+    if type(findings) is not list or persisted.get("finding_count") != len(findings):
+        raise ValueError("verification findings")
+    finding_ids = []
+    for finding in findings:
+        if type(finding) is not dict:
+            raise ValueError("verification finding")
+        identifier = finding.get("id")
+        if type(identifier) is not str or not identifier:
+            raise ValueError("verification finding identity")
+        if finding.get("severity") not in {"low", "medium", "high"}:
+            raise ValueError("verification finding severity")
+        finding_ids.append(identifier)
+    if len(finding_ids) != len(set(finding_ids)):
+        raise ValueError("verification duplicate finding")
+    if (
+        persisted.get("ledger_result_count") != 0
+        or persisted.get("archive_action_count") != archive_action_count
+    ):
+        raise ValueError("verification coverage")
+    next_actions = persisted.get("next_actions")
+    if type(next_actions) is not list or "audit_file_organization_run" not in next_actions:
+        raise ValueError("verification next action")
+    return persisted
+
+
+def _validated_audit_artifact(
+    *,
+    run_dir: Path,
+    run_id: str,
+    audit: dict[str, Any],
+    review_ids: list[str],
+) -> dict[str, Any]:
+    audit_path = run_dir / "audit_review.json"
+    if not _same_artifact_path(audit.get("artifact_path"), audit_path):
+        raise ValueError("audit artifact path")
+    persisted = strict_json_load(str(audit_path))
+    validate_audit_review(persisted, run_id)
+    returned_without_path = dict(audit)
+    returned_without_path.pop("artifact_path", None)
+    if returned_without_path != persisted:
+        raise ValueError("audit artifact binding")
+    expected_fields = {
+        "schema_version", "agent_role", "status", "run_id", "timestamp",
+        "audit_verdict", "missing_artifacts", "policy_violations",
+        "required_feedback_items", "human_feedback_required",
+        "human_confirmation_required", "next_actions", "artifact_paths",
+        "loop_trace_summary",
+    }
+    if set(persisted) != expected_fields:
+        raise ValueError("audit fields")
+    if (
+        persisted.get("schema_version") != "audit_review.v1"
+        or persisted.get("agent_role") != "audit_agent"
+        or persisted.get("status") != "success"
+        or persisted.get("run_id") != run_id
+        or persisted.get("audit_verdict") != "needs_human_feedback"
+        or persisted.get("missing_artifacts") != []
+        or persisted.get("human_feedback_required") is not True
+        or persisted.get("human_confirmation_required") is not True
+    ):
+        raise ValueError("audit outcome")
+    required = persisted.get("required_feedback_items")
+    if type(required) is not list or len(required) != len(set(required)):
+        raise ValueError("audit feedback identities")
+    if set(required) != set(review_ids):
+        raise ValueError("audit review coverage")
+    if "apply_feedback_decisions" not in (persisted.get("next_actions") or []):
+        raise ValueError("audit next action")
+    expected_artifacts = {
+        "input_manifest": run_dir / "input_manifest.json",
+        "review_queue": run_dir / "review_queue.json",
+        "planned_archive_actions": run_dir / "planned_archive_actions.json",
+        "trace": run_dir / "trace.json",
+        "adversarial_verification": run_dir / "adversarial_verification.json",
+    }
+    artifact_paths = persisted.get("artifact_paths")
+    if type(artifact_paths) is not dict or set(artifact_paths) != set(
+        expected_artifacts
+    ):
+        raise ValueError("audit artifact coverage")
+    if any(
+        not _same_artifact_path(artifact_paths[name], path)
+        for name, path in expected_artifacts.items()
+    ):
+        raise ValueError("audit artifact binding")
+    return persisted
+
+
+def _validated_feedback_artifact(
+    *,
+    run_dir: Path,
+    run_id: str,
+    feedback: dict[str, Any],
+    review: dict[str, Any],
+    review_ids: list[str],
+    verification: dict[str, Any],
+    audit: dict[str, Any],
+) -> dict[str, Any]:
+    form_path = run_dir / "feedback_form.json"
+    markdown_path = run_dir / "feedback_form.md"
+    expected_wrapper_fields = {
+        "schema_version", "status", "run_id", "item_count",
+        "required_feedback_items", "artifacts", "boundary",
+    }
+    if type(feedback) is not dict or set(feedback) != expected_wrapper_fields:
+        raise ValueError("feedback wrapper fields")
+    artifacts = feedback.get("artifacts")
+    if type(artifacts) is not dict or set(artifacts) != {
+        "feedback_form_json", "feedback_form_md"
+    }:
+        raise ValueError("feedback artifacts")
+    if (
+        feedback.get("schema_version") != "feedback_form.prepare.v1"
+        or feedback.get("status") != "success"
+        or feedback.get("run_id") != run_id
+        or not _same_artifact_path(artifacts["feedback_form_json"], form_path)
+        or not _same_artifact_path(artifacts["feedback_form_md"], markdown_path)
+        or markdown_path.is_symlink()
+        or not markdown_path.is_file()
+        or feedback.get("boundary")
+        != {
+            "moved_files": False,
+            "updated_business_ledger": False,
+            "archive_plan_executed": False,
+        }
+    ):
+        raise ValueError("feedback wrapper")
+
+    form = strict_json_load(str(form_path))
+    if set(form) != {
+        "schema_version", "run_id", "created_at", "audit_verdict",
+        "verification_verdict", "required_feedback_items", "items",
+        "instructions",
+    }:
+        raise ValueError("feedback form fields")
+    if (
+        form.get("schema_version") != "feedback_form.v1"
+        or form.get("run_id") != run_id
+        or form.get("audit_verdict") != audit.get("audit_verdict")
+        or form.get("verification_verdict") != verification.get("overall_verdict")
+    ):
+        raise ValueError("feedback form binding")
+    required = form.get("required_feedback_items")
+    if required != audit.get("required_feedback_items"):
+        raise ValueError("feedback required coverage")
+    if feedback.get("required_feedback_items") != required:
+        raise ValueError("feedback wrapper coverage")
+    items = form.get("items")
+    if type(items) is not list or feedback.get("item_count") != len(items):
+        raise ValueError("feedback item count")
+    if len(items) != len(review_ids):
+        raise ValueError("feedback review count")
+    item_by_id = {item["id"]: item for item in review["items"]}
+    form_ids = [item.get("item_id") for item in items if type(item) is dict]
+    if len(form_ids) != len(items) or len(form_ids) != len(set(form_ids)):
+        raise ValueError("feedback item identities")
+    if set(form_ids) != set(review_ids):
+        raise ValueError("feedback review coverage")
+    base_fields = {
+        "item_id", "run_id", "required", "risk_level", "question",
+        "feedback_type", "allowed_decisions", "recommended_decision",
+        "source_file", "target_path", "field", "expected_field",
+        "confirmed", "review_item_hash", "response",
+    }
+    for item in items:
+        review_item = item_by_id[item["item_id"]]
+        if (
+            item.get("run_id") != run_id
+            or item.get("required") != (item["item_id"] in required)
+            or item.get("question") != review_item.get("question")
+            or item.get("feedback_type") != review_item.get("feedback_type")
+            or item.get("allowed_decisions") != review_item.get("allowed_decisions")
+            or item.get("recommended_decision")
+            != review_item.get("recommended_decision")
+            or item.get("confirmed") is not False
+            or item.get("review_item_hash")
+            != review_item_snapshot_hash(review, review_item)
+            or item.get("response")
+            != {
+                "decision": "", "new_value": "", "expected_value": "",
+                "input_pattern": "", "reason": "",
+            }
+        ):
+            raise ValueError("feedback review binding")
+        for key in set(item) - base_fields:
+            if key not in review_item or item[key] != review_item[key]:
+                raise ValueError("feedback trace binding")
+    instructions = form.get("instructions")
+    if type(instructions) is not list or not instructions or any(
+        type(item) is not str or not item for item in instructions
+    ):
+        raise ValueError("feedback instructions")
+    return form
+
+
 def _acceptance_succeeded(
     *,
     native_statuses: dict[str, str],
@@ -538,7 +845,6 @@ def _acceptance_succeeded(
     invoice_candidate: str,
     hashes_before: dict[str, str],
     hashes_after: dict[str, str],
-    review_items: list[dict[str, Any]],
     verification: dict[str, Any],
     audit: dict[str, Any],
     feedback: dict[str, Any],
@@ -557,30 +863,42 @@ def _acceptance_succeeded(
         return False
     if invoice_candidate != "C-001" or hashes_before != hashes_after:
         return False
-    if not review_items or not all(
-        isinstance(item, dict)
-        and isinstance(item.get("id"), str)
-        and bool(item["id"].strip())
-        and isinstance(item.get("question"), str)
-        and bool(item["question"].strip())
-        for item in review_items
-    ):
-        return False
-    if (
-        verification.get("schema_version") != "adversarial_verification.v1"
-        or not verification.get("overall_verdict")
-        or audit.get("status") != "success"
-        or feedback.get("status") != "success"
-    ):
-        return False
 
     returned_actions = resumed.get("archive_actions")
     if not isinstance(returned_actions, list) or not returned_actions:
         return False
-    plan_path = runtime_root / "runs" / run_id / "planned_archive_actions.json"
     try:
-        plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        run_dir = runtime_root / "runs" / run_id
+        review, review_ids = _validated_review_artifact(
+            run_dir=run_dir,
+            run_id=run_id,
+            resumed=resumed,
+            hashes_before=hashes_before,
+        )
+        verified = _validated_verification_artifact(
+            run_dir=run_dir,
+            run_id=run_id,
+            verification=verification,
+            archive_action_count=len(returned_actions),
+        )
+        audited = _validated_audit_artifact(
+            run_dir=run_dir,
+            run_id=run_id,
+            audit=audit,
+            review_ids=review_ids,
+        )
+        _validated_feedback_artifact(
+            run_dir=run_dir,
+            run_id=run_id,
+            feedback=feedback,
+            review=review,
+            review_ids=review_ids,
+            verification=verified,
+            audit=audited,
+        )
+        plan = strict_json_load(str(run_dir / "planned_archive_actions.json"))
+        validate_archive_execution_plan(plan, run_id)
+    except Exception:
         return False
     planned_actions = plan.get("actions") if isinstance(plan, dict) else None
     if not isinstance(planned_actions, list) or not planned_actions:
@@ -588,6 +906,8 @@ def _acceptance_succeeded(
     if not all(action.get("confirmed") is False for action in returned_actions):
         return False
     if not all(action.get("confirmed") is False for action in planned_actions):
+        return False
+    if returned_actions != planned_actions:
         return False
     if not _confirmation_flags_are_false(resumed, plan, archive):
         return False
@@ -717,10 +1037,17 @@ def run_local_agent_dry_run(
         )
 
     run_id = resumed["run_id"]
-    verification = tools.verify_file_organization_run(run_id)
-    audit = tools.audit_file_organization_run(run_id)
-    feedback = tools.prepare_feedback_form(run_id)
-    archive = tools.execute_archive_plan(run_id, confirmed=False)
+    try:
+        verification = tools.verify_file_organization_run(run_id)
+        audit = tools.audit_file_organization_run(run_id)
+        feedback = tools.prepare_feedback_form(run_id)
+        archive = tools.execute_archive_plan(run_id, confirmed=False)
+    except Exception:
+        return _blocked(
+            "DRY_RUN.ACCEPTANCE_FAILED",
+            hashes_before=before,
+            hashes_after=_hashes(all_sources),
+        )
     after = _hashes(all_sources)
 
     label_by_name = {paths[label].name: label for label in native_labels}
@@ -741,7 +1068,6 @@ def run_local_agent_dry_run(
         invoice_candidate=invoice_candidate,
         hashes_before=before,
         hashes_after=after,
-        review_items=review_items,
         verification=verification,
         audit=audit,
         feedback=feedback,

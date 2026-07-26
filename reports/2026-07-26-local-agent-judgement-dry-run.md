@@ -193,3 +193,68 @@ were then constructed without embedding unmarked business-like literals, and
 synthetic absolute-path test vectors received the repository's audited inline
 exemption. Fresh `repository` and `all` runs returned only the same six
 pre-existing findings; neither command named a Task 5 file.
+
+## Fix round 2: canonical bytes and artifact-bound acceptance
+
+Synthetic-source reuse now compares each existing file with a fresh reference
+generated entirely from runner-owned constants. Markdown and XML use exact byte
+digests. DOCX and XLSX use sorted ZIP-member names plus decompressed member
+bytes; duplicate members are rejected, and the only normalization is
+openpyxl's rewritten `dcterms:modified` value. PDF reuse hashes the page count,
+xref structure, catalog, every indirect object, and every raw stream while
+excluding volatile trailer IDs. The source-owned marker is still checked, but
+cannot authorize reuse. A forged marker therefore cannot hide an invoice vector
+drawing, a DOCX header/relationship, or an XLSX hyperlink/relationship.
+
+The final acceptance decision is now derived from strict, persisted artifacts,
+not stage status strings. The gate validates and binds the review queue,
+adversarial verification, audit review, feedback JSON/Markdown, and archive
+plan to the same run and exact expected artifact paths. It also requires exact
+synthetic review coverage, unique review/finding identities, immutable feedback
+snapshot hashes, expected verdicts and agent roles, all review questions to be
+non-empty, and returned archive actions to equal the validated persisted plan.
+Exceptions in any post-run stage fail closed as `DRY_RUN.ACCEPTANCE_FAILED`.
+
+### Fix-round-2 TDD evidence
+
+Canonical-source RED:
+
+```text
+3 failed, 31 deselected
+```
+
+The three forged-marker attacks were incorrectly accepted. After structural
+digest binding, the same attacks plus legal explicit reuse produced:
+
+```text
+4 passed, 30 deselected in 2.95s
+```
+
+Artifact-contract RED:
+
+```text
+10 failed, 34 deselected in 4.05s
+```
+
+The counterexamples covered corrupt and non-passing verification verdicts,
+cross-run verification/audit/feedback/review artifacts, minimal audit/feedback
+returns, fake review items, and duplicate review identities. After persisted
+contract and run/path binding:
+
+```text
+10 passed, 34 deselected in 4.03s
+```
+
+Fresh final verification:
+
+```text
+python.exe -m pytest tests/integration/test_local_agent_judgement_dry_run.py -q -p no:cacheprovider
+44 passed in 14.44s
+
+python.exe -m pytest tests/integration/test_local_agent_judgement_dry_run.py tests/integration/test_business_judgement_usable_slice.py tests/scripts/test_prepare_business_file_run.py -q -p no:cacheprovider
+59 passed in 16.86s
+```
+
+`py_compile` and `git diff --check` completed with exit code `0`. Fresh
+`governance/validate.py repository` and `all` runs still report only the same
+six upstream baseline findings; no Task 5 file is named.

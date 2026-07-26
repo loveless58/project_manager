@@ -698,3 +698,225 @@ def test_independent_archive_binding_e2e_remains_review_only(
     assert plan["actions"]
     assert all(action["confirmed"] is False for action in plan["actions"])
     assert not list((root / "runtime").rglob("archive_result.json"))
+
+
+def _rewrite_self_authored_marker_hash(source_file: Path) -> None:
+    import hashlib
+
+    marker = source_file.parent / ".local-agent-dry-run.synthetic.v1.json"
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    payload["hashes"][source_file.name] = hashlib.sha256(
+        source_file.read_bytes()
+    ).hexdigest()
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_reuse_rejects_invoice_pdf_vector_drawing_with_forged_marker(
+    tmp_path, monkeypatch
+) -> None:
+    """A PDF drawing outside normalized text must invalidate source reuse."""
+    import fitz
+
+    _forbid_external_providers(monkeypatch)
+    from scripts.run_local_agent_dry_run import run_local_agent_dry_run
+
+    root = tmp_path / "dry-run"
+    first = run_local_agent_dry_run(root, host=StrictSyntheticAgentHost())
+    assert first["status"] == "needs_review"
+    runtime_before = _tree_hashes(root / "runtime")
+
+    invoice = root / "source" / "synthetic-invoice.pdf"
+    forged = invoice.with_name("synthetic-invoice.forged.pdf")
+    with fitz.open(invoice) as document:
+        document[0].draw_rect((24, 24, 48, 48), color=(1, 0, 0))
+        document.save(forged)
+    os.replace(forged, invoice)
+    _rewrite_self_authored_marker_hash(invoice)
+
+    result = run_local_agent_dry_run(
+        root,
+        host=StrictSyntheticAgentHost(),
+        use_existing_synthetic_source=True,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["error_code"] == "DRY_RUN.SOURCE_UNSAFE"
+    assert _tree_hashes(root / "runtime") == runtime_before
+
+
+@pytest.mark.parametrize("format_name", ["docx_header", "xlsx_hyperlink"])
+def test_reuse_rejects_off_contract_package_structure_with_forged_marker(
+    tmp_path, monkeypatch, format_name
+) -> None:
+    """Package relationships and non-cell content are part of canonical reuse."""
+    _forbid_external_providers(monkeypatch)
+    from scripts.run_local_agent_dry_run import run_local_agent_dry_run
+
+    root = tmp_path / format_name
+    first = run_local_agent_dry_run(root, host=StrictSyntheticAgentHost())
+    assert first["status"] == "needs_review"
+    runtime_before = _tree_hashes(root / "runtime")
+
+    if format_name == "docx_header":
+        from docx import Document
+
+        source_file = root / "source" / "synthetic-contract.docx"
+        document = Document(source_file)
+        document.sections[0].header.paragraphs[0].text = (
+            "synthetic off-contract header"
+        )
+        document.save(source_file)
+    else:
+        from openpyxl import load_workbook
+
+        source_file = root / "source" / "synthetic-project.xlsx"
+        workbook = load_workbook(source_file)
+        workbook["synthetic-project"]["A1"].hyperlink = (
+            "https://example.invalid/synthetic-link"
+        )
+        workbook.save(source_file)
+        workbook.close()
+    _rewrite_self_authored_marker_hash(source_file)
+
+    result = run_local_agent_dry_run(
+        root,
+        host=StrictSyntheticAgentHost(),
+        use_existing_synthetic_source=True,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["error_code"] == "DRY_RUN.SOURCE_UNSAFE"
+    assert _tree_hashes(root / "runtime") == runtime_before
+
+
+def _assert_cli_acceptance_failure(root: Path, capsys) -> None:
+    from scripts.run_local_agent_dry_run import main
+
+    code = main(["--root", str(root)])
+    captured = capsys.readouterr()
+    assert code == 2, captured.err
+    payload = json.loads(captured.out)
+    assert payload["status"] == "blocked"
+    assert payload["error_code"] == "DRY_RUN.ACCEPTANCE_FAILED"
+
+
+@pytest.mark.parametrize(
+    "counterexample",
+    ["corrupt_verdict", "needs_correction", "wrong_run"],
+)
+def test_acceptance_gate_rejects_invalid_or_unbound_verification_artifact(
+    tmp_path, monkeypatch, capsys, counterexample
+) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+    original = DataCleaningTools.verify_file_organization_run
+
+    def mutate_verification(self, run_id):
+        result = original(self, run_id)
+        if counterexample == "wrong_run":
+            result["run_id"] = "run_wrong_verification"
+        else:
+            result["overall_verdict"] = (
+                "corrupt"
+                if counterexample == "corrupt_verdict"
+                else "needs_correction"
+            )
+        Path(result["artifact_path"]).write_text(
+            json.dumps(result), encoding="utf-8"
+        )
+        return result
+
+    monkeypatch.setattr(
+        DataCleaningTools, "verify_file_organization_run", mutate_verification
+    )
+
+    _assert_cli_acceptance_failure(tmp_path / counterexample, capsys)
+
+
+@pytest.mark.parametrize("counterexample", ["minimal", "wrong_run"])
+def test_acceptance_gate_rejects_invalid_or_unbound_audit_artifact(
+    tmp_path, monkeypatch, capsys, counterexample
+) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+    original = DataCleaningTools.audit_file_organization_run
+
+    def mutate_audit(self, run_id):
+        result = original(self, run_id)
+        if counterexample == "minimal":
+            return {"status": "success"}
+        result["run_id"] = "run_wrong_audit"
+        Path(result["artifact_path"]).write_text(
+            json.dumps(result), encoding="utf-8"
+        )
+        return result
+
+    monkeypatch.setattr(
+        DataCleaningTools, "audit_file_organization_run", mutate_audit
+    )
+
+    _assert_cli_acceptance_failure(tmp_path / counterexample, capsys)
+
+
+@pytest.mark.parametrize("counterexample", ["minimal", "wrong_run"])
+def test_acceptance_gate_rejects_invalid_or_unbound_feedback_artifact(
+    tmp_path, monkeypatch, capsys, counterexample
+) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+    original = DataCleaningTools.prepare_feedback_form
+
+    def mutate_feedback(self, run_id):
+        result = original(self, run_id)
+        if counterexample == "minimal":
+            return {"status": "success"}
+        result["run_id"] = "run_wrong_feedback"
+        form_path = Path(result["artifacts"]["feedback_form_json"])
+        form = json.loads(form_path.read_text(encoding="utf-8"))
+        form["run_id"] = "run_wrong_feedback"
+        form_path.write_text(json.dumps(form), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(
+        DataCleaningTools, "prepare_feedback_form", mutate_feedback
+    )
+
+    _assert_cli_acceptance_failure(tmp_path / counterexample, capsys)
+
+
+@pytest.mark.parametrize(
+    "counterexample", ["fake_item", "duplicate_item", "wrong_run"]
+)
+def test_acceptance_gate_rejects_invalid_or_unbound_review_artifact(
+    tmp_path, monkeypatch, capsys, counterexample
+) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+    original = DataCleaningTools.resume_agent_judgement_run
+
+    def mutate_review(self, run_id, response_path):
+        result = original(self, run_id, response_path)
+        queue = result["review_queue"]
+        if counterexample == "fake_item":
+            queue["items"][0] = {
+                "id": "R-FAKE",
+                "question": "synthetic fake review item",
+            }
+        elif counterexample == "duplicate_item":
+            queue["items"][1]["id"] = queue["items"][0]["id"]
+        else:
+            queue["run_id"] = "run_wrong_review"
+        Path(result["artifacts"]["review_queue"]).write_text(
+            json.dumps(queue), encoding="utf-8"
+        )
+        return result
+
+    monkeypatch.setattr(
+        DataCleaningTools, "resume_agent_judgement_run", mutate_review
+    )
+
+    _assert_cli_acceptance_failure(tmp_path / counterexample, capsys)
