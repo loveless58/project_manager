@@ -290,7 +290,7 @@ def test_agent_resume_creates_review_artifacts_without_executing_archive(tmp_pat
     assert prepare_code == 0
     run_dir = runtime / "runs" / prepared["run_id"]
     requests = json.loads((run_dir / "agent_judgement_requests.json").read_text(encoding="utf-8"))
-    response_path = tmp_path / "agent-response.json"
+    response_path = runtime / "agent-host-responses" / "agent-response.json"
     response_path.write_text(
         json.dumps(
             {
@@ -343,7 +343,7 @@ def test_agent_resume_rejects_source_content_changed_after_prepare(tmp_path, cap
     assert prepare_code == 0
     run_dir = runtime / "runs" / prepared["run_id"]
     requests = json.loads((run_dir / "agent_judgement_requests.json").read_text(encoding="utf-8"))
-    response_path = tmp_path / "agent-response.json"
+    response_path = runtime / "agent-host-responses" / "agent-response.json"
     response_path.write_text(
         json.dumps(
             {
@@ -384,7 +384,7 @@ def test_agent_resume_rejects_a_different_source_binding(tmp_path, capsys):
     assert prepare_code == 0
     run_dir = runtime / "runs" / prepared["run_id"]
     requests = json.loads((run_dir / "agent_judgement_requests.json").read_text(encoding="utf-8"))
-    response_path = tmp_path / "agent-response.json"
+    response_path = runtime / "agent-host-responses" / "agent-response.json"
     response_path.write_text(
         json.dumps(
             {
@@ -437,7 +437,7 @@ def test_agent_resume_maps_response_consumer_os_error_to_unexpected(tmp_path, ca
     assert prepare_code == 0
     run_dir = runtime / "runs" / prepared["run_id"]
     requests = json.loads((run_dir / "agent_judgement_requests.json").read_text(encoding="utf-8"))
-    response_path = tmp_path / "agent-response.json"
+    response_path = runtime / "agent-host-responses" / "agent-response.json"
     response_path.write_text(
         json.dumps(
             {

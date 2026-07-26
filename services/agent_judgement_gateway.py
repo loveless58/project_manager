@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from contracts.agent_judgement import AgentJudgementSchemaError, validate_run_id
 from contracts.archive_run_artifacts import (
@@ -15,6 +16,7 @@ from contracts.archive_run_artifacts import (
     validate_agent_judgement_requests_artifact,
     validate_agent_judgement_responses_artifact,
 )
+from platform_core.path_locality import is_obvious_network_location
 
 
 RequestPreparer = Callable[[list[str]], dict[str, Any]]
@@ -40,11 +42,15 @@ class AgentJudgementGateway:
         response_consumer: ResponseConsumer | None = None,
         run_dir_resolver: RunDirectoryResolver | None = None,
         artifact_writer: ArtifactWriter | None = None,
+        response_root: str | None = None,
+        protected_roots: Sequence[str] = (),
     ) -> None:
         self._request_preparer = request_preparer
         self._response_consumer = response_consumer
         self._run_dir_resolver = run_dir_resolver
         self._artifact_writer = artifact_writer or self._atomic_write_json
+        self._response_root = response_root
+        self._protected_roots = tuple(protected_roots)
 
     def bind(
         self,
@@ -52,6 +58,8 @@ class AgentJudgementGateway:
         request_preparer: RequestPreparer,
         response_consumer: ResponseConsumer,
         run_dir_resolver: RunDirectoryResolver,
+        response_root: str,
+        protected_roots: Sequence[str] = (),
         artifact_writer: ArtifactWriter,
     ) -> None:
         """Attach the run owner without granting it agent-response bypasses."""
@@ -59,6 +67,8 @@ class AgentJudgementGateway:
         self._response_consumer = response_consumer
         self._run_dir_resolver = run_dir_resolver
         self._artifact_writer = artifact_writer
+        self._response_root = response_root
+        self._protected_roots = tuple(protected_roots)
 
     def prepare_run(self, files: list[str]) -> dict[str, Any]:
         """Create the local request artifact after the owner has prepared input."""
@@ -88,6 +98,9 @@ class AgentJudgementGateway:
                 "requests": requests,
             }
             validate_agent_judgement_requests_artifact(payload, run_id=run_id)
+            if not self._response_root:
+                raise ValueError("agent response root")
+            Path(self._response_root).mkdir(parents=True, exist_ok=True)
             request_path = os.path.join(run_dir, "agent_judgement_requests.json")
             self._artifact_writer(request_path, payload)
         except (AgentJudgementSchemaError, ArchiveRunArtifactError, OSError, TypeError, ValueError):
@@ -117,6 +130,8 @@ class AgentJudgementGateway:
             return self._blocked(str(run_id), "LLM.CAPABILITY_DISABLED")
         if type(response_path) is not str or not response_path:
             return self._blocked(str(run_id), "LLM.CAPABILITY_DISABLED")
+        if is_obvious_network_location(response_path):
+            return self._blocked(str(run_id), "AGENT_JUDGEMENT.RESPONSE_INVALID")
         try:
             run_id = validate_run_id(run_id)
             run_dir = self._run_dir_resolver(run_id)
@@ -136,12 +151,13 @@ class AgentJudgementGateway:
                 or any(type(path) is not str or not path for path in files)
             ):
                 return self._blocked(run_id, "AGENT_JUDGEMENT.RUN_INPUT_INVALID")
+            response_path = self._validated_response_path(response_path)
             request_path = os.path.join(run_dir, "agent_judgement_requests.json")
             request_artifact = strict_json_load(request_path)
             requests = validate_agent_judgement_requests_artifact(
                 request_artifact, run_id=run_id,
             )
-            if not os.path.isfile(response_path):
+            if not os.path.exists(response_path):
                 return self._blocked(run_id, "LLM.CAPABILITY_DISABLED")
             response_artifact = strict_json_load(response_path)
             responses = validate_agent_judgement_responses_artifact(
@@ -158,6 +174,60 @@ class AgentJudgementGateway:
             if str(exc) == "agent run input invalid":
                 return self._blocked(run_id, "AGENT_JUDGEMENT.RUN_INPUT_INVALID")
             raise
+
+    def _validated_response_path(self, raw_path: str) -> str:
+        if not self._response_root:
+            raise ValueError("agent response root")
+        candidate = Path(os.path.abspath(os.fspath(Path(raw_path).expanduser())))
+        response_root = Path(os.path.abspath(self._response_root))
+        try:
+            candidate.relative_to(response_root)
+        except ValueError:
+            raise ValueError("agent response outside exchange") from None
+        self._reject_linked_components(response_root)
+        self._reject_linked_components(candidate)
+        canonical_root = response_root.resolve()
+        canonical_candidate = candidate.resolve()
+        try:
+            canonical_candidate.relative_to(canonical_root)
+        except ValueError:
+            raise ValueError("agent response outside exchange") from None
+        for raw_root in self._protected_roots:
+            protected_root = Path(raw_root).expanduser().resolve()
+            try:
+                canonical_candidate.relative_to(protected_root)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("agent response inside protected storage")
+        try:
+            details = os.lstat(candidate)
+        except FileNotFoundError:
+            return str(candidate)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if (
+            not stat.S_ISREG(details.st_mode)
+            or stat.S_ISLNK(details.st_mode)
+            or getattr(details, "st_file_attributes", 0) & reparse_flag
+        ):
+            raise ValueError("agent response is not a regular file")
+        return str(candidate)
+
+    @staticmethod
+    def _reject_linked_components(path: Path) -> None:
+        current = Path(path.anchor)
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        for part in path.parts[1:]:
+            current /= part
+            try:
+                details = os.lstat(current)
+            except FileNotFoundError:
+                break
+            if (
+                stat.S_ISLNK(details.st_mode)
+                or getattr(details, "st_file_attributes", 0) & reparse_flag
+            ):
+                raise ValueError("agent response path contains a linked component")
 
     @staticmethod
     def _blocked(run_id: str, blocked_reason: str) -> dict[str, Any]:

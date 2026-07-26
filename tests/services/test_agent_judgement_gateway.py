@@ -233,6 +233,18 @@ def test_agent_prepare_writes_safe_requests_and_no_review_or_archive_result(
     assert not (run_dir / "archive_result.json").exists()
 
 
+def test_agent_prepare_creates_dedicated_response_exchange_directory(
+    tmp_path: Path,
+) -> None:
+    _, prepared = prepared_agent_run(tmp_path)
+
+    response_root = (
+        Path(prepared["artifacts"]["run_dir"]).parents[1]
+        / "agent-host-responses"
+    )
+    assert response_root.is_dir()
+
+
 def test_agent_prepare_writes_exact_immutable_input_snapshot(tmp_path: Path) -> None:
     _, prepared = prepared_agent_run(tmp_path)
 
@@ -356,6 +368,87 @@ def test_resume_rejects_same_content_from_alternate_logical_source(tmp_path: Pat
     assert artifact_bytes(prepared["artifacts"]) == before
 
 
+@pytest.mark.parametrize(
+    "response_location",
+    ["runtime_sibling", "storage_binding", "directory", "runtime_traversal"],
+)
+def test_resume_rejects_response_outside_dedicated_exchange(
+    tmp_path: Path,
+    response_location: str,
+) -> None:
+    tools, prepared = prepared_agent_run(tmp_path)
+    run_dir = Path(prepared["artifacts"]["run_dir"])
+    if response_location == "runtime_sibling":
+        response_path = run_dir.parents[1] / "responses" / "response.json"
+    elif response_location == "storage_binding":
+        response_path = tmp_path / "source" / "response.json"
+    elif response_location == "directory":
+        response_path = response_exchange_path(prepared, "response-directory")
+        response_path.mkdir()
+    else:
+        response_path = (
+            run_dir.parents[1]
+            / "agent-host-responses"
+            / ".."
+            / "runs"
+            / "response.json"
+        )
+    if response_location != "directory":
+        write_responses(prepared, response_path)
+    before = artifact_bytes(prepared["artifacts"])
+
+    result = tools.resume_agent_judgement_run(
+        prepared["run_id"],
+        str(response_path),
+        prepared_source_files(prepared),
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "AGENT_JUDGEMENT.RESPONSE_INVALID"
+    assert artifact_bytes(prepared["artifacts"]) == before
+
+
+def test_resume_rejects_obvious_network_response_before_filesystem_probe(
+    tmp_path: Path,
+) -> None:
+    tools, prepared = prepared_agent_run(tmp_path)
+
+    result = tools.resume_agent_judgement_run(
+        prepared["run_id"],
+        r"\\synthetic-server\agent-share\response.json",
+        prepared_source_files(prepared),
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "AGENT_JUDGEMENT.RESPONSE_INVALID"
+
+
+def test_resume_rejects_response_through_symlinked_exchange_component(
+    tmp_path: Path,
+) -> None:
+    tools, prepared = prepared_agent_run(tmp_path)
+    outside = tmp_path / "outside-responses"
+    outside.mkdir()
+    outside_response = outside / "response.json"
+    write_responses(prepared, outside_response)
+    linked_parent = response_exchange_path(prepared, "linked-parent")
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on this host")
+    before = artifact_bytes(prepared["artifacts"])
+
+    result = tools.resume_agent_judgement_run(
+        prepared["run_id"],
+        str(linked_parent / outside_response.name),
+        prepared_source_files(prepared),
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "AGENT_JUDGEMENT.RESPONSE_INVALID"
+    assert artifact_bytes(prepared["artifacts"]) == before
+
+
 def test_failed_prepare_run_is_marked_and_cannot_be_resumed(tmp_path: Path) -> None:
     tools = agent_mode_tools(tmp_path)
     source = native_markdown(tmp_path)
@@ -406,6 +499,8 @@ def test_resume_propagates_response_consumer_os_error_after_validation(
     gateway = AgentJudgementGateway(
         run_dir_resolver=lambda _run_id: run_dir,
         response_consumer=fail_after_validation,
+        response_root=str(response_exchange_path(prepared, "unused.json").parent),
+        protected_roots=[str(tmp_path / "source"), str(tmp_path / "archive")],
     )
 
     with pytest.raises(OSError, match="synthetic disk full"):
@@ -421,7 +516,9 @@ def test_tampered_response_keeps_all_existing_artifacts_byte_identical(tmp_path:
     before = artifact_bytes(prepared["artifacts"])
 
     result = tools.resume_agent_judgement_run(
-        prepared["run_id"], write_bad_hash_response(prepared)
+        prepared["run_id"],
+        write_bad_hash_response(prepared),
+        prepared_source_files(prepared),
     )
 
     assert result["status"] == "blocked"
@@ -469,10 +566,12 @@ def test_invalid_response_is_fail_closed_without_any_artifact_mutation(
     tools, prepared = prepared_agent_run(tmp_path)
     before = artifact_bytes(prepared["artifacts"])
     response_path = write_responses(
-        prepared, tmp_path / "invalid-response.json", mutate=mutate
+        prepared, response_exchange_path(prepared, "invalid-response.json"), mutate=mutate
     )
 
-    result = tools.resume_agent_judgement_run(prepared["run_id"], response_path)
+    result = tools.resume_agent_judgement_run(
+        prepared["run_id"], response_path, prepared_source_files(prepared)
+    )
 
     assert result["status"] == "blocked"
     assert artifact_bytes(prepared["artifacts"]) == before
@@ -503,10 +602,12 @@ def test_response_semantic_mismatch_is_fail_closed_before_review_transaction(
     tools, prepared = prepared_agent_run(tmp_path)
     before = artifact_bytes(prepared["artifacts"])
     response_path = write_responses(
-        prepared, tmp_path / "semantic-mismatch.json", mutate=mutate
+        prepared, response_exchange_path(prepared, "semantic-mismatch.json"), mutate=mutate
     )
 
-    result = tools.resume_agent_judgement_run(prepared["run_id"], response_path)
+    result = tools.resume_agent_judgement_run(
+        prepared["run_id"], response_path, prepared_source_files(prepared)
+    )
 
     assert result["status"] == "blocked"
     assert artifact_bytes(prepared["artifacts"]) == before
@@ -528,7 +629,7 @@ def test_second_different_valid_response_cannot_overwrite_consumed_review_artifa
     before = artifact_bytes(prepared["artifacts"])
     changed_response_path = write_responses(
         prepared,
-        tmp_path / "different-valid-response.json",
+        response_exchange_path(prepared, "different-valid-response.json"),
         mutate=lambda payload: (
             payload["responses"][0].__setitem__("model", "different_local_model"),
             payload["responses"][0]["interpretation"].__setitem__(
@@ -555,24 +656,28 @@ def test_duplicate_and_reordered_responses_are_fail_closed(tmp_path: Path) -> No
 
     duplicate_path = write_responses(
         prepared,
-        tmp_path / "duplicate.json",
+        response_exchange_path(prepared, "duplicate.json"),
         mutate=lambda payload: payload["responses"].__setitem__(
             1, copy.deepcopy(payload["responses"][0])
         ),
     )
-    duplicate = tools.resume_agent_judgement_run(prepared["run_id"], duplicate_path)
+    duplicate = tools.resume_agent_judgement_run(
+        prepared["run_id"], duplicate_path, prepared_source_files(prepared)
+    )
 
     assert duplicate["status"] == "blocked"
     assert artifact_bytes(prepared["artifacts"]) == before
 
     reorder_path = write_responses(
         prepared,
-        tmp_path / "reordered.json",
+        response_exchange_path(prepared, "reordered.json"),
         mutate=lambda payload: payload.__setitem__(
             "responses", list(reversed(payload["responses"]))
         ),
     )
-    reordered = tools.resume_agent_judgement_run(prepared["run_id"], reorder_path)
+    reordered = tools.resume_agent_judgement_run(
+        prepared["run_id"], reorder_path, prepared_source_files(prepared)
+    )
 
     assert reordered["status"] == "blocked"
     assert artifact_bytes(prepared["artifacts"]) == before
@@ -584,7 +689,7 @@ def test_missing_response_is_capability_disabled_without_side_effects(tmp_path: 
 
     result = tools.resume_agent_judgement_run(
         prepared["run_id"],
-        str(tmp_path / "not-supplied.json"),
+        str(response_exchange_path(prepared, "not-supplied.json")),
         prepared_source_files(prepared),
     )
 

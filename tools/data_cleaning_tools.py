@@ -367,11 +367,20 @@ class DataCleaningTools:
         self.archive_target_resolver = archive_target_resolver
         self.agent_judgement_gateway = agent_judgement_gateway
         if self.agent_judgement_gateway is not None:
+            protected_roots = (
+                [str(binding.physical_root) for binding in storage_binding_registry.bindings]
+                if storage_binding_registry is not None
+                else []
+            )
             self.agent_judgement_gateway.bind(
                 request_preparer=self._prepare_agent_judgement_requests,
                 response_consumer=self._complete_agent_judgement_responses,
                 run_dir_resolver=self._resolve_archive_run_dir,
                 artifact_writer=self._save_structured_json,
+                response_root=os.path.join(
+                    self.workspace_dir, "agent-host-responses",
+                ),
+                protected_roots=protected_roots,
             )
         if self.storage_binding_registry is not None:
             workspace_path = Path(self.workspace_dir).expanduser().resolve()
