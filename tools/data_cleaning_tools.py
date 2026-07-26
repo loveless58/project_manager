@@ -1741,8 +1741,14 @@ class DataCleaningTools:
                     native_summary["classification"],
                     fallback_document_type=native_summary["document_type"],
                 )
-                fields = native_summary["candidate_fields"]
-                text = native_summary["text"]
+                native_fields = native_summary["candidate_fields"]
+                # Use only the interpretation contract's fields at the strict
+                # retrieval/LLM boundary. The extracted artifact retains the
+                # native parser's full, validated result for auditability.
+                fields = self._interpretation_fields(native_fields)
+                # Native parsers preserve source whitespace; the strict LLM boundary
+                # accepts only normalized, bounded evidence text.
+                text = native_summary["text"].strip()
                 extracted_payload = {
                     "schema_version": "file_organization.extracted_document.v1",
                     "run_id": run_id,
@@ -1751,7 +1757,7 @@ class DataCleaningTools:
                     "content_hash": content_hash,
                     "document_type": native_summary["document_type"],
                     "classification": classification,
-                    "candidate_fields": fields,
+                    "candidate_fields": native_fields,
                     "text_length": len(text),
                 }
                 validate_extracted_document_artifact(extracted_payload, run_id)

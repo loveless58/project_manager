@@ -1,0 +1,25 @@
+{
+  "schema_version": "business_context_catalog.v1",
+  "records": [
+    {
+      "id": "C-001",
+      "document_type": "contract",
+      "parties": {
+        "buyer": {"name": "合成甲方有限公司", "tax_id": "913100000000000001"},
+        "seller": {"name": "合成乙方有限公司", "tax_id": "913100000000000002"}
+      },
+      "facts": {"contract_code": "CT-001", "project_code": "PRJ-001"},
+      "documents": [
+        {
+          "path": "__TEST_RUNTIME_CONTEXT_PDF__",
+          "document_version_id": "synthetic-context-v1",
+          "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "media_type": "application/pdf",
+          "page_count": 10,
+          "requires_structure_index": true
+        }
+      ],
+      "path_hints": ["synthetic-context"]
+    }
+  ]
+}

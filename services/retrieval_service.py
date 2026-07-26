@@ -43,6 +43,8 @@ class RetrievalService:
         ]
         if self.structure_index is not None:
             evidence_refs.extend(self._index_declared_documents(candidates, diagnostics))
+        for candidate in candidates:
+            candidate.pop("documents", None)
         return BusinessContextEvidence(
             "matched", tuple(candidates), tuple(evidence_refs), (), tuple(diagnostics)
         )
@@ -79,13 +81,9 @@ class RetrievalService:
         for candidate_id, request in declared[:3]:
             result = self.structure_index.index(request)
             if result.status == "success":
-                refs.append({
-                    "kind": "structure_index",
-                    "candidate_id": candidate_id,
-                    "document_version_id": request.document_version_id,
-                    "external_ref": result.external_ref,
-                    "status": result.status,
-                })
+                # PageIndex has completed its indexing boundary.  Its opaque
+                # reference is not business-match evidence and must not cross
+                # into the strict document-interpretation request.
                 continue
             diagnostics.append({
                 "code": "BUSINESS_CONTEXT.STRUCTURE_INDEX_FAILED",
@@ -127,6 +125,11 @@ def _score(candidate: Mapping[str, Any], fields: Mapping[str, Any]) -> tuple[int
     conflicts: list[dict[str, Any]] = []
     for role in ("buyer", "seller"):
         queried, stored = fields.get(role), parties.get(role)
+        if not isinstance(queried, Mapping):
+            queried = {
+                field: fields.get(f"{role}_{field}")
+                for field in ("tax_id", "name")
+            }
         if not isinstance(queried, Mapping) or not isinstance(stored, Mapping):
             continue
         for field in ("tax_id", "name"):

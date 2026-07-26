@@ -174,6 +174,11 @@ def _string(value: object) -> bool:
 def _matches(record: Mapping[str, Any], fields: Mapping[str, Any]) -> bool:
     for role in ("buyer", "seller"):
         queried = fields.get(role)
+        if not isinstance(queried, Mapping):
+            queried = {
+                field: fields.get(f"{role}_{field}")
+                for field in ("tax_id", "name")
+            }
         if isinstance(queried, Mapping):
             for field in ("tax_id", "name"):
                 if _same(field, queried.get(field), record["parties"][role].get(field)):

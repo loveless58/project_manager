@@ -57,3 +57,19 @@ Exit `0` means review artifacts were prepared; exit `2` means a safe block; exit
 Inspect `runtime_workspace/runs/<run_id>/` on the local node for `input_manifest.json`, `candidate_interpretations.json`, `archive_intents.json`, `review_queue.json`, `adversarial_verification.json`, `audit_review.json`, `feedback_form.json`, `feedback_form.md`, `planned_archive_actions.json`, and trace data.
 
 The CLI calls `execute_archive_plan(run_id, confirmed=False)` exactly once. It does not call `confirmed=True` or a feedback-application method. Therefore it does not create `archive_result.json` and performs no physical archive. A scanned-file result with `OCR.CAPABILITY_DISABLED` is an expected safety stop: supply a natively readable PDF/DOCX/XLSX/Markdown/XML or use a separately approved OCR workflow.
+
+## Verified usable slice
+
+The integration test at tests/integration/test_business_judgement_usable_slice.py
+exercises the operator-facing path with two independent temporary storage
+bindings. It uses real native PDF, DOCX, XLSX, Markdown, and XML parsers; the
+real JsonBusinessContextProvider, retrieval service, PageIndex adapter, and
+archive-plan writer; and fakes only the PageIndex network client and
+OpenAI-compatible HTTP transport.
+
+The test verifies a unique C-001 candidate relation, hash-preserved source
+files, a normalized review queue, and needs_review archive actions. It also
+records the required order retrieval -> PageIndex -> LLM. The image-only PDF
+continues to stop with OCR.CAPABILITY_DISABLED, so no implicit OCR provider is
+selected. The test invokes the CLI for both a native file and a scan to assert
+the exit/status contract described above.

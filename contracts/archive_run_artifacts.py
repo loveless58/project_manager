@@ -401,7 +401,7 @@ def normalize_native_parse_output(value: object) -> dict[str, Any]:
     safe_root.pop("file", None)
     validate_json_tree(safe_root)
     _serialized_bytes(value)
-    candidate_fields = _scalar_candidate_fields(fields)
+    candidate_fields = _scalar_candidate_fields(fields, document_type=document_type)
     return {
         "document_type": document_type,
         "classification": classification,
@@ -430,7 +430,9 @@ def validate_extracted_document_artifact(
     if not _bounded_text(payload.get("document_type"), 128):
         raise ArchiveRunArtifactError("extracted document type")
     fields = payload.get("candidate_fields")
-    if type(fields) is not dict or fields != _scalar_candidate_fields(fields):
+    if type(fields) is not dict or fields != _scalar_candidate_fields(
+        fields, document_type=payload.get("document_type")
+    ):
         raise ArchiveRunArtifactError("extracted candidate fields")
     _validate_classification(payload.get("classification"))
     text_length = payload.get("text_length")
@@ -438,7 +440,11 @@ def validate_extracted_document_artifact(
         raise ArchiveRunArtifactError("extracted text length")
 
 
-def _scalar_candidate_fields(fields: dict[str, Any]) -> dict[str, Any]:
+def _scalar_candidate_fields(
+    fields: dict[str, Any], *, document_type: object,
+) -> dict[str, Any]:
+    if document_type in {"invoice", "发票"}:
+        fields = _invoice_party_scalars(fields)
     if set(fields) - _NATIVE_FIELD_KEYS:
         raise ArchiveRunArtifactError("native candidate field names")
     result: dict[str, Any] = {}
@@ -793,3 +799,25 @@ __all__ = [
     "validate_extracted_document_artifact", "validate_json_tree",
     "validate_task5_collection_artifact",
 ]
+
+
+def _invoice_party_scalars(fields: dict[str, Any]) -> dict[str, Any]:
+    """Flatten supported invoice parties before the scalar run-artifact boundary.
+
+    Invoice line items remain accounting evidence and never become candidate
+    project fields. Every other field stays subject to the existing whitelist
+    and scalar validation below.
+    """
+    result = dict(fields)
+    result.pop("line_items", None)
+    for role in ("buyer", "seller"):
+        party = result.pop(role, None)
+        if party is None:
+            continue
+        if type(party) is not dict or set(party) - {"name", "tax_id"}:
+            raise ArchiveRunArtifactError("invoice party")
+        for field in ("name", "tax_id"):
+            value = party.get(field)
+            if value is not None:
+                result[f"{role}_{field}"] = value
+    return result
