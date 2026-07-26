@@ -52,6 +52,39 @@ python3 -X utf8 -B scripts/prepare_business_file_run.py --config /opt/project-ma
 
 Exit `0` means review artifacts were prepared; exit `2` means a safe block; exit `1` is an unexpected error. Stdout is redacted JSON: it contains run ID, binding IDs, statuses, failure codes, and artifact names, but never physical paths or credentials.
 
+## Agent handoff mode
+
+The default `configured_llm` mode keeps the command above unchanged. To prepare
+a request for a separately operated judgement agent, use explicit `agent` mode:
+
+```powershell
+python -X utf8 -B scripts/prepare_business_file_run.py --config <node-local-config> --context <node-local-catalog> --source-binding incoming --interpreter-mode agent <bound-source-file>
+```
+
+This first phase returns exit `0` and
+`status="awaiting_agent_judgement"`. It creates a local, redacted
+`agent_judgement_requests.json` artifact for the returned run ID. It does not
+construct a configured LLM interpreter and does not discover a Codex, Claude,
+or another model automatically.
+
+A human-operated host must inspect that redacted request artifact, produce only
+one strict `agent_judgement_responses.v1` JSON response, and then resume the
+same local run:
+
+```powershell
+python -X utf8 -B scripts/prepare_business_file_run.py --config <node-local-config> --context <node-local-catalog> --source-binding incoming --interpreter-mode agent --resume-run <run_id> --agent-response <strict-response-json> <bound-source-file>
+```
+
+`--agent-response` is valid only with `--interpreter-mode agent --resume-run`.
+Malformed, missing, disabled, or already-consumed agent exchanges fail closed
+with exit `2`; never retry a consumed run with another response. The response
+can create review artifacts only. It cannot make an archive executable, and the
+CLI never calls an archive gate with `confirmed=True`.
+
+Use `--interpreter-mode disabled` when a model is intentionally unavailable.
+It returns the stable safe block `LLM.CAPABILITY_DISABLED` without invoking or
+falling back to a model.
+
 ## Inspect artifacts
 
 Inspect `runtime_workspace/runs/<run_id>/` on the local node for `input_manifest.json`, `candidate_interpretations.json`, `archive_intents.json`, `review_queue.json`, `adversarial_verification.json`, `audit_review.json`, `feedback_form.json`, `feedback_form.md`, `planned_archive_actions.json`, and trace data.

@@ -21,6 +21,7 @@ from integrations.llm import OpenAICompatibleInterpreter
 from ocr.providers import DisabledOcrProvider
 from platform_core import load_app_settings
 from platform_core.storage_bindings import StorageBindingError
+from services.agent_judgement_gateway import AgentJudgementGateway
 from services.document_interpretation import DocumentInterpretationService
 from services.retrieval_service import RetrievalService
 from tools.data_cleaning_tools import DataCleaningTools
@@ -36,6 +37,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--context", required=True, help="Explicit business_context_catalog.v1 JSON file.")
     parser.add_argument("--source-binding", required=True, help="Enabled readable source binding ID.")
     parser.add_argument("--target-binding", default="", help="Optional enabled writable archive-target binding ID.")
+    parser.add_argument(
+        "--interpreter-mode",
+        choices=("configured_llm", "agent", "disabled"),
+        default="configured_llm",
+    )
+    parser.add_argument("--resume-run", default="")
+    parser.add_argument("--agent-response", default="")
     parser.add_argument("files", nargs="+", help="Explicit files contained by --source-binding.")
     return parser
 
@@ -98,6 +106,33 @@ def _summary(*, prepared: dict[str, Any], verification: dict[str, Any], audit: d
     }
 
 
+def _agent_summary(*, result: dict[str, Any], source_binding: str, target_binding: str) -> dict[str, Any]:
+    """Return only host-safe identifiers and status for an agent-gateway result."""
+    status = str(result.get("status", "blocked"))
+    payload = {
+        "schema_version": "business_file_judgement.cli.v1",
+        "status": status,
+        "interpreter_mode": "agent",
+        "run_id": str(result.get("run_id", "")),
+        "source_binding": source_binding,
+        "target_binding": target_binding or None,
+        "artifacts": sorted((result.get("artifacts") or {}).keys()),
+        "archive_execution": {"status": "", "confirmed": False},
+    }
+    if status == "blocked":
+        payload["error_code"] = str(result.get("blocked_reason", "LLM.CAPABILITY_DISABLED"))
+    return payload
+
+
+def _capability_block(*, interpreter_mode: str) -> dict[str, Any]:
+    return {
+        "schema_version": "business_file_judgement.cli.v1",
+        "status": "blocked",
+        "interpreter_mode": interpreter_mode,
+        "error_code": "LLM.CAPABILITY_DISABLED",
+    }
+
+
 def _emit(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
@@ -105,6 +140,19 @@ def _emit(payload: dict[str, Any]) -> None:
 def main(argv: Sequence[str] | None = None, *, interpreter_factory: Callable[[], Any] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.agent_response and (
+            args.interpreter_mode != "agent" or not args.resume_run
+        ):
+            raise InputBindingError("AGENT_JUDGEMENT.ARGUMENT_INVALID")
+        if args.resume_run and args.interpreter_mode != "agent":
+            raise InputBindingError("AGENT_JUDGEMENT.ARGUMENT_INVALID")
+        if (
+            args.interpreter_mode == "agent"
+            and args.resume_run
+            and not args.agent_response
+        ):
+            _emit(_capability_block(interpreter_mode="agent"))
+            return 2
         settings = load_app_settings(config_file=args.config)
         adapters = build_runtime_adapters(settings)
         registry = adapters.storage_binding_registry
@@ -112,20 +160,44 @@ def main(argv: Sequence[str] | None = None, *, interpreter_factory: Callable[[],
             raise InputBindingError("SOURCE_BINDING.INVALID")
         _source_binding(registry, args.source_binding)
         _target_binding(registry, args.target_binding)
-        files = _validate_sources(registry, args.source_binding, args.files)
+        if args.interpreter_mode != "agent" or not args.resume_run:
+            files = _validate_sources(registry, args.source_binding, args.files)
+        else:
+            files = []
+        if args.interpreter_mode == "disabled":
+            _emit(_capability_block(interpreter_mode="disabled"))
+            return 2
         context = JsonBusinessContextProvider(args.context, storage_bindings=registry)
         retrieval = RetrievalService(context, adapters.structure_index)
+        tool_kwargs = {
+            "workspace_dir": str(settings.runtime_workspace),
+            "ocr_adapter": DisabledOcrProvider().extract,
+            "storage_binding_registry": registry,
+            "document_store_router": adapters.document_store_router,
+            "retrieval_service": retrieval,
+            "archive_target_resolver": adapters.archive_target_resolver,
+        }
+        if args.interpreter_mode == "agent":
+            tools = DataCleaningTools(
+                **tool_kwargs,
+                agent_judgement_gateway=AgentJudgementGateway(),
+            )
+            result = (
+                tools.resume_agent_judgement_run(args.resume_run, args.agent_response)
+                if args.resume_run
+                else tools.prepare_agent_judgement_run(files)
+            )
+            _emit(
+                _agent_summary(
+                    result=result,
+                    source_binding=args.source_binding,
+                    target_binding=args.target_binding,
+                )
+            )
+            return 0 if result.get("status") in {"awaiting_agent_judgement", "success", "needs_review"} else 2
         interpreter = (interpreter_factory or OpenAICompatibleInterpreter)()
         interpretation = DocumentInterpretationService(retrieval, interpreter)
-        tools = DataCleaningTools(
-            workspace_dir=str(settings.runtime_workspace),
-            ocr_adapter=DisabledOcrProvider().extract,
-            storage_binding_registry=registry,
-            document_store_router=adapters.document_store_router,
-            retrieval_service=retrieval,
-            interpretation_service=interpretation,
-            archive_target_resolver=adapters.archive_target_resolver,
-        )
+        tools = DataCleaningTools(**tool_kwargs, interpretation_service=interpretation)
         prepared = tools.prepare_file_organization_run(files)
         verification = tools.verify_file_organization_run(prepared["run_id"])
         audit = tools.audit_file_organization_run(prepared["run_id"])
