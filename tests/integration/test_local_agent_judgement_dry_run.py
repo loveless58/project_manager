@@ -920,3 +920,284 @@ def test_acceptance_gate_rejects_invalid_or_unbound_review_artifact(
     )
 
     _assert_cli_acceptance_failure(tmp_path / counterexample, capsys)
+
+
+@pytest.mark.parametrize(
+    ("source_name", "filename"),
+    [
+        ("pdf", "synthetic-invoice.pdf"),
+        ("docx", "synthetic-contract.docx"),
+        ("xlsx", "synthetic-project.xlsx"),
+    ],
+)
+def test_reuse_rejects_trailing_container_payload_with_forged_marker(
+    tmp_path, monkeypatch, source_name, filename
+) -> None:
+    """Raw bytes after a valid container terminator are still source content."""
+    _forbid_external_providers(monkeypatch)
+    from scripts.run_local_agent_dry_run import run_local_agent_dry_run
+
+    root = tmp_path / source_name
+    first = run_local_agent_dry_run(root, host=StrictSyntheticAgentHost())
+    assert first["status"] == "needs_review"
+    runtime_before = _tree_hashes(root / "runtime")
+
+    source_file = root / "source" / filename
+    with source_file.open("ab") as stream:
+        stream.write(b"\nsynthetic-trailing-container-payload\n")
+    _rewrite_self_authored_marker_hash(source_file)
+
+    result = run_local_agent_dry_run(
+        root,
+        host=StrictSyntheticAgentHost(),
+        use_existing_synthetic_source=True,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["error_code"] == "DRY_RUN.SOURCE_UNSAFE"
+    assert _tree_hashes(root / "runtime") == runtime_before
+
+
+def test_legal_reuse_does_not_allocate_a_system_temporary_path(
+    tmp_path, monkeypatch
+) -> None:
+    """Canonical reuse must not write a reference fixture outside supplied root."""
+    import tempfile
+
+    _forbid_external_providers(monkeypatch)
+    from scripts.run_local_agent_dry_run import run_local_agent_dry_run
+
+    root = tmp_path / "dry-run"
+    first = run_local_agent_dry_run(root, host=StrictSyntheticAgentHost())
+    assert first["status"] == "needs_review"
+
+    names = (
+        "TemporaryDirectory",
+        "NamedTemporaryFile",
+        "TemporaryFile",
+        "mkdtemp",
+        "mkstemp",
+    )
+    originals = {name: getattr(tempfile, name) for name in names}
+
+    def root_local_temp(name):
+        def guarded(*args, **kwargs):
+            raw_dir = kwargs.get("dir")
+            if raw_dir is None or not Path(raw_dir).resolve().is_relative_to(
+                root.resolve()
+            ):
+                raise AssertionError(
+                    "system temporary paths are outside the supplied root"
+                )
+            return originals[name](*args, **kwargs)
+
+        return guarded
+
+    for name in names:
+        monkeypatch.setattr(tempfile, name, root_local_temp(name))
+
+    result = run_local_agent_dry_run(
+        root,
+        host=StrictSyntheticAgentHost(),
+        use_existing_synthetic_source=True,
+    )
+
+    assert result["status"] == "needs_review"
+
+
+def test_acceptance_gate_rejects_schema_valid_forged_review_question(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+    original = DataCleaningTools.resume_agent_judgement_run
+
+    def mutate_question(self, run_id, response_path):
+        result = original(self, run_id, response_path)
+        result["review_queue"]["items"][0]["question"] = (
+            "Synthetic schema-valid question supplied by an untrusted stage?"
+        )
+        Path(result["artifacts"]["review_queue"]).write_text(
+            json.dumps(result["review_queue"]), encoding="utf-8"
+        )
+        return result
+
+    monkeypatch.setattr(
+        DataCleaningTools, "resume_agent_judgement_run", mutate_question
+    )
+
+    _assert_cli_acceptance_failure(tmp_path / "forged-question", capsys)
+
+
+def test_acceptance_gate_rejects_high_risk_finding_with_pass_verdict(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+    original = DataCleaningTools.verify_file_organization_run
+
+    def mutate_verification(self, run_id):
+        result = original(self, run_id)
+        result["findings"].append(
+            {
+                "id": "AV-FORGED-HIGH",
+                "dimension": "field_completeness",
+                "severity": "high",
+                "confidence": 0.99,
+                "file": "synthetic-invoice.pdf",
+                "message": "Synthetic high-risk finding hidden by a pass verdict.",
+                "details": {"missing_fields": ["synthetic_required_field"]},
+            }
+        )
+        result["finding_count"] = len(result["findings"])
+        result["overall_verdict"] = "pass"
+        result["needs_human_review"] = False
+        result["archive_allowed"] = True
+        result["next_actions"] = ["audit_file_organization_run"]
+        Path(result["artifact_path"]).write_text(
+            json.dumps(result), encoding="utf-8"
+        )
+        return result
+
+    monkeypatch.setattr(
+        DataCleaningTools, "verify_file_organization_run", mutate_verification
+    )
+
+    _assert_cli_acceptance_failure(tmp_path / "high-finding-pass", capsys)
+
+
+def test_acceptance_gate_rejects_audit_violation_and_forged_trace(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+    original = DataCleaningTools.audit_file_organization_run
+
+    def mutate_audit(self, run_id):
+        result = original(self, run_id)
+        result["policy_violations"] = [
+            {
+                "id": "AUD-FORGED-HIGH",
+                "severity": "high",
+                "rule": "synthetic_forged_rule",
+                "message": "Synthetic high policy violation.",
+            }
+        ]
+        result["loop_trace_summary"] = {
+            "trace_id": "forged-trace",
+            "status": "success",
+            "round_count": 9,
+        }
+        persisted = dict(result)
+        artifact_path = Path(persisted.pop("artifact_path"))
+        artifact_path.write_text(json.dumps(persisted), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(DataCleaningTools, "audit_file_organization_run", mutate_audit)
+
+    _assert_cli_acceptance_failure(tmp_path / "forged-audit", capsys)
+
+
+@pytest.mark.parametrize(
+    ("field", "forged_value"),
+    [
+        ("risk_level", "P0"),
+        ("source_file", "synthetic-forged-source.pdf"),
+        ("target_path", "synthetic-forged-target"),
+        ("field", "synthetic_forged_field"),
+        ("expected_field", "synthetic_forged_expected_field"),
+    ],
+)
+def test_acceptance_gate_rejects_forged_feedback_projection(
+    tmp_path, monkeypatch, capsys, field, forged_value
+) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+    original = DataCleaningTools.prepare_feedback_form
+
+    def mutate_feedback(self, run_id):
+        result = original(self, run_id)
+        form_path = Path(result["artifacts"]["feedback_form_json"])
+        form = json.loads(form_path.read_text(encoding="utf-8"))
+        form["items"][0][field] = forged_value
+        form_path.write_text(json.dumps(form), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(DataCleaningTools, "prepare_feedback_form", mutate_feedback)
+
+    _assert_cli_acceptance_failure(tmp_path / field, capsys)
+
+
+def test_acceptance_gate_rejects_forged_feedback_markdown(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+    original = DataCleaningTools.prepare_feedback_form
+
+    def mutate_markdown(self, run_id):
+        result = original(self, run_id)
+        markdown_path = Path(result["artifacts"]["feedback_form_md"])
+        with markdown_path.open("a", encoding="utf-8") as stream:
+            stream.write("\nSynthetic forged Markdown payload.\n")
+        return result
+
+    monkeypatch.setattr(DataCleaningTools, "prepare_feedback_form", mutate_markdown)
+
+    _assert_cli_acceptance_failure(tmp_path / "forged-markdown", capsys)
+
+
+def test_acceptance_gate_rejects_duplicate_archive_action_coverage(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    import copy
+
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+    original = DataCleaningTools.resume_agent_judgement_run
+
+    def duplicate_archive_action(self, run_id, response_path):
+        result = original(self, run_id, response_path)
+        result["archive_actions"][1] = copy.deepcopy(result["archive_actions"][0])
+        plan_path = Path(result["artifacts"]["planned_archive_actions"])
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["actions"] = result["archive_actions"]
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(
+        DataCleaningTools,
+        "resume_agent_judgement_run",
+        duplicate_archive_action,
+    )
+
+    _assert_cli_acceptance_failure(tmp_path / "duplicate-archive", capsys)
+
+
+def test_acceptance_gate_rejects_fake_archive_execution_return(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+
+    def fake_archive_return(_self, _run_id, confirmed=False):
+        assert confirmed is False
+        return {
+            "schema_version": "synthetic-fake-archive.v1",
+            "status": "success",
+            "run_id": "run_wrong_archive",
+            "confirmed": False,
+        }
+
+    monkeypatch.setattr(
+        DataCleaningTools, "execute_archive_plan", fake_archive_return
+    )
+
+    _assert_cli_acceptance_failure(tmp_path / "fake-archive-return", capsys)

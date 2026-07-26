@@ -15,7 +15,6 @@ import os
 from pathlib import Path
 import stat
 import sys
-import tempfile
 from typing import Any, Protocol, Sequence
 import zipfile
 
@@ -26,11 +25,20 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from app_bootstrap.composition import build_runtime_adapters
 from contracts.archive_run_artifacts import (
     strict_json_load,
-    validate_archive_execution_plan,
+    validate_agent_judgement_requests_artifact,
     validate_audit_review,
+    validate_extracted_document_artifact,
     validate_review_queue,
+    validate_task5_collection_artifact,
 )
-from contracts.feedback_form_schema import review_item_snapshot_hash
+from contracts.feedback_form_schema import (
+    build_feedback_form,
+    render_feedback_form_markdown,
+    review_item_snapshot_hash,
+)
+from contracts.review_queue_schema import normalize_review_queue
+from agents.adversarial_agent import AdversarialAgent
+from agents.audit_agent import AuditAgent
 from infrastructure.database.sqlite import initialize_schema_metadata
 from integrations.business_context import JsonBusinessContextProvider
 from ocr.providers import DisabledOcrProvider
@@ -268,8 +276,50 @@ def _write_pdf(path: Path, text: str = "", *, image_only: bool = False) -> None:
             page.rect,
             f"<p>{html.escape(text).replace(chr(10), '<br>')}</p>",
         )
-    document.save(path)
+    document.save(path, no_new_id=True)
     document.close()
+
+
+def _normalize_package_bytes(path: Path) -> None:
+    """Repack generated OOXML with fixed raw bytes for exact reuse checks."""
+    import re
+
+    temporary = path.with_suffix(path.suffix + ".canonical.tmp")
+    if temporary.exists():
+        raise DryRunSafetyError("DRY_RUN.SOURCE_ALREADY_EXISTS")
+    try:
+        with zipfile.ZipFile(path) as package:
+            names = [item.filename for item in package.infolist()]
+            if len(names) != len(set(names)):
+                raise ValueError("duplicate package member")
+            members = {name: package.read(name) for name in names}
+        with zipfile.ZipFile(
+            temporary,
+            "x",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+        ) as package:
+            for name in sorted(members):
+                payload = members[name]
+                if (
+                    path.suffix.casefold() == ".xlsx"
+                    and name == "docProps/core.xml"
+                ):
+                    payload = re.sub(
+                        rb"(<dcterms:modified\b[^>]*>)[^<]*(</dcterms:modified>)",
+                        rb"\g<1>2026-07-26T00:00:00Z\g<2>",
+                        payload,
+                        count=1,
+                    )
+                info = zipfile.ZipInfo(name, date_time=(2026, 7, 26, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.create_system = 3
+                info.external_attr = 0o600 << 16
+                package.writestr(info, payload, compresslevel=9)
+        os.replace(temporary, path)
+    finally:
+        if temporary.is_file() and not temporary.is_symlink():
+            temporary.unlink()
 
 
 def _create_synthetic_source(source_root: Path) -> dict[str, Path]:
@@ -291,6 +341,7 @@ def _create_synthetic_source(source_root: Path) -> dict[str, Path]:
     for paragraph in _CONTRACT_PARAGRAPHS:
         contract.add_paragraph(paragraph)
     contract.save(paths["contract"])
+    _normalize_package_bytes(paths["contract"])
 
     paths["markdown"].write_text(_MARKDOWN_TEXT, encoding="utf-8")
 
@@ -302,67 +353,15 @@ def _create_synthetic_source(source_root: Path) -> dict[str, Path]:
     for row in _XLSX_ROWS:
         worksheet.append(row)
     workbook.save(paths["xlsx"])
+    workbook.close()
+    _normalize_package_bytes(paths["xlsx"])
 
     paths["xml"].write_text(_XML_TEXT, encoding="utf-8")
     _write_pdf(paths["scan"], image_only=True)
     return paths
 
 
-def _update_digest(digest: Any, value: bytes) -> None:
-    digest.update(len(value).to_bytes(8, "big"))
-    digest.update(value)
-
-
-def _package_digest(path: Path) -> str:
-    import re
-
-    digest = hashlib.sha256()
-    with zipfile.ZipFile(path) as package:
-        names = [item.filename for item in package.infolist()]
-        if len(names) != len(set(names)):
-            raise ValueError("duplicate package member")
-        for name in sorted(names):
-            _update_digest(digest, name.encode("utf-8"))
-            payload = package.read(name)
-            if path.suffix.casefold() == ".xlsx" and name == "docProps/core.xml":
-                payload = re.sub(
-                    rb"(<dcterms:modified\b[^>]*>)[^<]*(</dcterms:modified>)",
-                    rb"\1<canonical-modified-time>\2",
-                    payload,
-                    count=1,
-                )
-            _update_digest(digest, payload)
-    return digest.hexdigest()
-
-
-def _pdf_structure_digest(path: Path) -> str:
-    """Hash every PDF indirect object and stream, excluding volatile trailer IDs."""
-    import fitz
-
-    digest = hashlib.sha256()
-    with fitz.open(path) as document:
-        if document.is_encrypted or document.is_repaired:
-            raise ValueError("non-canonical PDF")
-        _update_digest(digest, str(document.page_count).encode("ascii"))
-        _update_digest(digest, str(document.xref_length()).encode("ascii"))
-        _update_digest(digest, str(document.pdf_catalog()).encode("ascii"))
-        for xref in range(1, document.xref_length()):
-            _update_digest(digest, str(xref).encode("ascii"))
-            _update_digest(
-                digest,
-                document.xref_object(xref, compressed=False).encode("utf-8"),
-            )
-            if document.xref_is_stream(xref):
-                _update_digest(digest, document.xref_stream_raw(xref) or b"")
-    return digest.hexdigest()
-
-
 def _canonical_file_digest(path: Path) -> str:
-    suffix = path.suffix.casefold()
-    if suffix in {".docx", ".xlsx"}:
-        return _package_digest(path)
-    if suffix == ".pdf":
-        return _pdf_structure_digest(path)
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
@@ -370,10 +369,29 @@ def _canonical_source_digests(paths: dict[str, Path]) -> dict[str, str]:
     return {name: _canonical_file_digest(path) for name, path in paths.items()}
 
 
-def _trusted_canonical_source_digests() -> dict[str, str]:
-    with tempfile.TemporaryDirectory(prefix="local-agent-dry-run-canonical-") as raw:
-        reference_paths = _create_synthetic_source(Path(raw))
-        return _canonical_source_digests(reference_paths)
+def _trusted_canonical_source_digests(source_root: Path) -> dict[str, str]:
+    reference_root = source_root.parent / ".local-agent-dry-run-canonical-reference"
+    _reject_reparse_components(reference_root)
+    if reference_root.exists():
+        raise DryRunSafetyError("DRY_RUN.SOURCE_UNSAFE")
+    reference_paths = {
+        name: reference_root / filename for name, filename in SOURCE_NAMES.items()
+    }
+    reference_root.mkdir()
+    if (
+        _is_reparse_point(reference_root)
+        or not _is_relative_to(reference_root.resolve(), source_root.parent.resolve())
+    ):
+        raise DryRunSafetyError("DRY_RUN.SOURCE_UNSAFE")
+    try:
+        generated = _create_synthetic_source(reference_root)
+        return _canonical_source_digests(generated)
+    finally:
+        for path in reference_paths.values():
+            if path.exists():
+                if path.is_symlink() or not path.is_file():
+                    raise DryRunSafetyError("DRY_RUN.SOURCE_UNSAFE")
+                path.unlink()
 
 
 def _load_existing_synthetic_source(source_root: Path) -> dict[str, Path]:
@@ -391,7 +409,7 @@ def _load_existing_synthetic_source(source_root: Path) -> dict[str, Path]:
     files = _validated_source_paths(source_root, list(expected.values()))
     try:
         canonical = _canonical_source_digests(expected)
-        trusted = _trusted_canonical_source_digests()
+        trusted = _trusted_canonical_source_digests(source_root)
     except Exception:
         raise DryRunSafetyError("DRY_RUN.SOURCE_UNSAFE") from None
     if canonical != trusted:
@@ -545,6 +563,255 @@ def _same_artifact_path(value: Any, expected: Path) -> bool:
         return False
 
 
+def _load_task5_collection(
+    run_dir: Path, filename: str, kind: str, run_id: str
+) -> dict[str, Any]:
+    payload = strict_json_load(str(run_dir / filename))
+    validate_task5_collection_artifact(payload, kind=kind, run_id=run_id)
+    return payload
+
+
+def _expected_review_queue(run_dir: Path, run_id: str) -> dict[str, Any]:
+    manifest = _load_task5_collection(
+        run_dir, "input_manifest.json", "input_manifest", run_id
+    )
+    candidates = _load_task5_collection(
+        run_dir,
+        "candidate_interpretations.json",
+        "candidate_interpretations",
+        run_id,
+    )
+    intents = _load_task5_collection(
+        run_dir, "archive_intents.json", "archive_intents", run_id
+    )
+    request_artifact = strict_json_load(
+        str(run_dir / "agent_judgement_requests.json")
+    )
+    requests = validate_agent_judgement_requests_artifact(
+        request_artifact, run_id=run_id
+    )
+    manifest_items = manifest["files"]
+    candidate_items = candidates["items"]
+    intent_items = intents["items"]
+    expected_sources = [
+        SOURCE_NAMES[label]
+        for label in ("invoice", "contract", "markdown", "xlsx", "xml")
+    ]
+    if not (
+        len(manifest_items)
+        == len(candidate_items)
+        == len(intent_items)
+        == len(requests)
+        == len(expected_sources)
+    ):
+        raise ValueError("upstream review coverage")
+    if [item.get("name") for item in manifest_items] != expected_sources:
+        raise ValueError("manifest source coverage")
+
+    raw_items: list[dict[str, Any]] = []
+    for manifest_item, request, candidate, intent in zip(
+        manifest_items, requests, candidate_items, intent_items
+    ):
+        source_ref = manifest_item["source_ref"]
+        content_hash = manifest_item["content_hash"]
+        interpretation_request = request["interpretation_request"]
+        context = interpretation_request["business_context"]
+        context_candidate_ids = [item["id"] for item in context["candidates"]]
+        relation_candidate_ids = [
+            relation["target_candidate_id"]
+            for relation in candidate["relations"]
+            if type(relation) is dict
+            and type(relation.get("target_candidate_id")) is str
+        ]
+        candidate_ids = list(
+            dict.fromkeys(context_candidate_ids + relation_candidate_ids)
+        )
+        expected_context = {
+            "status": context["status"],
+            "candidate_ids": context_candidate_ids,
+            "conflicts": context["conflicts"],
+            "diagnostics": context["diagnostics"],
+        }
+        if (
+            request.get("request_id") != f"agent-request:{content_hash[:24]}"
+            or interpretation_request.get("parse_artifact_ref")
+            != candidate.get("parse_artifact_ref")
+            or candidate.get("run_id") != run_id
+            or candidate.get("source_ref") != source_ref
+            or candidate.get("content_hash") != content_hash
+            or candidate.get("business_context") != expected_context
+            or intent.get("run_id") != run_id
+            or intent.get("source_ref") != source_ref
+            or intent.get("content_hash") != content_hash
+        ):
+            raise ValueError("review upstream binding")
+        evidence_refs = list(context["evidence"]) + list(candidate["evidence"])
+        common = {
+            "severity": (
+                "high"
+                if context["status"] == "blocked"
+                or candidate["status"] == "blocked"
+                else "medium"
+            ),
+            "source_ref": source_ref,
+            "candidate_ids": candidate_ids,
+            "evidence_refs": evidence_refs,
+            "conflicts": list(context["conflicts"]),
+            "content_hash": content_hash,
+            "interpreter": candidate["interpreter"],
+            "model": candidate["model"],
+            "prompt_version": candidate["prompt_version"],
+            "policy_version": candidate["policy_version"],
+            "confirmed": False,
+        }
+        raw_items.append(
+            {
+                "type": "business_relation_review",
+                **common,
+                "artifact_schema_version": candidate["schema_version"],
+            }
+        )
+        raw_items.append(
+            {
+                "type": "archive_target_review",
+                **common,
+                "severity": (
+                    "high"
+                    if intent["normalized_status"] == "blocked"
+                    else "medium"
+                ),
+                "candidate_target_binding_ids": list(
+                    intent["candidate_target_binding_ids"]
+                ),
+                "destination_status": intent["destination_status"],
+                "artifact_schema_version": intent["schema_version"],
+                "blockers": list(intent["blockers"]),
+            }
+        )
+    return normalize_review_queue(run_id=run_id, raw_items=raw_items)
+
+
+def _validated_plan_artifact(
+    *,
+    run_dir: Path,
+    run_id: str,
+    resumed: dict[str, Any],
+    hashes_before: dict[str, str],
+) -> dict[str, Any]:
+    plan_path = run_dir / "planned_archive_actions.json"
+    if not _same_artifact_path(
+        (resumed.get("artifacts") or {}).get("planned_archive_actions"),
+        plan_path,
+    ):
+        raise ValueError("plan artifact path")
+    plan = _load_task5_collection(
+        run_dir, "planned_archive_actions.json", "planned_archive_actions", run_id
+    )
+    intents = _load_task5_collection(
+        run_dir, "archive_intents.json", "archive_intents", run_id
+    )["items"]
+    actions = plan["actions"]
+    expected_sources = [
+        SOURCE_NAMES[label]
+        for label in ("invoice", "contract", "markdown", "xlsx", "xml")
+    ]
+    object_keys = [action["source_ref"]["object_key"] for action in actions]
+    intent_keys = [intent["source_ref"]["object_key"] for intent in intents]
+    if object_keys != expected_sources or intent_keys != expected_sources:
+        raise ValueError("plan source coverage")
+    if len(object_keys) != len(set(object_keys)):
+        raise ValueError("duplicate plan source")
+    intent_by_source = {
+        intent["source_ref"]["object_key"]: intent for intent in intents
+    }
+    intent_ids: list[str] = []
+    for action in actions:
+        source_ref = action["source_ref"]
+        object_key = source_ref["object_key"]
+        intent = intent_by_source[object_key]
+        intent_ids.append(intent["intent_id"])
+        if (
+            action.get("run_id") != run_id
+            or action.get("status") != "needs_review"
+            or action.get("normalized_status") != "blocked"
+            or action.get("confirmed") is not False
+            or action.get("source_file") != source_ref["logical_uri"]
+            or action.get("project_name") != "C-001"
+            or action.get("target_dir") is not None
+            or action.get("target_path") is not None
+            or action.get("archive_intent_ref") != intent["intent_id"]
+            or action.get("archive_intent") != intent
+            or intent.get("content_hash") != hashes_before.get(object_key)
+        ):
+            raise ValueError("plan action binding")
+    if len(intent_ids) != len(set(intent_ids)):
+        raise ValueError("duplicate plan intent")
+    if resumed.get("archive_actions") != actions:
+        raise ValueError("returned plan binding")
+    return plan
+
+
+def _expected_verification_findings(
+    run_dir: Path, run_id: str, plan: dict[str, Any]
+) -> list[dict[str, Any]]:
+    from business_rules.adversarial_verification import (
+        _review_archive_plan,
+        _review_field_accuracy,
+        _review_field_completeness,
+        _review_ocr_quality,
+    )
+
+    manifest = _load_task5_collection(
+        run_dir, "input_manifest.json", "input_manifest", run_id
+    )
+    extracted_dir = run_dir / "extracted"
+    if (
+        not extracted_dir.is_dir()
+        or extracted_dir.is_symlink()
+        or _is_reparse_point(extracted_dir)
+    ):
+        raise ValueError("extracted artifact directory")
+    by_filename = {
+        f"{item['content_hash'][:24]}_extracted.json": item
+        for item in manifest["files"]
+    }
+    actual_names = sorted(item.name for item in extracted_dir.iterdir())
+    if actual_names != sorted(by_filename):
+        raise ValueError("extracted artifact coverage")
+    extracted_items: list[dict[str, Any]] = []
+    for filename in actual_names:
+        payload = strict_json_load(str(extracted_dir / filename))
+        validate_extracted_document_artifact(payload, run_id)
+        manifest_item = by_filename[filename]
+        if (
+            payload.get("source_ref") != manifest_item["source_ref"]
+            or payload.get("content_hash") != manifest_item["content_hash"]
+        ):
+            raise ValueError("extracted artifact binding")
+        extraction = payload.get("extraction")
+        if type(extraction) is dict:
+            extracted_items.append(extraction)
+    findings = _review_ocr_quality(extracted_items)
+    if not findings:
+        findings.extend(_review_field_completeness(extracted_items))
+        findings.extend(_review_field_accuracy(extracted_items))
+        findings.extend(_review_archive_plan(plan["actions"]))
+    return findings
+
+
+def _strict_text_artifact(path: Path) -> str:
+    details = os.lstat(path)
+    if (
+        not stat.S_ISREG(details.st_mode)
+        or stat.S_ISLNK(details.st_mode)
+        or getattr(details, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        or details.st_size > 128 * 1024
+    ):
+        raise ValueError("unsafe text artifact")
+    return path.read_text(encoding="utf-8")
+
+
 def _validated_review_artifact(
     *,
     run_dir: Path,
@@ -552,6 +819,54 @@ def _validated_review_artifact(
     resumed: dict[str, Any],
     hashes_before: dict[str, str],
 ) -> tuple[dict[str, Any], list[str]]:
+    expected_artifacts = {
+        "input_manifest": run_dir / "input_manifest.json",
+        "agent_judgement_requests": run_dir / "agent_judgement_requests.json",
+        "agent_judgement_consumption": run_dir / "agent_judgement_consumption.json",
+        "candidate_interpretations": run_dir / "candidate_interpretations.json",
+        "archive_intents": run_dir / "archive_intents.json",
+        "review_queue": run_dir / "review_queue.json",
+        "planned_archive_actions": run_dir / "planned_archive_actions.json",
+        "feedback_form_json": run_dir / "feedback_form.json",
+        "feedback_form_md": run_dir / "feedback_form.md",
+        "trace": run_dir / "trace.json",
+        "run_dir": run_dir,
+    }
+    artifacts = resumed.get("artifacts")
+    if (
+        type(artifacts) is not dict
+        or set(artifacts) != set(expected_artifacts)
+        or any(
+            not _same_artifact_path(artifacts[name], path)
+            for name, path in expected_artifacts.items()
+        )
+    ):
+        raise ValueError("resumed artifact binding")
+    if (
+        resumed.get("schema_version") != "agent_judgement_gateway.resume.v1"
+        or resumed.get("status") != "success"
+        or resumed.get("run_id") != run_id
+        or resumed.get("boundary")
+        != {
+            "agent_response_consumed": True,
+            "archive_plan_executed": False,
+            "confirmed": False,
+        }
+    ):
+        raise ValueError("resumed outcome")
+    candidates = _load_task5_collection(
+        run_dir,
+        "candidate_interpretations.json",
+        "candidate_interpretations",
+        run_id,
+    )
+    intents = _load_task5_collection(
+        run_dir, "archive_intents.json", "archive_intents", run_id
+    )
+    if resumed.get("candidate_interpretations") != candidates["items"]:
+        raise ValueError("returned candidate binding")
+    if resumed.get("archive_intents") != intents["items"]:
+        raise ValueError("returned intent binding")
     review_path = run_dir / "review_queue.json"
     if not _same_artifact_path(
         (resumed.get("artifacts") or {}).get("review_queue"), review_path
@@ -561,6 +876,8 @@ def _validated_review_artifact(
     validate_review_queue(persisted, run_id)
     if resumed.get("review_queue") != persisted:
         raise ValueError("review artifact binding")
+    if persisted != _expected_review_queue(run_dir, run_id):
+        raise ValueError("review derivation binding")
     if persisted.get("status") != "needs_review":
         raise ValueError("review status")
 
@@ -612,7 +929,7 @@ def _validated_verification_artifact(
     run_dir: Path,
     run_id: str,
     verification: dict[str, Any],
-    archive_action_count: int,
+    plan: dict[str, Any],
 ) -> dict[str, Any]:
     verification_path = run_dir / "adversarial_verification.json"
     if not _same_artifact_path(
@@ -659,12 +976,35 @@ def _validated_verification_artifact(
         raise ValueError("verification duplicate finding")
     if (
         persisted.get("ledger_result_count") != 0
-        or persisted.get("archive_action_count") != archive_action_count
+        or persisted.get("archive_action_count") != len(plan["actions"])
     ):
         raise ValueError("verification coverage")
     next_actions = persisted.get("next_actions")
     if type(next_actions) is not list or "audit_file_organization_run" not in next_actions:
         raise ValueError("verification next action")
+    from business_rules.adversarial_verification import _overall_verdict
+
+    expected_findings = _expected_verification_findings(run_dir, run_id, plan)
+    expected_verdict = _overall_verdict(expected_findings)
+    expected = {
+        "schema_version": "adversarial_verification.v1",
+        "status": "success",
+        "run_id": run_id,
+        "timestamp": persisted["timestamp"],
+        "overall_verdict": expected_verdict,
+        "finding_count": len(expected_findings),
+        "findings": expected_findings,
+        "ledger_result_count": 0,
+        "archive_action_count": len(plan["actions"]),
+        "artifact_path": str(verification_path),
+        "agent_role": "adversarial_agent",
+        "needs_human_review": expected_verdict
+        in {"needs_human_review", "needs_correction"},
+        "archive_allowed": expected_verdict in {"pass", "pass_with_warnings"},
+        "next_actions": AdversarialAgent._next_actions(expected_verdict),
+    }
+    if persisted != expected:
+        raise ValueError("verification derivation binding")
     return persisted
 
 
@@ -673,7 +1013,10 @@ def _validated_audit_artifact(
     run_dir: Path,
     run_id: str,
     audit: dict[str, Any],
+    review: dict[str, Any],
     review_ids: list[str],
+    verification: dict[str, Any],
+    plan: dict[str, Any],
 ) -> dict[str, Any]:
     audit_path = run_dir / "audit_review.json"
     if not _same_artifact_path(audit.get("artifact_path"), audit_path):
@@ -728,6 +1071,43 @@ def _validated_audit_artifact(
         for name, path in expected_artifacts.items()
     ):
         raise ValueError("audit artifact binding")
+    if type(persisted.get("timestamp")) is not str or not persisted["timestamp"]:
+        raise ValueError("audit timestamp")
+    auditor = AuditAgent(workspace_dir=str(run_dir.parent.parent))
+    expected_violations = auditor._policy_violations(verification, plan)
+    expected_required = AuditAgent._required_feedback_items(review)
+    expected_verdict = AuditAgent._audit_verdict(
+        [], expected_violations, verification, expected_required
+    )
+    expected_confirmation = AuditAgent._human_confirmation_required(
+        verification, plan, review
+    )
+    expected = {
+        "schema_version": "audit_review.v1",
+        "agent_role": "audit_agent",
+        "status": "success",
+        "run_id": run_id,
+        "timestamp": persisted["timestamp"],
+        "audit_verdict": expected_verdict,
+        "missing_artifacts": [],
+        "policy_violations": expected_violations,
+        "required_feedback_items": expected_required,
+        "human_feedback_required": bool(expected_required),
+        "human_confirmation_required": expected_confirmation,
+        "next_actions": AuditAgent._next_actions(
+            expected_verdict,
+            [],
+            verification,
+            expected_confirmation,
+            expected_required,
+        ),
+        "artifact_paths": {
+            name: str(path) for name, path in expected_artifacts.items()
+        },
+        "loop_trace_summary": AuditAgent._loop_trace_summary({}),
+    }
+    if persisted != expected:
+        raise ValueError("audit derivation binding")
     return persisted
 
 
@@ -785,6 +1165,39 @@ def _validated_feedback_artifact(
         or form.get("verification_verdict") != verification.get("overall_verdict")
     ):
         raise ValueError("feedback form binding")
+    if type(form.get("created_at")) is not str or not form["created_at"]:
+        raise ValueError("feedback timestamp")
+    expected_form = build_feedback_form(
+        run_id=run_id,
+        review_queue=review,
+        audit_review=audit,
+        adversarial_verification=verification,
+    )
+    expected_form["created_at"] = form["created_at"]
+    if form != expected_form:
+        raise ValueError("feedback derivation binding")
+    if _strict_text_artifact(markdown_path) != render_feedback_form_markdown(
+        expected_form
+    ):
+        raise ValueError("feedback Markdown binding")
+    expected_feedback = {
+        "schema_version": "feedback_form.prepare.v1",
+        "status": "success",
+        "run_id": run_id,
+        "item_count": len(expected_form["items"]),
+        "required_feedback_items": expected_form["required_feedback_items"],
+        "artifacts": {
+            "feedback_form_json": str(form_path),
+            "feedback_form_md": str(markdown_path),
+        },
+        "boundary": {
+            "moved_files": False,
+            "updated_business_ledger": False,
+            "archive_plan_executed": False,
+        },
+    }
+    if feedback != expected_feedback:
+        raise ValueError("feedback wrapper binding")
     required = form.get("required_feedback_items")
     if required != audit.get("required_feedback_items"):
         raise ValueError("feedback required coverage")
@@ -838,6 +1251,26 @@ def _validated_feedback_artifact(
     return form
 
 
+def _validate_archive_execution_return(
+    archive: dict[str, Any], run_id: str, action_count: int
+) -> None:
+    expected = {
+        "schema_version": "archive_plan.execute.v1",
+        "status": "blocked",
+        "run_id": run_id,
+        "moved": 0,
+        "failed": action_count,
+        "results": [],
+        "gate": {
+            "schema_version": "archive_intent_execution_gate.v1",
+            "status": "blocked",
+            "blockers": ["archive_intent_not_executable"],
+        },
+    }
+    if archive != expected:
+        raise ValueError("archive execution binding")
+
+
 def _acceptance_succeeded(
     *,
     native_statuses: dict[str, str],
@@ -875,17 +1308,26 @@ def _acceptance_succeeded(
             resumed=resumed,
             hashes_before=hashes_before,
         )
+        plan = _validated_plan_artifact(
+            run_dir=run_dir,
+            run_id=run_id,
+            resumed=resumed,
+            hashes_before=hashes_before,
+        )
         verified = _validated_verification_artifact(
             run_dir=run_dir,
             run_id=run_id,
             verification=verification,
-            archive_action_count=len(returned_actions),
+            plan=plan,
         )
         audited = _validated_audit_artifact(
             run_dir=run_dir,
             run_id=run_id,
             audit=audit,
+            review=review,
             review_ids=review_ids,
+            verification=verified,
+            plan=plan,
         )
         _validated_feedback_artifact(
             run_dir=run_dir,
@@ -896,8 +1338,9 @@ def _acceptance_succeeded(
             verification=verified,
             audit=audited,
         )
-        plan = strict_json_load(str(run_dir / "planned_archive_actions.json"))
-        validate_archive_execution_plan(plan, run_id)
+        _validate_archive_execution_return(
+            archive, run_id, len(plan["actions"])
+        )
     except Exception:
         return False
     planned_actions = plan.get("actions") if isinstance(plan, dict) else None

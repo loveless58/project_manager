@@ -258,3 +258,75 @@ python.exe -m pytest tests/integration/test_local_agent_judgement_dry_run.py tes
 `py_compile` and `git diff --check` completed with exit code `0`. Fresh
 `governance/validate.py repository` and `all` runs still report only the same
 six upstream baseline findings; no Task 5 file is named.
+
+## Fix round 3: raw-byte trust and process-derived acceptance
+
+Canonical reuse now compares complete SHA-256 digests of the original source
+bytes against a freshly generated trusted reference. PDF generation suppresses
+volatile trailer IDs. Generated DOCX/XLSX packages are deterministically
+repacked with sorted members, fixed ZIP metadata, and a fixed XLSX modified
+timestamp. Consequently, parser-invisible content is still part of the trust
+decision: bytes after `%%EOF` or ZIP EOCD, ZIP comments, extras, metadata, and
+all package members must match exactly. The source marker remains a secondary
+integrity memo and cannot authorize any source.
+
+Reference generation no longer uses a system temporary directory. It creates a
+fixed controlled reference directory under the supplied dry-run root, audits
+the complete path for locality and reparse points, generates deterministic
+files there, reads their raw digests, and explicitly removes every generated
+file and the reference directory before continuing. A test guards every Python
+temporary-path API and permits it only when its explicit `dir` is inside the
+supplied root; this preserves the artifact layer's root-local atomic writes.
+
+Acceptance is now re-derived from the persisted process inputs:
+
+- The review queue is rebuilt from the strict input manifest, agent requests,
+  candidate interpretations, and archive intents, including fixed questions,
+  policies, evidence projections, risks, source hashes, and ordering.
+- The plan uses the strict Task 5 collection contract and must contain exactly
+  one unique action and intent for each of the five native synthetic sources.
+- Verification findings and verdict are recomputed from strict extracted
+  artifacts and the validated plan using the production verification rules.
+- Audit violations, verdict, feedback requirements, next actions, artifact
+  paths, and empty loop trace are recomputed using the production audit rules.
+- The complete feedback JSON is rebuilt from the trusted review/audit/verify
+  chain, and the persisted Markdown must exactly equal its renderer output.
+- Archive execution must exactly match the real non-executable intent response:
+  correct schema/run/status/gate, `moved=0`, empty results, and a failed count
+  equal to the five validated plan actions.
+
+### Fix-round-3 TDD evidence
+
+The first focused run reproduced every requested bypass against the round-2
+implementation:
+
+```text
+15 failed, 44 deselected in 7.72s
+```
+
+It covered PDF/DOCX/XLSX trailing bytes plus forged markers; a forbidden
+root-external reference temp path; a schema-valid forged question; a high-risk
+finding hidden behind `pass`; a high audit violation with fake trace; five
+forged feedback projection fields; forged feedback Markdown; duplicate archive
+coverage; and a fake successful cross-run archive response.
+
+Fresh focused GREEN:
+
+```text
+15 passed, 44 deselected in 7.54s
+31 acceptance-gate tests passed, 28 deselected in 13.36s
+```
+
+Fresh final verification:
+
+```text
+python.exe -m pytest tests/integration/test_local_agent_judgement_dry_run.py -q -p no:cacheprovider
+59 passed in 23.69s
+
+python.exe -m pytest tests/integration/test_local_agent_judgement_dry_run.py tests/integration/test_business_judgement_usable_slice.py tests/scripts/test_prepare_business_file_run.py -q -p no:cacheprovider
+74 passed in 25.81s
+```
+
+`py_compile` and `git diff --check` completed with exit code `0`. Fresh
+`governance/validate.py repository` and `all` runs still report only the same
+six upstream baseline findings; no Task 5 file is named.
