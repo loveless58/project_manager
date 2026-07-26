@@ -49,11 +49,11 @@ class FilesystemProjectionWriter:
                 "projection path must name a file below configured root; "
                 "non-canonical paths may resolve outside configured root"
             ) from exc
-        return target, canonical.value
         if any(is_path_within(target, protected) for protected in self.protected_roots):
             raise ProjectionPathError(
                 "projection path must not target a protected storage root"
             )
+        return target, canonical.value
 
     def write(self, request: ProjectionRequest) -> ProjectionRef:
         target, logical_path = self._resolve(request.relative_path)

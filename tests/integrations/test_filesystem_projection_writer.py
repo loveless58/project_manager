@@ -140,3 +140,36 @@ def test_projection_writer_cannot_overwrite_a_protected_source_sentinel(
         ).write(request)
 
     assert sentinel.read_bytes() == original
+
+
+def test_projection_writer_rechecks_target_after_protected_roots_change(
+    tmp_path: Path,
+) -> None:
+    """The write-time guard remains effective after an adapter binding update."""
+    from integrations.projections.filesystem_writer import (
+        FilesystemProjectionWriter,
+        ProjectionPathError,
+    )
+
+    projection_root = tmp_path / "projection"
+    protected_root = projection_root / "newly-protected"
+    protected_root.mkdir(parents=True)
+    sentinel = protected_root / "sentinel.md"
+    original = b"source-owned-sentinel"
+    sentinel.write_bytes(original)
+    writer = FilesystemProjectionWriter(projection_root)
+    writer.protected_roots = (protected_root.resolve(),)
+    request = ProjectionRequest(
+        "markdown",
+        "newly-protected/sentinel.md",
+        "runtime replacement",
+        "text/markdown",
+    )
+
+    with pytest.raises(
+        ProjectionPathError,
+        match="must not target a protected storage root",
+    ):
+        writer.write(request)
+
+    assert sentinel.read_bytes() == original

@@ -265,6 +265,7 @@ def test_agent_prepare_writes_exact_immutable_input_snapshot(tmp_path: Path) -> 
         "items": [
             {
                 "request_id": request["request_id"],
+                "request_hash": request["request_hash"],
                 "source_ref": manifest_entry["source_ref"],
                 "content_hash": manifest_entry["content_hash"],
                 "parse_artifact_ref": extracted["parse_artifact_ref"],
@@ -342,6 +343,85 @@ def test_resume_rejects_tampered_phase_one_input_without_artifact_mutation(
     result = tools.resume_agent_judgement_run(
         prepared["run_id"],
         write_matching_agent_responses(prepared),
+        prepared_source_files(prepared),
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "AGENT_JUDGEMENT.RUN_INPUT_INVALID"
+    assert artifact_bytes(prepared["artifacts"]) == before
+
+
+def test_public_resume_rejects_rehashed_tampered_request_before_consumption(
+    tmp_path: Path,
+) -> None:
+    tools, prepared = prepared_agent_run(tmp_path)
+    request_path = Path(prepared["artifacts"]["agent_judgement_requests"])
+    request_artifact = load_json(str(request_path))
+    request = request_artifact["requests"][0]
+    request["interpretation_request"]["business_context"]["candidates"][0][
+        "facts"
+    ]["contract_code"] = "SYN-CONTRACT-ALTERED"
+    request["request_hash"] = canonical_hash(
+        {
+            "schema_version": request["schema_version"],
+            "run_id": request["run_id"],
+            "request_id": request["request_id"],
+            "interpretation_request": request["interpretation_request"],
+        }
+    )
+    request_path.write_text(
+        json.dumps(request_artifact, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    response_path = write_matching_agent_responses(prepared)
+    before = artifact_bytes(prepared["artifacts"])
+
+    result = tools.resume_agent_judgement_run(
+        prepared["run_id"],
+        response_path,
+        prepared_source_files(prepared),
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "AGENT_JUDGEMENT.RUN_INPUT_INVALID"
+    assert artifact_bytes(prepared["artifacts"]) == before
+
+
+def test_public_resume_rejects_extracted_source_ref_not_bound_to_manifest(
+    tmp_path: Path,
+) -> None:
+    tools, prepared = prepared_agent_run(tmp_path)
+    manifest = load_json(prepared["artifacts"]["input_manifest"])
+    content_hash = manifest["files"][0]["content_hash"]
+    extracted_path = (
+        Path(prepared["artifacts"]["extracted_dir"])
+        / f"{content_hash[:24]}_extracted.json"
+    )
+    extracted = load_json(str(extracted_path))
+    extracted["source_ref"] = {
+        **extracted["source_ref"],
+        "object_key": "alternate.md",
+        "logical_uri": "business://source/alternate.md",
+    }
+    extracted_path.write_text(
+        json.dumps(extracted, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    snapshot_path = Path(
+        prepared["artifacts"]["agent_judgement_input_snapshot"]
+    )
+    snapshot = load_json(str(snapshot_path))
+    snapshot["items"][0]["extracted_digest"] = canonical_hash(extracted)
+    snapshot_path.write_text(
+        json.dumps(snapshot, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    response_path = write_matching_agent_responses(prepared)
+    before = artifact_bytes(prepared["artifacts"])
+
+    result = tools.resume_agent_judgement_run(
+        prepared["run_id"],
+        response_path,
         prepared_source_files(prepared),
     )
 

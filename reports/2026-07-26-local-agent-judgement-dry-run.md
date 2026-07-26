@@ -469,14 +469,16 @@ the invoice security follow-up remains explicitly deferred.
 
 1. Storage binding overlap is rejected symmetrically. Runtime, database,
    projection, and data-cleaning paths may neither contain nor be contained by
-   one another. Settings validation, composition, the filesystem projection
+   any configured storage binding; they are not required to be mutually
+   disjoint. Settings validation, composition, the filesystem projection
    writer, and data-cleaning tools share the same path-locality contract.
 2. Agent resume is bound to immutable prepared inputs. Each prepared run
    persists an `agent_judgement_input_snapshot.v1` containing ordered
-   `request_id`, `source_ref`, `content_hash`, `parse_artifact_ref`, and
-   `extracted_digest` items. The public resume boundary requires the exact
-   ordered source set and revalidates the manifest, snapshot, extracted
-   artifact, request, and source content before response processing and again
+   `request_id`, `request_hash`, `source_ref`, `content_hash`,
+   `parse_artifact_ref`, and `extracted_digest` items. The public resume
+   boundary requires the exact ordered source set and revalidates the
+   manifest, snapshot, extracted artifact, request, and source content before
+   response processing and again
    under the run lock. Missing or altered inputs block with
    `AGENT_JUDGEMENT.RUN_INPUT_INVALID`.
 3. Agent responses are local-exchange-only. Resume accepts regular files only
@@ -485,7 +487,7 @@ the invoice security follow-up remains explicitly deferred.
    non-regular files, and preserves the existing capability-disabled outcome
    when an otherwise valid local response file is absent.
 4. Configured-LLM provider setup failures are mapped to the stable capability
-   block (`AGENT_JUDGEMENT.LLM_CAPABILITY_DISABLED`, exit code `2`) for absent
+   block (`LLM.CAPABILITY_DISABLED`, exit code `2`) for absent
    or blank endpoint/key configuration. The documented legacy endpoint
    fallback remains compatible.
 5. The two new negative-test fixtures construct synthetic credential and UNC

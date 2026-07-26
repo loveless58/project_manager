@@ -48,14 +48,15 @@ from contracts.archive_run_artifacts import (
     normalize_interpretation_output,
     normalize_native_parse_output,
     strict_json_load,
+    validate_agent_judgement_requests_artifact,
     validate_archive_action,
     validate_archive_execution_plan,
     validate_audit_review,
-    validate_review_queue,
     validate_archive_intent,
     validate_candidate_interpretation,
     validate_extracted_document_artifact,
     validate_json_tree,
+    validate_review_queue,
     validate_task5_collection_artifact,
 )
 from contracts.agent_judgement import build_agent_judgement_request, canonical_hash
@@ -2142,6 +2143,7 @@ class DataCleaningTools:
                 ))
                 input_snapshot_items.append({
                     "request_id": request["request_id"],
+                    "request_hash": request["request_hash"],
                     "source_ref": ref_payload,
                     "content_hash": content_hash,
                     "parse_artifact_ref": parse_ref,
@@ -2248,7 +2250,17 @@ class DataCleaningTools:
             items = snapshot["items"]
             if not (len(files) == len(requests) == len(entries) == len(items)):
                 raise ValueError("input count")
-            for path, request, entry, item in zip(files, requests, entries, items):
+            validated_requests = validate_agent_judgement_requests_artifact(
+                {
+                    "schema_version": "agent_judgement_requests.v1",
+                    "run_id": run_id,
+                    "requests": requests,
+                },
+                run_id=run_id,
+            )
+            for path, request, entry, item in zip(
+                files, validated_requests, entries, items,
+            ):
                 content_hash = entry["content_hash"]
                 extracted = strict_json_load(os.path.join(
                     run_dir,
@@ -2256,8 +2268,11 @@ class DataCleaningTools:
                     f"{content_hash[:24]}_extracted.json",
                 ))
                 validate_extracted_document_artifact(extracted, run_id)
+                if extracted["source_ref"] != entry["source_ref"]:
+                    raise ValueError("extracted source ref binding")
                 expected = {
                     "request_id": request["request_id"],
+                    "request_hash": request["request_hash"],
                     "source_ref": entry["source_ref"],
                     "content_hash": content_hash,
                     "parse_artifact_ref": extracted["parse_artifact_ref"],
