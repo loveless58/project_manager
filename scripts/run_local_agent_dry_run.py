@@ -872,6 +872,9 @@ def _validated_review_artifact(
 ) -> tuple[dict[str, Any], list[str]]:
     expected_artifacts = {
         "input_manifest": run_dir / "input_manifest.json",
+        "agent_judgement_input_snapshot": (
+            run_dir / "agent_judgement_input_snapshot.json"
+        ),
         "agent_judgement_requests": run_dir / "agent_judgement_requests.json",
         "agent_judgement_consumption": run_dir / "agent_judgement_consumption.json",
         "candidate_interpretations": run_dir / "candidate_interpretations.json",
@@ -1521,7 +1524,7 @@ def run_local_agent_dry_run(
         )
 
     resumed = tools.resume_agent_judgement_run(
-        prepared["run_id"], str(response_path)
+        prepared["run_id"], str(response_path), native_paths,
     )
     if resumed.get("status") != "success":
         return _blocked(

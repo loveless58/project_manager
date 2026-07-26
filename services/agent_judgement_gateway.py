@@ -18,7 +18,9 @@ from contracts.archive_run_artifacts import (
 
 
 RequestPreparer = Callable[[list[str]], dict[str, Any]]
-ResponseConsumer = Callable[[str, list[dict[str, Any]], list[dict[str, Any]]], dict[str, Any]]
+ResponseConsumer = Callable[
+    [str, list[dict[str, Any]], list[dict[str, Any]], list[str]], dict[str, Any]
+]
 RunDirectoryResolver = Callable[[str], str]
 ArtifactWriter = Callable[[str, dict[str, Any]], None]
 
@@ -107,7 +109,9 @@ class AgentJudgementGateway:
             },
         }
 
-    def resume_run(self, run_id: str, response_path: str) -> dict[str, Any]:
+    def resume_run(
+        self, run_id: str, response_path: str, files: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Consume one strict response artifact, or leave the run untouched."""
         if self._run_dir_resolver is None or self._response_consumer is None:
             return self._blocked(str(run_id), "LLM.CAPABILITY_DISABLED")
@@ -127,6 +131,11 @@ class AgentJudgementGateway:
                 }:
                     return self._blocked(run_id, "AGENT_JUDGEMENT.RUN_PREPARATION_FAILED")
                 raise ArchiveRunArtifactError("agent failed-run marker")
+            if (
+                type(files) is not list or not files
+                or any(type(path) is not str or not path for path in files)
+            ):
+                return self._blocked(run_id, "AGENT_JUDGEMENT.RUN_INPUT_INVALID")
             request_path = os.path.join(run_dir, "agent_judgement_requests.json")
             request_artifact = strict_json_load(request_path)
             requests = validate_agent_judgement_requests_artifact(
@@ -142,10 +151,12 @@ class AgentJudgementGateway:
             return self._blocked(str(run_id), "AGENT_JUDGEMENT.RESPONSE_INVALID")
 
         try:
-            return self._response_consumer(run_id, requests, responses)
+            return self._response_consumer(run_id, requests, responses, list(files))
         except ArchiveRunArtifactError as exc:
             if str(exc) == "agent judgement run already consumed":
                 return self._blocked(run_id, "AGENT_JUDGEMENT.RESPONSE_INVALID")
+            if str(exc) == "agent run input invalid":
+                return self._blocked(run_id, "AGENT_JUDGEMENT.RUN_INPUT_INVALID")
             raise
 
     @staticmethod

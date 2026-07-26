@@ -7,7 +7,6 @@ confirms an archive plan. OCR is deliberately disabled for this entry point.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -123,49 +122,6 @@ def _agent_manifest_source_binding(entries: Sequence[dict[str, Any]]) -> str:
     return next(iter(binding_ids))
 
 
-def _validate_agent_resume_sources(
-    tools: DataCleaningTools,
-    registry: Any,
-    source_binding_id: str,
-    files: Sequence[str],
-    run_id: str,
-) -> str:
-    files = _validate_sources(registry, source_binding_id, files)
-    try:
-        run_dir = tools._resolve_archive_run_dir(validate_run_id(run_id))
-        entries = _agent_manifest_entries(run_dir, run_id)
-        if len(files) != len(entries):
-            raise ValueError("agent manifest file count")
-        for path, entry in zip(files, entries):
-            reference = registry.document_ref_from_path(path)
-            source_ref = {
-                "storage_provider": reference.storage_provider,
-                "object_key": reference.object_key,
-                "logical_uri": reference.logical_uri,
-                "binding_id": reference.binding_id,
-            }
-            if (
-                source_ref != entry["source_ref"]
-                or hashlib.sha256(Path(path).read_bytes()).hexdigest()
-                != entry["content_hash"]
-            ):
-                raise ValueError("agent manifest source mismatch")
-        manifest_binding = _agent_manifest_source_binding(entries)
-        if manifest_binding != source_binding_id:
-            raise ValueError("agent manifest binding mismatch")
-        return manifest_binding
-    except (
-        AgentJudgementSchemaError,
-        ArchiveRunArtifactError,
-        OSError,
-        StorageBindingError,
-        TypeError,
-        ValueError,
-        KeyError,
-    ) as exc:
-        raise InputBindingError("AGENT_JUDGEMENT.RUN_INPUT_INVALID") from exc
-
-
 def _summary(*, prepared: dict[str, Any], verification: dict[str, Any], audit: dict[str, Any], feedback: dict[str, Any], archive: dict[str, Any], source_binding: str, target_binding: str) -> dict[str, Any]:
     failures = prepared.get("failures") if isinstance(prepared.get("failures"), list) else []
     failure_codes = sorted({str(item.get("blocked_reason", "DOCUMENT_PROCESSING.BLOCKED")) for item in failures if isinstance(item, dict)})
@@ -261,11 +217,9 @@ def main(argv: Sequence[str] | None = None, *, interpreter_factory: Callable[[],
                 agent_judgement_gateway=AgentJudgementGateway(),
             )
             if args.resume_run:
-                source_binding = _validate_agent_resume_sources(
-                    tools, registry, args.source_binding, files, args.resume_run,
-                )
+                source_binding = args.source_binding
                 result = tools.resume_agent_judgement_run(
-                    args.resume_run, args.agent_response,
+                    args.resume_run, args.agent_response, files,
                 )
             else:
                 result = tools.prepare_agent_judgement_run(files)

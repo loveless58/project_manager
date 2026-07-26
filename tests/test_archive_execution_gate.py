@@ -13,6 +13,7 @@ def completed_agent_run(tmp_path: Path):
     """Complete the persisted agent hand-off without archive authority."""
     from tests.services.test_agent_judgement_gateway import (
         prepared_agent_run,
+        prepared_source_files,
         write_matching_agent_responses,
     )
 
@@ -20,6 +21,7 @@ def completed_agent_run(tmp_path: Path):
     resumed = tools.resume_agent_judgement_run(
         prepared["run_id"],
         write_matching_agent_responses(prepared),
+        prepared_source_files(prepared),
     )
     assert resumed["status"] == "success"
     return tools, prepared

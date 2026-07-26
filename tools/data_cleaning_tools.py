@@ -2035,11 +2035,16 @@ class DataCleaningTools:
             return self._agent_judgement_blocked("", "LLM.CAPABILITY_DISABLED")
         return self.agent_judgement_gateway.prepare_run(files)
 
-    def resume_agent_judgement_run(self, run_id: str, response_path: str) -> Dict[str, Any]:
+    def resume_agent_judgement_run(
+        self,
+        run_id: str,
+        response_path: str,
+        files: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         """Validate one supplied response artifact before any review artifact changes."""
         if self.agent_judgement_gateway is None:
             return self._agent_judgement_blocked(run_id, "LLM.CAPABILITY_DISABLED")
-        return self.agent_judgement_gateway.resume_run(run_id, response_path)
+        return self.agent_judgement_gateway.resume_run(run_id, response_path, files)
 
     def _prepare_agent_judgement_requests(self, files: List[str]) -> Dict[str, Any]:
         if self.retrieval_service is None:
@@ -2065,6 +2070,7 @@ class DataCleaningTools:
             requests: List[Dict[str, Any]] = []
             manifest: List[Dict[str, Any]] = []
             extracted_payloads: List[tuple[str, Dict[str, Any]]] = []
+            input_snapshot_items: List[Dict[str, Any]] = []
             request_ids: set[str] = set()
             for path in files:
                 self._source_identity(path)
@@ -2103,11 +2109,12 @@ class DataCleaningTools:
                 if request_id in request_ids:
                     raise ValueError("duplicate agent request")
                 request_ids.add(request_id)
-                requests.append(build_agent_judgement_request(
+                request = build_agent_judgement_request(
                     run_id=run_id,
                     request_id=request_id,
                     interpretation_request=prepared.request,
-                ))
+                )
+                requests.append(request)
                 extracted_payload = {
                     "schema_version": "file_organization.extracted_document.v1",
                     "run_id": run_id,
@@ -2124,6 +2131,13 @@ class DataCleaningTools:
                     os.path.join(extracted_dir, f"{content_hash[:24]}_extracted.json"),
                     extracted_payload,
                 ))
+                input_snapshot_items.append({
+                    "request_id": request["request_id"],
+                    "source_ref": ref_payload,
+                    "content_hash": content_hash,
+                    "parse_artifact_ref": parse_ref,
+                    "extracted_digest": canonical_hash(extracted_payload),
+                })
                 manifest.append({
                     "run_id": run_id,
                     "source_ref": ref_payload,
@@ -2143,9 +2157,21 @@ class DataCleaningTools:
             )
             for output_path, payload in extracted_payloads:
                 self._save_structured_json(output_path, payload)
+            input_snapshot_path = os.path.join(
+                run_dir, "agent_judgement_input_snapshot.json",
+            )
+            self._save_structured_json(
+                input_snapshot_path,
+                {
+                    "schema_version": "agent_judgement_input_snapshot.v1",
+                    "run_id": run_id,
+                    "items": input_snapshot_items,
+                },
+            )
             artifacts.update({
                 "input_manifest": input_manifest_path,
                 "extracted_dir": extracted_dir,
+                "agent_judgement_input_snapshot": input_snapshot_path,
             })
             return {
                 "status": "ready",
@@ -2181,13 +2207,94 @@ class DataCleaningTools:
                 "artifacts": artifacts,
             }
 
+    def _validate_agent_judgement_input(
+        self,
+        run_id: str,
+        run_dir: str,
+        requests: List[Dict[str, Any]],
+        files: List[str],
+    ) -> None:
+        """Re-bind a resume request to the exact ordered phase-one input."""
+        try:
+            if (
+                type(files) is not list or not files
+                or any(type(path) is not str or not path for path in files)
+            ):
+                raise ValueError("ordered source files")
+            manifest = strict_json_load(os.path.join(run_dir, "input_manifest.json"))
+            validate_task5_collection_artifact(
+                manifest, kind="input_manifest", run_id=run_id,
+            )
+            snapshot = strict_json_load(
+                os.path.join(run_dir, "agent_judgement_input_snapshot.json"),
+            )
+            if (
+                set(snapshot) != {"schema_version", "run_id", "items"}
+                or snapshot.get("schema_version") != "agent_judgement_input_snapshot.v1"
+                or snapshot.get("run_id") != run_id
+                or type(snapshot.get("items")) is not list
+            ):
+                raise ValueError("input snapshot")
+            entries = manifest["files"]
+            items = snapshot["items"]
+            if not (len(files) == len(requests) == len(entries) == len(items)):
+                raise ValueError("input count")
+            for path, request, entry, item in zip(files, requests, entries, items):
+                content_hash = entry["content_hash"]
+                extracted = strict_json_load(os.path.join(
+                    run_dir,
+                    "extracted",
+                    f"{content_hash[:24]}_extracted.json",
+                ))
+                validate_extracted_document_artifact(extracted, run_id)
+                expected = {
+                    "request_id": request["request_id"],
+                    "source_ref": entry["source_ref"],
+                    "content_hash": content_hash,
+                    "parse_artifact_ref": extracted["parse_artifact_ref"],
+                    "extracted_digest": canonical_hash(extracted),
+                }
+                if item != expected:
+                    raise ValueError("input snapshot mismatch")
+                request_payload = request["interpretation_request"]
+                if request_payload["parse_artifact_ref"] != item["parse_artifact_ref"]:
+                    raise ValueError("request parse binding")
+                source_ref = self.storage_binding_registry.document_ref_from_path(path)
+                if self._logical_ref_payload(source_ref) != item["source_ref"]:
+                    raise ValueError("source ref binding")
+                before = self._source_identity(path)
+                try:
+                    with self.document_store_router.open_read(source_ref) as stream:
+                        content = stream.read(16 * 1024 * 1024 + 1)
+                except Exception as exc:
+                    raise ValueError("source read") from exc
+                if (
+                    not isinstance(content, bytes)
+                    or len(content) > 16 * 1024 * 1024
+                    or self._source_identity(path) != before
+                    or hashlib.sha256(content).hexdigest() != item["content_hash"]
+                ):
+                    raise ValueError("source content binding")
+        except (
+            AmbiguousStorageBindingError,
+            StorageBindingNotFoundError,
+            ArchiveRunArtifactError,
+            KeyError,
+            OSError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise ArchiveRunArtifactError("agent run input invalid") from exc
+
     def _complete_agent_judgement_responses(
         self,
         run_id: str,
         requests: List[Dict[str, Any]],
         responses: List[Dict[str, Any]],
+        files: List[str],
     ) -> Dict[str, Any]:
         run_dir = self._resolve_archive_run_dir(run_id)
+        self._validate_agent_judgement_input(run_id, run_dir, requests, files)
         request_artifact = {
             "schema_version": "agent_judgement_requests.v1",
             "run_id": run_id,
@@ -2379,6 +2486,9 @@ class DataCleaningTools:
         )
         artifacts = {
             "input_manifest": os.path.join(run_dir, "input_manifest.json"),
+            "agent_judgement_input_snapshot": os.path.join(
+                run_dir, "agent_judgement_input_snapshot.json",
+            ),
             "agent_judgement_requests": os.path.join(run_dir, "agent_judgement_requests.json"),
             "agent_judgement_consumption": os.path.join(run_dir, "agent_judgement_consumption.json"),
             "candidate_interpretations": os.path.join(run_dir, "candidate_interpretations.json"),
@@ -2450,6 +2560,7 @@ class DataCleaningTools:
         )
         with _feedback_thread_lock(run_dir):
             with _feedback_process_lock(run_dir):
+                self._validate_agent_judgement_input(run_id, run_dir, requests, files)
                 if strict_json_load(artifacts["agent_judgement_requests"]) != request_artifact:
                     raise ArchiveRunArtifactError("agent request replay")
                 if any(os.path.exists(path) for path in consumed_paths):

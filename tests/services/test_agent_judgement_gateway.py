@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 import pytest
 
+from contracts.agent_judgement import canonical_hash
 from platform_core.models import BusinessContextEvidence
 from platform_core.storage_bindings import StorageBinding, StorageBindingRegistry
 
@@ -119,6 +120,23 @@ def prepared_agent_run(tmp_path: Path, count: int = 1):
     return tools, tools.prepare_agent_judgement_run(files)
 
 
+def response_exchange_path(prepared: dict[str, Any], name: str) -> Path:
+    run_dir = Path(prepared["artifacts"]["run_dir"])
+    exchange_dir = run_dir.parents[1] / "agent-host-responses"
+    exchange_dir.mkdir(parents=True, exist_ok=True)
+    return exchange_dir / name
+
+
+def prepared_source_files(prepared: dict[str, Any]) -> list[str]:
+    run_dir = Path(prepared["artifacts"]["run_dir"])
+    source_root = run_dir.parents[2] / "source"
+    manifest = load_json(prepared["artifacts"]["input_manifest"])
+    return [
+        str(source_root / item["name"])
+        for item in manifest["files"]
+    ]
+
+
 def matching_response(request: dict[str, Any]) -> dict[str, Any]:
     interpretation_request = request["interpretation_request"]
     return {
@@ -170,18 +188,19 @@ def write_responses(
     }
     if mutate is not None:
         mutate(payload)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return str(path)
 
 
 def write_matching_agent_responses(prepared: dict[str, Any]) -> str:
-    return write_responses(prepared, Path(prepared["artifacts"]["run_dir"]).parent / "responses.json")
+    return write_responses(prepared, response_exchange_path(prepared, "responses.json"))
 
 
 def write_bad_hash_response(prepared: dict[str, Any]) -> str:
     return write_responses(
         prepared,
-        Path(prepared["artifacts"]["run_dir"]).parent / "bad-response.json",
+        response_exchange_path(prepared, "bad-response.json"),
         mutate=lambda payload: payload["responses"][0].__setitem__("request_hash", "0" * 64),
     )
 
@@ -214,6 +233,129 @@ def test_agent_prepare_writes_safe_requests_and_no_review_or_archive_result(
     assert not (run_dir / "archive_result.json").exists()
 
 
+def test_agent_prepare_writes_exact_immutable_input_snapshot(tmp_path: Path) -> None:
+    _, prepared = prepared_agent_run(tmp_path)
+
+    snapshot = load_json(prepared["artifacts"]["agent_judgement_input_snapshot"])
+    manifest = load_json(prepared["artifacts"]["input_manifest"])
+    requests = load_json(prepared["artifacts"]["agent_judgement_requests"])
+    manifest_entry = manifest["files"][0]
+    request = requests["requests"][0]
+    extracted_path = (
+        Path(prepared["artifacts"]["extracted_dir"])
+        / f"{manifest_entry['content_hash'][:24]}_extracted.json"
+    )
+    extracted = load_json(str(extracted_path))
+
+    assert snapshot == {
+        "schema_version": "agent_judgement_input_snapshot.v1",
+        "run_id": prepared["run_id"],
+        "items": [
+            {
+                "request_id": request["request_id"],
+                "source_ref": manifest_entry["source_ref"],
+                "content_hash": manifest_entry["content_hash"],
+                "parse_artifact_ref": extracted["parse_artifact_ref"],
+                "extracted_digest": canonical_hash(extracted),
+            }
+        ],
+    }
+
+
+def test_resume_without_ordered_source_files_is_fail_closed(tmp_path: Path) -> None:
+    tools, prepared = prepared_agent_run(tmp_path)
+    before = artifact_bytes(prepared["artifacts"])
+
+    result = tools.resume_agent_judgement_run(
+        prepared["run_id"], write_matching_agent_responses(prepared)
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "AGENT_JUDGEMENT.RUN_INPUT_INVALID"
+    assert artifact_bytes(prepared["artifacts"]) == before
+
+
+@pytest.mark.parametrize(
+    "artifact_name,mutate",
+    [
+        (
+            "input_manifest",
+            lambda artifact: artifact["files"][0]["source_ref"].__setitem__(
+                "object_key", "replacement.md"
+            ),
+        ),
+        (
+            "extracted",
+            lambda artifact: artifact.__setitem__(
+                "text_length", artifact["text_length"] + 1
+            ),
+        ),
+        (
+            "agent_judgement_requests",
+            lambda artifact: artifact["requests"][0]["interpretation_request"].__setitem__(
+                "parse_artifact_ref", "artifact:parsed:" + "0" * 24
+            ),
+        ),
+    ],
+    ids=["manifest source ref", "extracted payload", "request parse ref"],
+)
+def test_resume_rejects_tampered_phase_one_input_without_artifact_mutation(
+    tmp_path: Path,
+    artifact_name: str,
+    mutate: Callable[[dict[str, Any]], None],
+) -> None:
+    tools, prepared = prepared_agent_run(tmp_path)
+    manifest = load_json(prepared["artifacts"]["input_manifest"])
+    if artifact_name == "extracted":
+        content_hash = manifest["files"][0]["content_hash"]
+        path = (
+            Path(prepared["artifacts"]["extracted_dir"])
+            / f"{content_hash[:24]}_extracted.json"
+        )
+    else:
+        path = Path(prepared["artifacts"][artifact_name])
+    artifact = load_json(str(path))
+    mutate(artifact)
+    if artifact_name == "agent_judgement_requests":
+        request = artifact["requests"][0]
+        request["request_hash"] = canonical_hash({
+            "schema_version": request["schema_version"],
+            "run_id": request["run_id"],
+            "request_id": request["request_id"],
+            "interpretation_request": request["interpretation_request"],
+        })
+    path.write_text(json.dumps(artifact, ensure_ascii=False, indent=2), encoding="utf-8")
+    before = artifact_bytes(prepared["artifacts"])
+
+    result = tools.resume_agent_judgement_run(
+        prepared["run_id"],
+        write_matching_agent_responses(prepared),
+        prepared_source_files(prepared),
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "AGENT_JUDGEMENT.RUN_INPUT_INVALID"
+    assert artifact_bytes(prepared["artifacts"]) == before
+
+
+def test_resume_rejects_same_content_from_alternate_logical_source(tmp_path: Path) -> None:
+    tools, prepared = prepared_agent_run(tmp_path)
+    original = Path(prepared_source_files(prepared)[0])
+    alternate = original.with_name("alternate.md")
+    alternate.write_bytes(original.read_bytes())
+    before = artifact_bytes(prepared["artifacts"])
+
+    result = tools.resume_agent_judgement_run(
+        prepared["run_id"],
+        write_matching_agent_responses(prepared),
+        [str(alternate)],
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "AGENT_JUDGEMENT.RUN_INPUT_INVALID"
+    assert artifact_bytes(prepared["artifacts"]) == before
+
+
 def test_failed_prepare_run_is_marked_and_cannot_be_resumed(tmp_path: Path) -> None:
     tools = agent_mode_tools(tmp_path)
     source = native_markdown(tmp_path)
@@ -235,7 +377,9 @@ def test_resume_accepts_only_exact_response_and_keeps_confirmed_false(tmp_path: 
     tools, prepared = prepared_agent_run(tmp_path)
 
     result = tools.resume_agent_judgement_run(
-        prepared["run_id"], write_matching_agent_responses(prepared)
+        prepared["run_id"],
+        write_matching_agent_responses(prepared),
+        prepared_source_files(prepared),
     )
 
     assert result["status"] == "success"
@@ -265,7 +409,11 @@ def test_resume_propagates_response_consumer_os_error_after_validation(
     )
 
     with pytest.raises(OSError, match="synthetic disk full"):
-        gateway.resume_run(prepared["run_id"], write_matching_agent_responses(prepared))
+        gateway.resume_run(
+            prepared["run_id"],
+            write_matching_agent_responses(prepared),
+            prepared_source_files(prepared),
+        )
 
 
 def test_tampered_response_keeps_all_existing_artifacts_byte_identical(tmp_path: Path) -> None:
@@ -373,7 +521,9 @@ def test_second_different_valid_response_cannot_overwrite_consumed_review_artifa
     """The first valid response consumes a run exactly once."""
     tools, prepared = prepared_agent_run(tmp_path)
     first = tools.resume_agent_judgement_run(
-        prepared["run_id"], write_matching_agent_responses(prepared)
+        prepared["run_id"],
+        write_matching_agent_responses(prepared),
+        prepared_source_files(prepared),
     )
     before = artifact_bytes(prepared["artifacts"])
     changed_response_path = write_responses(
@@ -387,7 +537,11 @@ def test_second_different_valid_response_cannot_overwrite_consumed_review_artifa
         ),
     )
 
-    second = tools.resume_agent_judgement_run(prepared["run_id"], changed_response_path)
+    second = tools.resume_agent_judgement_run(
+        prepared["run_id"],
+        changed_response_path,
+        prepared_source_files(prepared),
+    )
 
     assert first["status"] == "success"
     assert second["status"] == "blocked"
@@ -429,7 +583,9 @@ def test_missing_response_is_capability_disabled_without_side_effects(tmp_path: 
     before = artifact_bytes(prepared["artifacts"])
 
     result = tools.resume_agent_judgement_run(
-        prepared["run_id"], str(tmp_path / "not-supplied.json")
+        prepared["run_id"],
+        str(tmp_path / "not-supplied.json"),
+        prepared_source_files(prepared),
     )
 
     assert result["status"] == "blocked"
@@ -442,7 +598,9 @@ def test_resume_cannot_execute_archive_actions_even_when_execution_is_requested(
 ) -> None:
     tools, prepared = prepared_agent_run(tmp_path)
     resumed = tools.resume_agent_judgement_run(
-        prepared["run_id"], write_matching_agent_responses(prepared)
+        prepared["run_id"],
+        write_matching_agent_responses(prepared),
+        prepared_source_files(prepared),
     )
 
     result = tools.execute_archive_plan(prepared["run_id"], confirmed=True)

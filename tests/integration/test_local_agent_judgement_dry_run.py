@@ -624,7 +624,7 @@ def test_acceptance_gate_rejects_source_hash_change(tmp_path, monkeypatch) -> No
     )
 
     assert result["status"] == "blocked"
-    assert result["error_code"] == "DRY_RUN.ACCEPTANCE_FAILED"
+    assert result["error_code"] == "AGENT_JUDGEMENT.RUN_INPUT_INVALID"
     assert result["hashes_before"] != result["hashes_after"]
 
 
@@ -693,8 +693,8 @@ def test_acceptance_gate_rejects_invalid_review_only_result(
     _forbid_external_providers(monkeypatch)
     original = DataCleaningTools.resume_agent_judgement_run
 
-    def mutate_result(self, run_id, response_path):
-        result = original(self, run_id, response_path)
+    def mutate_result(self, run_id, response_path, files=None):
+        result = original(self, run_id, response_path, files)
         if counterexample == "native_status":
             result["candidate_interpretations"][0]["status"] = "success"
         elif counterexample == "invoice_candidate":
@@ -998,8 +998,8 @@ def test_acceptance_gate_rejects_invalid_or_unbound_review_artifact(
     _forbid_external_providers(monkeypatch)
     original = DataCleaningTools.resume_agent_judgement_run
 
-    def mutate_review(self, run_id, response_path):
-        result = original(self, run_id, response_path)
+    def mutate_review(self, run_id, response_path, files=None):
+        result = original(self, run_id, response_path, files)
         queue = result["review_queue"]
         if counterexample == "fake_item":
             queue["items"][0] = {
@@ -1113,8 +1113,8 @@ def test_acceptance_gate_rejects_schema_valid_forged_review_question(
     _forbid_external_providers(monkeypatch)
     original = DataCleaningTools.resume_agent_judgement_run
 
-    def mutate_question(self, run_id, response_path):
-        result = original(self, run_id, response_path)
+    def mutate_question(self, run_id, response_path, files=None):
+        result = original(self, run_id, response_path, files)
         result["review_queue"]["items"][0]["question"] = (
             "Synthetic schema-valid question supplied by an untrusted stage?"
         )
@@ -1262,8 +1262,8 @@ def test_acceptance_gate_rejects_duplicate_archive_action_coverage(
     _forbid_external_providers(monkeypatch)
     original = DataCleaningTools.resume_agent_judgement_run
 
-    def duplicate_archive_action(self, run_id, response_path):
-        result = original(self, run_id, response_path)
+    def duplicate_archive_action(self, run_id, response_path, files=None):
+        result = original(self, run_id, response_path, files)
         result["archive_actions"][1] = copy.deepcopy(result["archive_actions"][0])
         plan_path = Path(result["artifacts"]["planned_archive_actions"])
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
