@@ -30,6 +30,8 @@ def extract_pdf_or_image(
     """Extract PDF/image content through stable project-level OCR providers."""
     ext = os.path.splitext(file_path)[1].lower()
     candidates = _engine_candidates(file_path, dependency_probe, binary_probe)
+    if ocr_adapter is not None:
+        candidates = []
 
     if ext == ".ofd":
         sidecar = _find_ocr_sidecar(file_path, extra_extensions=(".xml", ".txt", ".md"))
@@ -184,6 +186,13 @@ def _run_custom_ocr_adapter(file_path: str, ocr_adapter: Callable[[str], Any]) -
         result = {"text": result}
     if not isinstance(result, dict):
         result = {"status": "failed", "engine": "custom_adapter", "error": "OCR adapter returned invalid result"}
+    if result.get("status") == "blocked":
+        return normalize_ocr_result({
+            "status": "blocked", "engine": result.get("engine", "custom_adapter"),
+            "blocked_reason": result.get("blocked_reason", "OCR.CAPABILITY_DISABLED"),
+            "error": result.get("error", "OCR capability is disabled"),
+        })
+
     if result.get("status") == "failed":
         return normalize_ocr_result({
             "status": "failed",
@@ -248,8 +257,10 @@ def _blocked_document(
             "blocked_reason": blocked_reason or "ocr_adapter_unavailable",
             "error": error,
         })
+    if blocked_reason is None and ocr.get('blocked_reason'):
+        blocked_reason = ocr['blocked_reason']
     if blocked_reason is None:
-        blocked_reason = "ocr_engine_failed" if ext in {".png", ".jpg", ".jpeg"} else "ocr_adapter_unavailable"
+        blocked_reason = 'ocr_engine_failed' if ext in {'.png', '.jpg', '.jpeg'} else 'ocr_adapter_unavailable'
     return {
         "schema_version": "document.extract.v1",
         "status": "blocked",

@@ -216,3 +216,9 @@ PageIndex、OCR、真实业务样本和外部服务集成测试不是普通快�
 ## License
 
 MIT
+
+## Safe business-file judgement CLI
+
+Use `scripts/prepare_business_file_run.py` for an explicit, small business-file review run. It requires `--config`, `--context`, `--source-binding`, explicit files, and optionally `--target-binding`. It writes only node-local review artifacts.
+
+This entry point injects disabled OCR: native PDF, DOCX, XLSX, Markdown, and XML continue through native parsing; scanned documents return `OCR.CAPABILITY_DISABLED` with exit code `2`, without probing or calling an OCR engine. The CLI calls `execute_archive_plan(..., confirmed=False)` once, never applies feedback automatically, and never moves, overwrites, renames, or deletes source files. Its stdout is redacted JSON. See [the safe business-file judgement quickstart](docs/operations/business-file-judgement-quickstart.md).

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+import pytest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -323,3 +324,36 @@ def test_provider_invoice_type_rebuilds_complete_classification():
     assert extracted["classification"]["business_domain"] == "finance"
     assert extracted["classification"]["requires_review"] is True
     assert "project_name" not in extracted["fields"]
+
+
+def create_image_only_pdf(path: Path) -> Path:
+    """Create a synthetic scanned-PDF fixture without a text layer."""
+    fitz = pytest.importorskip("fitz")
+    document = fitz.open()
+    page = document.new_page()
+    page.draw_rect((72, 72, 240, 180), color=(0, 0, 0), fill=(0.8, 0.8, 0.8))
+    document.save(path)
+    document.close()
+    return path
+
+
+def test_scan_blocks_without_easyocr(tmp_path, monkeypatch):
+    """The disabled CLI OCR capability must never fall back to EasyOCR."""
+    from ocr.providers import DisabledOcrProvider
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    monkeypatch.setattr(
+        DataCleaningTools,
+        "_ocr_with_easyocr",
+        lambda *args: (_ for _ in ()).throw(AssertionError("EasyOCR called")),
+    )
+    scan = create_image_only_pdf(tmp_path / "scan.pdf")
+    tools = DataCleaningTools(
+        workspace_dir=str(tmp_path / "runtime"),
+        ocr_adapter=DisabledOcrProvider().extract,
+    )
+
+    result = tools.prepare_file_organization_run([str(scan)])
+
+    assert result["failures"][0]["blocked_reason"] == "OCR.CAPABILITY_DISABLED"
+    assert result["failures"][0]["ocr"]["engine"] == "disabled"

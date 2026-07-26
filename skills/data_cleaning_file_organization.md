@@ -44,3 +44,9 @@ state/project_ledgers/<project>/
 ## 派生说明
 
 完整工具列表和参数由 `ToolRegistry` 生成，治理校验通过 `python -X utf8 -B governance\validate.py tools` 覆盖。README 可以摘要能力，但不得重新定义本 skill 的工具契约。
+
+## Safe business-file judgement CLI
+
+For an explicit small business-file review run on Windows, macOS, or a Synology node, use `scripts/prepare_business_file_run.py` with config, catalog, source binding, optional target binding, and explicit files. Do not infer a source, target, or unique root from SynologyDrive, a drive letter, or a default directory.
+
+The runtime and artifacts must be node-local and non-synced. The command creates review artifacts only, calls the archive gate once with `confirmed=False`, does not apply feedback, and never physically moves, overwrites, renames, or deletes a source. It injects `DisabledOcrProvider`: native PDF/DOCX/XLSX/Markdown/XML use native parsing, while a scanned input must stop with `OCR.CAPABILITY_DISABLED`, never falling back to Vision, RapidOCR, EasyOCR, PaddleOCR, Tesseract, MinerU, or an OFD converter. See `docs/operations/business-file-judgement-quickstart.md`.
