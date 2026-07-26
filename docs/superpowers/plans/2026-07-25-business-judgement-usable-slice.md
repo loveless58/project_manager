@@ -65,7 +65,7 @@ def test_nested_roots_are_ambiguous(tmp_path):
 
 - [ ] **Step 2: Run red tests**
 
-Run: `python -X utf8 -B -m pytest tests/platform_core/test_storage_bindings.py tests/platform_core/test_settings.py -q`  
+Run: `python -X utf8 -B -m pytest tests/platform_core/test_storage_bindings.py tests/platform_core/test_settings.py -q`
 Expected: FAIL because binding models do not exist.
 
 - [ ] **Step 3: Implement compatible models and resolution**
@@ -99,7 +99,7 @@ class StorageBinding:
 
 - [ ] **Step 5: Verify and commit**
 
-Run: `python -X utf8 -B -m pytest tests/platform_core/test_storage_bindings.py tests/integrations/test_document_store_router.py tests/platform_core/test_settings.py tests/integrations/test_local_document_store.py tests/platform_core/test_composition.py -q`  
+Run: `python -X utf8 -B -m pytest tests/platform_core/test_storage_bindings.py tests/integrations/test_document_store_router.py tests/platform_core/test_settings.py tests/integrations/test_local_document_store.py tests/platform_core/test_composition.py -q`
 Expected: PASS, including existing positional `DocumentRef` tests.
 
 ```bash
@@ -139,7 +139,7 @@ Add a test proving project-governance Markdown has the same `DocumentClassificat
 
 - [ ] **Step 2: Run red tests**
 
-Run: `python -X utf8 -B -m pytest tests/test_invoice_business_semantics.py tests/test_archive_decision.py -q`  
+Run: `python -X utf8 -B -m pytest tests/test_invoice_business_semantics.py tests/test_archive_decision.py -q`
 Expected: FAIL because generic regex emits `project_name`.
 
 - [ ] **Step 3: Implement invoice-only fields**
@@ -152,7 +152,7 @@ Use one payload: `document_type`, `business_domain`, `project_phase`, `archive_p
 
 - [ ] **Step 5: Verify and commit**
 
-Run: `python -X utf8 -B -m pytest tests/test_invoice_business_semantics.py tests/test_archive_decision.py tests/test_data_cleaning_ocr_provider.py -q`  
+Run: `python -X utf8 -B -m pytest tests/test_invoice_business_semantics.py tests/test_archive_decision.py tests/test_data_cleaning_ocr_provider.py -q`
 Expected: PASS.
 
 ```bash
@@ -202,7 +202,7 @@ Add one matching contract test: return the candidate first, then index only its 
 
 - [ ] **Step 2: Run red tests**
 
-Run: `python -X utf8 -B -m pytest tests/services/test_retrieval_service.py tests/integrations/test_json_business_context_provider.py -q`  
+Run: `python -X utf8 -B -m pytest tests/services/test_retrieval_service.py tests/integrations/test_json_business_context_provider.py -q`
 Expected: FAIL because interfaces are absent.
 
 - [ ] **Step 3: Implement strict context loading**
@@ -231,7 +231,7 @@ Score exact tax ID, normalized legal name, contract/project code, amount, date, 
 
 - [ ] **Step 5: Verify and commit**
 
-Run: `python -X utf8 -B -m pytest tests/services/test_retrieval_service.py tests/integrations/test_json_business_context_provider.py tests/integrations/test_pageindex_structure_index.py tests/test_pageindex_error_contract.py -q`  
+Run: `python -X utf8 -B -m pytest tests/services/test_retrieval_service.py tests/integrations/test_json_business_context_provider.py tests/integrations/test_pageindex_structure_index.py tests/test_pageindex_error_contract.py -q`
 Expected: PASS.
 
 ```bash
@@ -280,7 +280,7 @@ def test_malformed_response_blocks_and_keeps_parse_ref():
 
 - [ ] **Step 2: Run red tests**
 
-Run: `python -X utf8 -B -m pytest tests/contracts/test_document_interpretation.py tests/services/test_document_interpretation.py -q`  
+Run: `python -X utf8 -B -m pytest tests/contracts/test_document_interpretation.py tests/services/test_document_interpretation.py -q`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement fail-closed schema**
@@ -293,7 +293,7 @@ Reuse `resolve_llm_base_url`, `LLM_API_KEY`, `LLM_MODEL`; timeout 60 seconds, te
 
 - [ ] **Step 5: Verify and commit**
 
-Run: `python -X utf8 -B -m pytest tests/contracts/test_document_interpretation.py tests/services/test_document_interpretation.py tests/integrations/test_openai_compatible_interpreter.py tests/test_final_fix_llm_error_redaction.py -q`  
+Run: `python -X utf8 -B -m pytest tests/contracts/test_document_interpretation.py tests/services/test_document_interpretation.py tests/integrations/test_openai_compatible_interpreter.py tests/test_final_fix_llm_error_redaction.py -q`
 Expected: PASS.
 
 ```bash
@@ -335,7 +335,7 @@ Add nested-binding input and assert `STORAGE_BINDING.AMBIGUOUS` before parsing.
 
 - [ ] **Step 2: Run red tests**
 
-Run: `python -X utf8 -B -m pytest tests/test_business_judgement_run.py tests/test_archive_execution_gate.py -q`  
+Run: `python -X utf8 -B -m pytest tests/test_business_judgement_run.py tests/test_archive_execution_gate.py -q`
 Expected: FAIL because interpretation/intent artifacts are absent.
 
 - [ ] **Step 3: Implement independent ArchiveIntent**
@@ -359,7 +359,7 @@ Extend `DataCleaningTools` with keyword-only registry/router/retrieval/interpret
 
 - [ ] **Step 5: Verify and commit**
 
-Run: `python -X utf8 -B -m pytest tests/test_business_judgement_run.py tests/test_archive_execution_gate.py tests/test_central_runtime.py tests/test_loop_package.py tests/test_agent_roles.py -q`  
+Run: `python -X utf8 -B -m pytest tests/test_business_judgement_run.py tests/test_archive_execution_gate.py tests/test_central_runtime.py tests/test_loop_package.py tests/test_agent_roles.py -q`
 Expected: PASS; `confirmed=False` has no side effect.
 
 ```bash
@@ -400,7 +400,7 @@ def test_feedback_reads_overall_verdict():
 
 - [ ] **Step 2: Run red tests**
 
-Run: `python -X utf8 -B -m pytest tests/test_review_queue.py tests/test_feedback_form.py -q`  
+Run: `python -X utf8 -B -m pytest tests/test_review_queue.py tests/test_feedback_form.py -q`
 Expected: FAIL.
 
 - [ ] **Step 3: Normalize exactly once**
@@ -413,7 +413,7 @@ Use `verification_verdict or overall_verdict or status or ""`. Copy evidence ref
 
 - [ ] **Step 5: Verify and commit**
 
-Run: `python -X utf8 -B -m pytest tests/test_review_queue.py tests/test_feedback_form.py tests/test_feedback_loop.py tests/test_adversarial_verification.py tests/adversarial_verification -q`  
+Run: `python -X utf8 -B -m pytest tests/test_review_queue.py tests/test_feedback_form.py tests/test_feedback_loop.py tests/test_adversarial_verification.py tests/adversarial_verification -q`
 Expected: PASS with no blank item.
 
 ```bash
@@ -458,7 +458,7 @@ Define `create_image_only_pdf` with PyMuPDF in the test. CLI test writes two bin
 
 - [ ] **Step 2: Run red tests**
 
-Run: `python -X utf8 -B -m pytest tests/scripts/test_prepare_business_file_run.py tests/test_data_cleaning_ocr_provider.py -q`  
+Run: `python -X utf8 -B -m pytest tests/scripts/test_prepare_business_file_run.py tests/test_data_cleaning_ocr_provider.py -q`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement safe CLI**
@@ -477,8 +477,8 @@ Include Windows/macOS bindings, catalog, LLM environment, command, artifact insp
 
 - [ ] **Step 5: Verify and commit**
 
-Run: `python -X utf8 -B -m pytest tests/scripts/test_prepare_business_file_run.py tests/test_data_cleaning_ocr_provider.py tests/test_feedback_form.py tests/test_loop_package.py -q`  
-Run: `python -X utf8 -B governance/validate.py tools`  
+Run: `python -X utf8 -B -m pytest tests/scripts/test_prepare_business_file_run.py tests/test_data_cleaning_ocr_provider.py tests/test_feedback_form.py tests/test_loop_package.py -q`
+Run: `python -X utf8 -B governance/validate.py tools`
 Expected: both exit 0.
 
 ```bash
@@ -519,14 +519,14 @@ assert not list(runtime_workspace.rglob("archive_result.json"))
 
 - [ ] **Step 3: Run integration verification**
 
-Run: `python -X utf8 -B -m pytest tests/integration/test_business_judgement_usable_slice.py -q`  
+Run: `python -X utf8 -B -m pytest tests/integration/test_business_judgement_usable_slice.py -q`
 Expected: PASS for five native files, one blocked scan, unchanged hashes and no archive result.
 
 - [ ] **Step 4: Run full verification**
 
-Run: `python -X utf8 -B -m pytest -q`  
-Run: `python -X utf8 -B governance/validate.py all`  
-Run: `git diff --check`  
+Run: `python -X utf8 -B -m pytest -q`
+Run: `python -X utf8 -B governance/validate.py all`
+Run: `git diff --check`
 Expected: all exit 0; record exact tests and existing skips.
 
 - [ ] **Step 5: Update evidence and commit**
@@ -543,4 +543,3 @@ git commit -m "test: verify business judgement usable slice"
 ## Completion Gate
 
 Fresh verification must prove unique binding resolution, invoice semantic isolation, retrieval-before-PageIndex, validated interpretation or explicit block, independent source/target, complete review artifacts, safe CLI, scan blocking without EasyOCR, and passing full tests/governance.
-

@@ -457,3 +457,66 @@ The seven focused production, parser, and Task 5 cases passed. The refreshed
 Task 5, contract, adversarial-verification, business-judgement, and invoice
 regression set passed `126 tests in 25.85s`. Targeted `py_compile` and
 `git diff --check` completed with exit code `0`.
+
+## Final Important hardening review (2026-07-27)
+
+The final review baseline was `510d162`. The implementation head before this
+evidence-only update was `416f20f`. The hardening series from `9726526`
+through `416f20f` did not modify invoice production code or invoice contracts;
+the invoice security follow-up remains explicitly deferred.
+
+### Closed findings
+
+1. Storage binding overlap is rejected symmetrically. Runtime, database,
+   projection, and data-cleaning paths may neither contain nor be contained by
+   one another. Settings validation, composition, the filesystem projection
+   writer, and data-cleaning tools share the same path-locality contract.
+2. Agent resume is bound to immutable prepared inputs. Each prepared run
+   persists an `agent_judgement_input_snapshot.v1` containing ordered
+   `request_id`, `source_ref`, `content_hash`, `parse_artifact_ref`, and
+   `extracted_digest` items. The public resume boundary requires the exact
+   ordered source set and revalidates the manifest, snapshot, extracted
+   artifact, request, and source content before response processing and again
+   under the run lock. Missing or altered inputs block with
+   `AGENT_JUDGEMENT.RUN_INPUT_INVALID`.
+3. Agent responses are local-exchange-only. Resume accepts regular files only
+   below `<runtime_workspace>/agent-host-responses`, rejects traversal,
+   network paths, protected storage roots, links/reparse points, and
+   non-regular files, and preserves the existing capability-disabled outcome
+   when an otherwise valid local response file is absent.
+4. Configured-LLM provider setup failures are mapped to the stable capability
+   block (`AGENT_JUDGEMENT.LLM_CAPABILITY_DISABLED`, exit code `2`) for absent
+   or blank endpoint/key configuration. The documented legacy endpoint
+   fallback remains compatible.
+5. The two new negative-test fixtures construct synthetic credential and UNC
+   inputs at runtime so repository hygiene continues to reject literal secret
+   bindings and network paths in tracked text without weakening either
+   production guard or governance policy.
+
+### Commits
+
+| Commit | Purpose |
+|---|---|
+| `9726526` | Record the approved final-hardening design and execution plan. |
+| `0f5eb0b` | Isolate storage bindings from runtime paths. |
+| `a94b02e` | Bind resume to immutable prepared inputs. |
+| `a47b46b` | Confine agent responses to the local exchange. |
+| `d3b7888` | Map missing configured-LLM setup to the capability block and update operator docs. |
+| `416f20f` | Keep negative-test fixtures synthetic under repository hygiene. |
+
+### Final verification evidence
+
+| Check | Exact result |
+|---|---|
+| Focused hygiene and changed-fixture regression | `4 passed in 2.97s` |
+| Full pytest | `1666 passed, 5 skipped, 4 warnings, 183 subtests passed in 59.31s` |
+| `governance/validate.py tools` | `0 errors, 0 warnings` |
+| `governance/validate.py repository` | `0 errors, 0 warnings`; `tracked=337`, `scanned_text=336`, `skipped_binary=1`, `decode_errors=0` |
+| `governance/validate.py all` | `0 errors, 0 warnings`; 4 loop packages consistent and repository hygiene clean |
+| Changed production-module `py_compile` | exit code `0` for the eight hardening modules |
+| `git diff --check 510d162..HEAD` and working-tree diff check | exit code `0`, no output |
+
+The four full-suite warnings are pre-existing EasyOCR/PyTorch quantization
+deprecation warnings. No push was performed. The user-owned untracked plan at
+`docs/superpowers/plans/2026-07-26-local-agent-judgement-dry-run.md` remained
+unmodified, unstaged, and uncommitted.
