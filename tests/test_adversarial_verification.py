@@ -72,6 +72,31 @@ class AdversarialVerificationTests(unittest.TestCase):
             self.assertEqual(persisted["run_id"], "run_missing_fields")
             self.assertFalse(os.path.exists(os.path.join(td, "archive_result.json")))
 
+    def test_invoice_completeness_does_not_require_project_name(self):
+        from business_rules.adversarial_verification import (
+            run_adversarial_verification,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            result = run_adversarial_verification(
+                workspace_dir=td,
+                run_id="run_invoice_without_project",
+                extracted_items=[
+                    {
+                        "file": "business://synthetic/invoice.pdf",
+                        "document_type": "发票",
+                        "fields": {
+                            "invoice_number": "SYN-INVOICE-001",
+                            "buyer_name": "合成甲方有限公司",
+                            "seller_name": "合成乙方有限公司",
+                        },
+                    }
+                ],
+            )
+
+            self.assertEqual(result["overall_verdict"], "pass")
+            self.assertEqual(result["findings"], [])
+
     def test_archive_plan_findings_are_warnings_when_project_name_missing_from_target(self):
         from business_rules.adversarial_verification import run_adversarial_verification
 

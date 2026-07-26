@@ -12,6 +12,8 @@ REVIEW_DIMENSIONS = [
 OCR_CONFIDENCE_THRESHOLD = 0.60
 
 DOCUMENT_REQUIRED_FIELDS = {
+    "发票": [],
+    "invoice": [],
     "招标公告": ["project_name", "customer", "deadline"],
     "采购公告": ["project_name", "customer", "deadline"],
     "招标文件": ["project_name", "customer", "deadline"],

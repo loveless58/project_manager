@@ -103,6 +103,17 @@ def test_local_agent_dry_run_round_trip_is_review_only(tmp_path, monkeypatch) ->
 
     result = run_local_agent_dry_run(root, host=host)
 
+    extracted_dir = root / "runtime" / "runs" / result["run_id"] / "extracted"
+    invoice_artifact = next(
+        payload
+        for path in extracted_dir.glob("*.json")
+        for payload in [json.loads(path.read_text(encoding="utf-8"))]
+        if payload["source_ref"]["object_key"] == "synthetic-invoice.pdf"
+    )
+    assert "project_name" not in invoice_artifact["candidate_fields"]
+    assert result["invoice_candidate"] == "C-001"
+    assert result["native_statuses"]["invoice"] == "needs_review"
+
     assert result["native_statuses"] == {
         "invoice": "needs_review",
         "contract": "needs_review",

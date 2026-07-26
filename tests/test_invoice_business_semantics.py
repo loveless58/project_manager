@@ -28,28 +28,31 @@ def test_invoice_item_is_not_business_project(tmp_path):
     assert fields["line_items"][0]["specification"] == "标准版"
 
 
-def test_invoice_explicit_procurement_name_is_business_project(tmp_path):
+@pytest.mark.parametrize("document_type", ["发票", "invoice"])
+def test_invoice_explicit_labels_do_not_create_business_project(tmp_path, document_type):
     from tools.data_cleaning_tools import DataCleaningTools
 
     text = (
         "电子发票\n"
         "采购名称：合成项目001\n"
+        "标的名称：合成项目002\n"
         "项目名称 规格型号\n"
-        "技术服务 标准版"
+        "技术服务 标准版\n"
+        "备注：关联项目为合成项目003"
     )
 
     fields = DataCleaningTools(
         workspace_dir=str(tmp_path)
-    )._extract_fields_for_document(text, "发票")
+    )._extract_fields_for_document(text, document_type)
 
-    assert fields["project_name"] == "合成项目001"
-    assert fields["line_items"] == [
-        {"item_name": "技术服务", "specification": "标准版"}
-    ]
+    assert "project_name" not in fields
+    assert fields["line_items"][0] == {
+        "item_name": "技术服务", "specification": "标准版"
+    }
 
 
 @pytest.mark.parametrize("label", ["采购名称", "标的名称"])
-def test_invoice_explicit_project_after_item_header_wins(
+def test_invoice_explicit_project_after_item_header_is_ignored(
     tmp_path, label
 ):
     from tools.data_cleaning_tools import DataCleaningTools
@@ -65,8 +68,7 @@ def test_invoice_explicit_project_after_item_header_wins(
         workspace_dir=str(tmp_path)
     )._extract_fields_for_document(text, "发票")
 
-    assert fields["project_name"] == "合成项目001"
-    assert fields["project_name"] != "规格型号"
+    assert "project_name" not in fields
 
 
 def test_project_governance_markdown_reuses_parsed_classification_for_archive_plan(tmp_path):

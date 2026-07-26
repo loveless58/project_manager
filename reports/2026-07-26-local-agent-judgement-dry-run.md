@@ -429,3 +429,31 @@ label-before-header cases plus both ordered counterexamples passed together:
 The refreshed Task 5, contract, production-verification, business-judgement,
 and invoice regression set passed `124 tests in 27.21s`. Targeted `py_compile`
 and `git diff --check` completed with exit code `0`.
+
+### Business-rule correction: invoices never carry a project name
+
+The ordered-label follow-up above was superseded by an explicit business rule:
+an invoice never owns a `project_name`. Invoice parsing must not infer one from
+`项目名称`, `采购名称`, `标的名称`, line items, remarks, or any other invoice text.
+Candidate ownership continues through invoice parties, business context,
+candidate evidence, and subsequent Agent judgement.
+
+The corrected RED set covered explicit labels before and after an invoice item
+header, a project-name header, a project-like remark, no explicit project
+label, the production completeness verdict, and the strict Task 5 synthetic
+invoice artifact. Before implementation, four project-name assertions failed
+while the no-label invariant already passed. Production verification also
+returned `pass_with_warnings` because invoices fell through to the unknown-
+document `project_name` requirement.
+
+The `发票` and `invoice` extraction branches now retain only invoice-specific
+fields and defensively remove `project_name`. The required-fields contract
+explicitly maps both types to an empty project-field requirement, while the
+unknown-document fallback remains unchanged. The Task 5 invoice artifact
+contains no `project_name`; its business-context relation still resolves
+candidate `C-001`, and its interpretation remains `needs_review`.
+
+The seven focused production, parser, and Task 5 cases passed. The refreshed
+Task 5, contract, adversarial-verification, business-judgement, and invoice
+regression set passed `126 tests in 25.85s`. Targeted `py_compile` and
+`git diff --check` completed with exit code `0`.
