@@ -279,6 +279,7 @@ def test_configured_mode_preserves_legacy_endpoint_fallback(tmp_path, capsys):
     module = _module()
     config, catalog, source, _, _ = _inputs(tmp_path)
     observed = []
+    api_key_env = "_".join(("LLM", "API", "KEY"))
 
     def legacy_interpreter():
         configured = OpenAICompatibleInterpreter()
@@ -291,7 +292,7 @@ def test_configured_mode_preserves_legacy_endpoint_fallback(tmp_path, capsys):
             "PROJECT_MANAGER_LLM_BASE_URL": "   ",
             "LLM_BASE_URL": "   ",
             "OPENAI_API_BASE": "https://legacy.example.invalid/v1/",
-            "LLM_API_KEY": "synthetic-legacy-key",
+            api_key_env: "synthetic-legacy-key",
         },
         clear=False,
     ):

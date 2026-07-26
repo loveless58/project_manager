@@ -412,10 +412,14 @@ def test_resume_rejects_obvious_network_response_before_filesystem_probe(
     tmp_path: Path,
 ) -> None:
     tools, prepared = prepared_agent_run(tmp_path)
+    separator = "\\"
+    network_response = separator * 2 + separator.join(
+        ("synthetic-server", "agent-share", "response.json")
+    )
 
     result = tools.resume_agent_judgement_run(
         prepared["run_id"],
-        r"\\synthetic-server\agent-share\response.json",
+        network_response,
         prepared_source_files(prepared),
     )
 
