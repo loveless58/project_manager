@@ -43,6 +43,12 @@ class StaticRetrieval:
                     "parties": {},
                     "facts": {"contract_code": "CT-001"},
                 },
+                {
+                    "id": "C-002",
+                    "document_type": "contract",
+                    "parties": {},
+                    "facts": {"contract_code": "CT-002"},
+                },
             ),
             (
                 {
@@ -208,6 +214,23 @@ def test_agent_prepare_writes_safe_requests_and_no_review_or_archive_result(
     assert not (run_dir / "archive_result.json").exists()
 
 
+def test_failed_prepare_run_is_marked_and_cannot_be_resumed(tmp_path: Path) -> None:
+    tools = agent_mode_tools(tmp_path)
+    source = native_markdown(tmp_path)
+
+    result = tools.prepare_agent_judgement_run([str(source), str(source)])
+
+    marker = Path(result["artifacts"]["run_dir"]) / "agent_judgement_failed.json"
+    resumed = tools.resume_agent_judgement_run(
+        result["run_id"], str(tmp_path / "ignored-response.json")
+    )
+
+    assert result["status"] == "blocked"
+    assert marker.is_file()
+    assert resumed["status"] == "blocked"
+    assert resumed["blocked_reason"] == "AGENT_JUDGEMENT.RUN_PREPARATION_FAILED"
+
+
 def test_resume_accepts_only_exact_response_and_keeps_confirmed_false(tmp_path: Path) -> None:
     tools, prepared = prepared_agent_run(tmp_path)
 
@@ -287,6 +310,68 @@ def test_invalid_response_is_fail_closed_without_any_artifact_mutation(
     run_dir = Path(prepared["artifacts"]["run_dir"])
     assert not list(run_dir.glob(".feedback-txn-*"))
     assert not (run_dir / "archive_result.json").exists()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload["responses"][0]["interpretation"].__setitem__(
+            "prompt_version", "other_prompt.v1"
+        ),
+        lambda payload: payload["responses"][0]["interpretation"].__setitem__(
+            "policy_version", "other_policy.v1"
+        ),
+        lambda payload: payload["responses"][0]["interpretation"]["relations"][0].__setitem__(
+            "target_candidate_id", "C-002"
+        ),
+    ],
+    ids=["wrong prompt version", "wrong policy version", "relation without matching evidence"],
+)
+def test_response_semantic_mismatch_is_fail_closed_before_review_transaction(
+    tmp_path: Path, mutate: Callable[[dict[str, Any]], None]
+) -> None:
+    """A parser-legal envelope must not become a blocked review artifact."""
+    tools, prepared = prepared_agent_run(tmp_path)
+    before = artifact_bytes(prepared["artifacts"])
+    response_path = write_responses(
+        prepared, tmp_path / "semantic-mismatch.json", mutate=mutate
+    )
+
+    result = tools.resume_agent_judgement_run(prepared["run_id"], response_path)
+
+    assert result["status"] == "blocked"
+    assert artifact_bytes(prepared["artifacts"]) == before
+    run_dir = Path(prepared["artifacts"]["run_dir"])
+    assert not list(run_dir.glob(".feedback-txn-*"))
+    assert not (run_dir / "review_queue.json").exists()
+
+
+def test_second_different_valid_response_cannot_overwrite_consumed_review_artifacts(
+    tmp_path: Path,
+) -> None:
+    """The first valid response consumes a run exactly once."""
+    tools, prepared = prepared_agent_run(tmp_path)
+    first = tools.resume_agent_judgement_run(
+        prepared["run_id"], write_matching_agent_responses(prepared)
+    )
+    before = artifact_bytes(prepared["artifacts"])
+    changed_response_path = write_responses(
+        prepared,
+        tmp_path / "different-valid-response.json",
+        mutate=lambda payload: (
+            payload["responses"][0].__setitem__("model", "different_local_model"),
+            payload["responses"][0]["interpretation"].__setitem__(
+                "model", "different_local_model"
+            ),
+        ),
+    )
+
+    second = tools.resume_agent_judgement_run(prepared["run_id"], changed_response_path)
+
+    assert first["status"] == "success"
+    assert second["status"] == "blocked"
+    assert artifact_bytes(prepared["artifacts"]) == before
+    assert not list(Path(prepared["artifacts"]["run_dir"]).glob(".feedback-txn-*"))
 
 
 def test_duplicate_and_reordered_responses_are_fail_closed(tmp_path: Path) -> None:

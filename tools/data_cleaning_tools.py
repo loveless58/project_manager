@@ -57,7 +57,7 @@ from contracts.archive_run_artifacts import (
     validate_json_tree,
     validate_task5_collection_artifact,
 )
-from contracts.agent_judgement import build_agent_judgement_request
+from contracts.agent_judgement import build_agent_judgement_request, canonical_hash
 from contracts.feedback_schema import (
     FeedbackValidationError,
     build_parser_test_candidates,
@@ -2116,6 +2116,20 @@ class DataCleaningTools:
             TypeError,
             ValueError,
         ):
+            failed_marker_path = os.path.join(run_dir, "agent_judgement_failed.json")
+            try:
+                self._save_structured_json(
+                    failed_marker_path,
+                    {
+                        "schema_version": "agent_judgement_failed.v1",
+                        "run_id": run_id,
+                        "status": "failed",
+                        "reason": "AGENT_JUDGEMENT.REQUEST_INVALID",
+                    },
+                )
+                artifacts["agent_judgement_failed"] = failed_marker_path
+            except OSError:
+                pass
             return {
                 **self._agent_judgement_blocked(run_id, "AGENT_JUDGEMENT.REQUEST_INVALID"),
                 "artifacts": artifacts,
@@ -2133,6 +2147,17 @@ class DataCleaningTools:
             "run_id": run_id,
             "requests": requests,
         }
+        response_payload = {
+            "schema_version": "agent_judgement_responses.v1",
+            "run_id": run_id,
+            "responses": responses,
+        }
+        response_receipt = {
+            "schema_version": "agent_judgement_consumption.v1",
+            "run_id": run_id,
+            "response_hash": canonical_hash(response_payload),
+        }
+        validate_json_tree(response_receipt)
         saved_request_artifact = strict_json_load(
             os.path.join(run_dir, "agent_judgement_requests.json"),
         )
@@ -2309,6 +2334,7 @@ class DataCleaningTools:
         artifacts = {
             "input_manifest": os.path.join(run_dir, "input_manifest.json"),
             "agent_judgement_requests": os.path.join(run_dir, "agent_judgement_requests.json"),
+            "agent_judgement_consumption": os.path.join(run_dir, "agent_judgement_consumption.json"),
             "candidate_interpretations": os.path.join(run_dir, "candidate_interpretations.json"),
             "archive_intents": os.path.join(run_dir, "archive_intents.json"),
             "review_queue": os.path.join(run_dir, "review_queue.json"),
@@ -2356,10 +2382,32 @@ class DataCleaningTools:
         payloads[artifacts["feedback_form_json"]] = self._encode_feedback_json(feedback_form)
         payloads[artifacts["feedback_form_md"]] = render_feedback_form_markdown(feedback_form).encode("utf-8")
         payloads[artifacts["trace"]] = self._encode_feedback_json(trace_payload)
+        payloads[artifacts["agent_judgement_consumption"]] = self._encode_feedback_json(
+            response_receipt
+        )
+        consumed_paths = (
+            artifacts["agent_judgement_consumption"],
+            artifacts["candidate_interpretations"],
+            artifacts["archive_intents"],
+            artifacts["review_queue"],
+            artifacts["planned_archive_actions"],
+            artifacts["feedback_form_json"],
+            artifacts["feedback_form_md"],
+            artifacts["trace"],
+            os.path.join(run_dir, "audit_review.json"),
+            os.path.join(run_dir, "adversarial_verification.json"),
+            os.path.join(run_dir, "human_feedback_decisions.json"),
+            os.path.join(run_dir, "feedback_events.jsonl"),
+            os.path.join(run_dir, "rule_candidates.json"),
+            os.path.join(run_dir, "parser_test_candidates.json"),
+            os.path.join(run_dir, "archive_result.json"),
+        )
         with _feedback_thread_lock(run_dir):
             with _feedback_process_lock(run_dir):
                 if strict_json_load(artifacts["agent_judgement_requests"]) != request_artifact:
                     raise ArchiveRunArtifactError("agent request replay")
+                if any(os.path.exists(path) for path in consumed_paths):
+                    raise ArchiveRunArtifactError("agent judgement run already consumed")
                 self._commit_feedback_transaction(run_dir, payloads)
         return {
             "schema_version": "agent_judgement_gateway.resume.v1",

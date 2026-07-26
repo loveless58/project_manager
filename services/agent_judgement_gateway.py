@@ -116,6 +116,17 @@ class AgentJudgementGateway:
         try:
             run_id = validate_run_id(run_id)
             run_dir = self._run_dir_resolver(run_id)
+            failure_marker_path = os.path.join(run_dir, "agent_judgement_failed.json")
+            if os.path.exists(failure_marker_path):
+                failure_marker = strict_json_load(failure_marker_path)
+                if failure_marker == {
+                    "schema_version": "agent_judgement_failed.v1",
+                    "run_id": run_id,
+                    "status": "failed",
+                    "reason": "AGENT_JUDGEMENT.REQUEST_INVALID",
+                }:
+                    return self._blocked(run_id, "AGENT_JUDGEMENT.RUN_PREPARATION_FAILED")
+                raise ArchiveRunArtifactError("agent failed-run marker")
             request_path = os.path.join(run_dir, "agent_judgement_requests.json")
             request_artifact = strict_json_load(request_path)
             requests = validate_agent_judgement_requests_artifact(

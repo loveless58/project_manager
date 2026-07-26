@@ -34,6 +34,8 @@ _DOCUMENT_TYPES = {"invoice", "project", "contract", "bid", "tender", "other", "
 _CONTEXT_STATUSES = {"matched", "needs_review", "blocked"}
 _DIAGNOSTICS = {"BUSINESS_CONTEXT.CANDIDATES_FOUND", "BUSINESS_CONTEXT.NO_CANDIDATES", "BUSINESS_CONTEXT.CONFLICTS_FOUND"}
 _FIELD_NAMES = {"invoice_number", "invoice_date", "amount", "tax_amount", "total_amount", "buyer_name", "buyer_tax_id", "seller_name", "seller_tax_id", "project_code", "project_name", "contract_code", "contract_name"}
+_INTERPRETATION_PROMPT_VERSION = "document_interpretation.v1"
+_INTERPRETATION_POLICY_VERSION = "document_interpretation_policy.v1"
 
 
 class AgentJudgementSchemaError(ValueError):
@@ -87,6 +89,7 @@ def parse_agent_judgement_response(payload: object, *, request: Mapping[str, Any
         if interpretation["interpreter"] != value["interpreter"] or interpretation["model"] != value["model"]:
             raise AgentJudgementSchemaError("response identity binding")
         _bind_interpretation(interpretation, bound_request["interpretation_request"])
+        _validate_interpretation_semantics(interpretation)
         return _copy_json(value)
     except (AgentJudgementSchemaError, DocumentInterpretationSchemaError):
         raise AgentJudgementSchemaError("invalid agent judgement response") from None
@@ -244,6 +247,24 @@ def _bind_interpretation(interpretation: Mapping[str, Any], request: Mapping[str
     for item in interpretation["evidence"]:
         if (item["kind"], item["candidate_id"], item["field"]) not in evidence:
             raise AgentJudgementSchemaError("interpretation evidence binding")
+
+
+def _validate_interpretation_semantics(interpretation: Mapping[str, Any]) -> None:
+    if (
+        interpretation["prompt_version"],
+        interpretation["policy_version"],
+    ) != (
+        _INTERPRETATION_PROMPT_VERSION,
+        _INTERPRETATION_POLICY_VERSION,
+    ):
+        raise AgentJudgementSchemaError("interpretation version binding")
+    evidence_candidate_ids = {
+        item["candidate_id"] for item in interpretation["evidence"]
+    }
+    for relation in interpretation["relations"]:
+        if relation["target_candidate_id"] not in evidence_candidate_ids:
+            raise AgentJudgementSchemaError("relation evidence trace")
+
 
 
 def _decode(payload: object) -> object:
