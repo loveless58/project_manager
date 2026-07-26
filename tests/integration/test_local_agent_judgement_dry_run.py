@@ -1201,3 +1201,143 @@ def test_acceptance_gate_rejects_fake_archive_execution_return(
     )
 
     _assert_cli_acceptance_failure(tmp_path / "fake-archive-return", capsys)
+
+
+def test_canonical_source_digest_generation_is_fully_in_memory(monkeypatch) -> None:
+    import tempfile
+
+    import scripts.run_local_agent_dry_run as module
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("canonical reference generation wrote to a filesystem path")
+
+    for name in ("mkdir", "write_text", "write_bytes", "unlink", "rmdir"):
+        monkeypatch.setattr(module.Path, name, forbidden)
+    monkeypatch.setattr(module.os, "replace", forbidden)
+    for name in (
+        "TemporaryDirectory",
+        "NamedTemporaryFile",
+        "TemporaryFile",
+        "mkdtemp",
+        "mkstemp",
+    ):
+        monkeypatch.setattr(tempfile, name, forbidden)
+
+    digests = module._trusted_canonical_source_digests()
+
+    assert set(digests) == set(module.SOURCE_NAMES)
+    assert all(
+        len(digest) == 64 and set(digest) <= set("0123456789abcdef")
+        for digest in digests.values()
+    )
+
+
+def test_two_legal_reuses_and_forged_retries_do_not_pollute_root(
+    tmp_path, monkeypatch
+) -> None:
+    _forbid_external_providers(monkeypatch)
+    from scripts.run_local_agent_dry_run import run_local_agent_dry_run
+
+    root = tmp_path / "dry-run"
+    first = run_local_agent_dry_run(root, host=StrictSyntheticAgentHost())
+    second = run_local_agent_dry_run(
+        root, host=StrictSyntheticAgentHost(), use_existing_synthetic_source=True
+    )
+    third = run_local_agent_dry_run(
+        root, host=StrictSyntheticAgentHost(), use_existing_synthetic_source=True
+    )
+
+    assert first["status"] == second["status"] == third["status"] == "needs_review"
+    source_file = root / "source" / "synthetic-invoice.pdf"
+    with source_file.open("ab") as stream:
+        stream.write(b"\nsynthetic-forged-retry\n")
+    _rewrite_self_authored_marker_hash(source_file)
+    runtime_before = _tree_hashes(root / "runtime")
+    children_before = sorted(path.name for path in root.iterdir())
+
+    for _ in range(2):
+        blocked = run_local_agent_dry_run(
+            root,
+            host=StrictSyntheticAgentHost(),
+            use_existing_synthetic_source=True,
+        )
+        assert blocked["status"] == "blocked"
+        assert blocked["error_code"] == "DRY_RUN.SOURCE_UNSAFE"
+
+    assert _tree_hashes(root / "runtime") == runtime_before
+    assert sorted(path.name for path in root.iterdir()) == children_before
+    assert not (root / ".local-agent-dry-run-canonical-reference").exists()
+
+
+def test_strict_markdown_read_rejects_path_replacement_after_lstat(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.run_local_agent_dry_run as module
+
+    target = tmp_path / "feedback.md"
+    replacement = tmp_path / "replacement.md"
+    target.write_text("expected", encoding="utf-8")
+    replacement.write_text("forged", encoding="utf-8")
+    original_lstat = module.os.lstat
+    replaced = False
+
+    def replace_after_lstat(path):
+        nonlocal replaced
+        details = original_lstat(path)
+        if Path(path) == target and not replaced:
+            os.replace(replacement, target)
+            replaced = True
+        return details
+
+    monkeypatch.setattr(module.os, "lstat", replace_after_lstat)
+
+    with pytest.raises(ValueError, match="unsafe text artifact"):
+        module._strict_text_artifact(target)
+
+
+def test_acceptance_rejects_forged_pass_over_strict_missing_candidate_fields(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    import copy
+
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+    original = DataCleaningTools.verify_file_organization_run
+    observed = {}
+
+    def remove_required_fields_then_forge_pass(self, run_id):
+        extracted_dir = Path(self.workspace_dir) / "runs" / run_id / "extracted"
+        contract_path = next(
+            path
+            for path in extracted_dir.glob("*.json")
+            if json.loads(path.read_text(encoding="utf-8"))["document_type"]
+            == "合同"
+        )
+        artifact = json.loads(contract_path.read_text(encoding="utf-8"))
+        artifact["candidate_fields"] = {}
+        contract_path.write_text(
+            json.dumps(artifact, ensure_ascii=False), encoding="utf-8"
+        )
+        result = original(self, run_id)
+        observed.update(copy.deepcopy(result))
+        result["findings"] = []
+        result["finding_count"] = 0
+        result["overall_verdict"] = "pass"
+        result["needs_human_review"] = False
+        result["archive_allowed"] = True
+        result["next_actions"] = ["audit_file_organization_run"]
+        Path(result["artifact_path"]).write_text(
+            json.dumps(result), encoding="utf-8"
+        )
+        return result
+
+    monkeypatch.setattr(
+        DataCleaningTools,
+        "verify_file_organization_run",
+        remove_required_fields_then_forge_pass,
+    )
+
+    _assert_cli_acceptance_failure(tmp_path / "strict-missing-fields", capsys)
+    assert observed["overall_verdict"] == "needs_correction"
+    assert any(finding["severity"] == "high" for finding in observed["findings"])

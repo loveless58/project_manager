@@ -140,6 +140,68 @@ class AdversarialVerificationTests(unittest.TestCase):
             self.assertTrue(os.path.exists(result["artifact_path"]))
             self.assertFalse(os.path.exists(os.path.join(td, "runs", prepared["run_id"], "archive_result.json")))
 
+    def test_verify_file_organization_run_projects_strict_missing_fields(self):
+        from tools.data_cleaning_tools import DataCleaningTools
+
+        with tempfile.TemporaryDirectory() as td:
+            run_id = "run_strict_projection"
+            run_dir = Path(td) / "runs" / run_id
+            extracted_dir = run_dir / "extracted"
+            extracted_dir.mkdir(parents=True)
+            digest = "a" * 64
+            source_ref = {
+                "storage_provider": "local",
+                "object_key": "synthetic-contract.docx",
+                "logical_uri": "business://dry-run-source/synthetic-contract.docx",
+                "binding_id": "dry-run-source",
+            }
+            artifact = {
+                "schema_version": "file_organization.extracted_document.v1",
+                "run_id": run_id,
+                "parse_artifact_ref": f"artifact:parsed:{digest[:24]}",
+                "source_ref": source_ref,
+                "content_hash": digest,
+                "document_type": "合同",
+                "classification": {
+                    "document_type": "合同",
+                    "business_domain": "bid_project",
+                    "project_phase": None,
+                    "archive_phase": None,
+                    "confidence": 0.9,
+                    "evidence": ["synthetic"],
+                    "requires_review": False,
+                },
+                "candidate_fields": {"project_name": "synthetic-project"},
+                "text_length": 17,
+            }
+            (extracted_dir / f"{digest[:24]}_extracted.json").write_text(
+                json.dumps(artifact, ensure_ascii=False), encoding="utf-8"
+            )
+            (run_dir / "planned_archive_actions.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "file_organization.archive_plan.v1",
+                        "run_id": run_id,
+                        "actions": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = DataCleaningTools(workspace_dir=td).verify_file_organization_run(
+                run_id
+            )
+
+            self.assertEqual(result["overall_verdict"], "needs_correction")
+            self.assertFalse(result["archive_allowed"])
+            self.assertTrue(
+                any(
+                    finding["severity"] == "high"
+                    and finding["dimension"] == "field_completeness"
+                    for finding in result["findings"]
+                )
+            )
+
     def test_preparation_normalizes_and_redacts_verification_exceptions(self):
         from tools.data_cleaning_tools import DataCleaningTools
 

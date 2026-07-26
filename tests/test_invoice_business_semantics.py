@@ -28,6 +28,26 @@ def test_invoice_item_is_not_business_project(tmp_path):
     assert fields["line_items"][0]["specification"] == "标准版"
 
 
+def test_invoice_explicit_procurement_name_is_business_project(tmp_path):
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    text = (
+        "电子发票\n"
+        "采购名称：合成项目001\n"
+        "项目名称 规格型号\n"
+        "技术服务 标准版"
+    )
+
+    fields = DataCleaningTools(
+        workspace_dir=str(tmp_path)
+    )._extract_fields_for_document(text, "发票")
+
+    assert fields["project_name"] == "合成项目001"
+    assert fields["line_items"] == [
+        {"item_name": "技术服务", "specification": "标准版"}
+    ]
+
+
 def test_project_governance_markdown_reuses_parsed_classification_for_archive_plan(tmp_path):
     """Changing archive planning to reclassify a parsed governance document must fail this test."""
     from business_rules.archive_decision import evaluate_archive_decision

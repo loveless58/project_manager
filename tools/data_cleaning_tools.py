@@ -44,6 +44,7 @@ from contracts.archive_intent import ArchiveIntent
 from contracts.archive_run_artifacts import (
     ArchiveRunArtifactError,
     normalize_business_context,
+    project_extracted_document_for_verification,
     normalize_interpretation_output,
     normalize_native_parse_output,
     strict_json_load,
@@ -827,7 +828,14 @@ class DataCleaningTools:
     def _extract_fields_for_document(self, text: str, document_type: str) -> Dict[str, Any]:
         """Select a document-specific extractor before applying generic rules."""
         if document_type == "发票":
-            return extract_invoice_fields(text)
+            fields = extract_invoice_fields(text)
+            if re.search(
+                r"(?:采购名称|标的名称)\**\s*[:：]\s*\S", text
+            ):
+                explicit_project_name = self._extract_fields(text).get("project_name")
+                if explicit_project_name:
+                    fields["project_name"] = explicit_project_name
+            return fields
         return self._extract_fields(text)
 
     def _extract_fields(self, text: str) -> Dict:
@@ -2724,10 +2732,30 @@ class DataCleaningTools:
             for name in sorted(os.listdir(extracted_dir)):
                 if not name.endswith(".json"):
                     continue
-                payload = self._load_json_file(os.path.join(extracted_dir, name))
-                extraction = payload.get("extraction")
-                if isinstance(extraction, dict):
-                    extracted_items.append(extraction)
+                payload = strict_json_load(os.path.join(extracted_dir, name))
+                try:
+                    verification_input = (
+                        project_extracted_document_for_verification(payload, run_id)
+                    )
+                except ArchiveRunArtifactError:
+                    legacy_fields = {
+                        "schema_version", "run_id", "project_name", "source_file",
+                        "source_type", "extraction", "accepted_business_facts",
+                        "field_quality", "business_judgement", "business_cases",
+                        "ledger_artifacts", "processed_at",
+                    }
+                    extraction = payload.get("extraction")
+                    if (
+                        set(payload) != legacy_fields
+                        or payload.get("schema_version")
+                        != "file_organization.extracted_document.v1"
+                        or payload.get("run_id") != run_id
+                        or type(extraction) is not dict
+                    ):
+                        raise
+                    validate_json_tree(extraction, inspect_sensitive=False)
+                    verification_input = extraction
+                extracted_items.append(verification_input)
 
         archive_actions: List[Dict[str, Any]] = []
         plan_path = os.path.join(run_dir, "planned_archive_actions.json")

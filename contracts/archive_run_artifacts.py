@@ -1,6 +1,7 @@
 """Strict, bounded contracts for Task5 archive-intent run artifacts."""
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -445,6 +446,23 @@ def validate_extracted_document_artifact(
         raise ArchiveRunArtifactError("extracted text length")
 
 
+def project_extracted_document_for_verification(
+    payload: dict[str, Any], run_id: str,
+) -> dict[str, Any]:
+    """Project one strict persisted artifact into verifier input."""
+    validate_extracted_document_artifact(payload, run_id)
+    source_ref = copy.deepcopy(payload["source_ref"])
+    return {
+        "file": source_ref["logical_uri"],
+        "document_type": payload["document_type"],
+        "fields": copy.deepcopy(payload["candidate_fields"]),
+        "classification": copy.deepcopy(payload["classification"]),
+        "text_length": payload["text_length"],
+        "source_ref": source_ref,
+        "content_hash": payload["content_hash"],
+    }
+
+
 def _scalar_candidate_fields(
     fields: dict[str, Any], *, document_type: object,
 ) -> dict[str, Any]:
@@ -871,7 +889,8 @@ __all__ = [
     "validate_archive_execution_plan", "validate_audit_review", "validate_review_queue",
     "normalize_native_parse_output",
     "normalize_interpretation_output", "strict_json_load", "validate_archive_action",
-    "validate_archive_intent", "validate_candidate_interpretation",
+    "project_extracted_document_for_verification", "validate_archive_intent",
+    "validate_candidate_interpretation",
     "validate_extracted_document_artifact", "validate_json_tree",
     "validate_task5_collection_artifact",
     "validate_agent_judgement_requests_artifact",

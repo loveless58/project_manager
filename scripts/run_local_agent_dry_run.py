@@ -12,6 +12,7 @@ from datetime import datetime
 import hashlib
 import json
 import os
+from io import BytesIO
 from pathlib import Path
 import stat
 import sys
@@ -24,6 +25,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from app_bootstrap.composition import build_runtime_adapters
 from contracts.archive_run_artifacts import (
+    project_extracted_document_for_verification,
     strict_json_load,
     validate_agent_judgement_requests_artifact,
     validate_audit_review,
@@ -74,6 +76,7 @@ _CONTRACT_CODE = "".join(("CT", "-001"))
 _PROJECT_CODE = "".join(("PRJ", "-001"))
 _INVOICE_TEXT = (
     f"电子发票\n发票号码：{_INVOICE_CODE}\n开票日期：2026-07-26\n"
+    "采购名称：合成项目001\n"
     "购买方名称：合成甲方有限公司\n购买方税号：913100000000000001\n"
     "销售方名称：合成乙方有限公司\n销售方税号：913100000000000002\n"
     "项目名称 | 规格型号 | 金额\n技术服务 | 合成版 | 100.00\n" + "A" * 160
@@ -82,16 +85,24 @@ _CONTRACT_PARAGRAPHS = (
     "合成技术服务合同",
     f"合同登记编号：{_CONTRACT_CODE}",
     f"项目编号：{_PROJECT_CODE}",
+    "项目名称：合成项目001",
+    "甲方：合成甲方有限公司",
+    "合同状态：已签约",
 )
 _MARKDOWN_TEXT = (
     f"# Synthetic governance\n\n项目编号：{_PROJECT_CODE}\n"
-    f"合同编号：{_CONTRACT_CODE}\n"
+    f"合同编号：{_CONTRACT_CODE}\n项目名称：合成项目001\n"
 )
-_XLSX_ROWS = ((f"项目编号：{_PROJECT_CODE}",), (f"合同编号：{_CONTRACT_CODE}",))
+_XLSX_ROWS = (
+    (f"项目编号：{_PROJECT_CODE}",),
+    (f"合同编号：{_CONTRACT_CODE}",),
+    ("项目名称：合成项目001",),
+)
 _XML_TEXT = (
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
     f"<project><项目编号>{_PROJECT_CODE}</项目编号>"
-    f"<合同编号>{_CONTRACT_CODE}</合同编号></project>"
+    f"<合同编号>{_CONTRACT_CODE}</合同编号>"
+    "<项目名称>合成项目001</项目名称></project>"
 )
 
 
@@ -260,104 +271,143 @@ def _hashes(paths: Sequence[Path]) -> dict[str, str]:
     }
 
 
-def _write_pdf(path: Path, text: str = "", *, image_only: bool = False) -> None:
+def _pdf_bytes(text: str = "", *, image_only: bool = False) -> bytes:
     import fitz
 
     document = fitz.open()
-    page = document.new_page()
-    if image_only:
-        pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 64, 64), False)
-        pixmap.clear_with(115)
-        page.insert_image(page.rect, pixmap=pixmap)
-    else:
-        import html
+    try:
+        page = document.new_page()
+        if image_only:
+            pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 64, 64), False)
+            pixmap.clear_with(115)
+            page.insert_image(page.rect, pixmap=pixmap)
+        else:
+            import html
 
-        page.insert_htmlbox(
-            page.rect,
-            f"<p>{html.escape(text).replace(chr(10), '<br>')}</p>",
-        )
-    document.save(path, no_new_id=True)
-    document.close()
+            page.insert_htmlbox(
+                page.rect,
+                f"<p>{html.escape(text).replace(chr(10), '<br>')}</p>",
+            )
+        return document.tobytes(no_new_id=True)
+    finally:
+        document.close()
 
 
-def _normalize_package_bytes(path: Path) -> None:
+def _normalize_package_bytes(payload: bytes, suffix: str) -> bytes:
     """Repack generated OOXML with fixed raw bytes for exact reuse checks."""
     import re
 
-    temporary = path.with_suffix(path.suffix + ".canonical.tmp")
-    if temporary.exists():
-        raise DryRunSafetyError("DRY_RUN.SOURCE_ALREADY_EXISTS")
-    try:
-        with zipfile.ZipFile(path) as package:
-            names = [item.filename for item in package.infolist()]
-            if len(names) != len(set(names)):
-                raise ValueError("duplicate package member")
-            members = {name: package.read(name) for name in names}
-        with zipfile.ZipFile(
-            temporary,
-            "x",
-            compression=zipfile.ZIP_DEFLATED,
-            compresslevel=9,
-        ) as package:
-            for name in sorted(members):
-                payload = members[name]
-                if (
-                    path.suffix.casefold() == ".xlsx"
-                    and name == "docProps/core.xml"
-                ):
-                    payload = re.sub(
-                        rb"(<dcterms:modified\b[^>]*>)[^<]*(</dcterms:modified>)",
-                        rb"\g<1>2026-07-26T00:00:00Z\g<2>",
-                        payload,
-                        count=1,
-                    )
-                info = zipfile.ZipInfo(name, date_time=(2026, 7, 26, 0, 0, 0))
-                info.compress_type = zipfile.ZIP_DEFLATED
-                info.create_system = 3
-                info.external_attr = 0o600 << 16
-                package.writestr(info, payload, compresslevel=9)
-        os.replace(temporary, path)
-    finally:
-        if temporary.is_file() and not temporary.is_symlink():
-            temporary.unlink()
+    with zipfile.ZipFile(BytesIO(payload)) as package:
+        names = [item.filename for item in package.infolist()]
+        if len(names) != len(set(names)):
+            raise ValueError("duplicate package member")
+        members = {name: package.read(name) for name in names}
+    output = BytesIO()
+    with zipfile.ZipFile(
+        output,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+    ) as package:
+        for name in sorted(members):
+            payload = members[name]
+            if (
+                suffix.casefold() == ".xlsx"
+                and name == "docProps/core.xml"
+            ):
+                payload = re.sub(
+                    rb"(<dcterms:modified\b[^>]*>)[^<]*(</dcterms:modified>)",
+                    rb"\g<1>2026-07-26T00:00:00Z\g<2>",
+                    payload,
+                    count=1,
+                )
+            info = zipfile.ZipInfo(name, date_time=(2026, 7, 26, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3
+            info.external_attr = 0o600 << 16
+            package.writestr(info, payload, compresslevel=9)
+    return output.getvalue()
 
 
-def _create_synthetic_source(source_root: Path) -> dict[str, Path]:
-    from docx import Document
-    from openpyxl import Workbook
+def _xlsx_bytes() -> bytes:
+    import html
 
-    paths = {name: source_root / filename for name, filename in SOURCE_NAMES.items()}
-    if any(path.exists() for path in paths.values()):
-        raise DryRunSafetyError("DRY_RUN.SOURCE_ALREADY_EXISTS")
-
-    _write_pdf(
-        paths["invoice"],
-        _INVOICE_TEXT,
+    rows = "".join(
+        f'<row r="{index}"><c r="A{index}" t="inlineStr"><is><t>'
+        f"{html.escape(row[0])}</t></is></c></row>"
+        for index, row in enumerate(_XLSX_ROWS, start=1)
     )
+    members = {
+        "[Content_Types].xml": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            "</Types>"
+        ),
+        "_rels/.rels": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            "</Relationships>"
+        ),
+        "xl/workbook.xml": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<sheets><sheet name="synthetic-project" sheetId="1" r:id="rId1"/></sheets>'
+            "</workbook>"
+        ),
+        "xl/_rels/workbook.xml.rels": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+            "</Relationships>"
+        ),
+        "xl/worksheets/sheet1.xml": (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            f"<sheetData>{rows}</sheetData></worksheet>"
+        ),
+    }
+    package_bytes = BytesIO()
+    with zipfile.ZipFile(package_bytes, "w", zipfile.ZIP_DEFLATED) as package:
+        for name, payload in members.items():
+            package.writestr(name, payload.encode("utf-8"))
+    return _normalize_package_bytes(package_bytes.getvalue(), ".xlsx")
+
+
+def _synthetic_source_bytes() -> dict[str, bytes]:
+    from docx import Document
 
     contract = Document()
     contract.core_properties.created = _FIXED_DOCUMENT_TIME
     contract.core_properties.modified = _FIXED_DOCUMENT_TIME
     for paragraph in _CONTRACT_PARAGRAPHS:
         contract.add_paragraph(paragraph)
-    contract.save(paths["contract"])
-    _normalize_package_bytes(paths["contract"])
+    contract_buffer = BytesIO()
+    contract.save(contract_buffer)
 
-    paths["markdown"].write_text(_MARKDOWN_TEXT, encoding="utf-8")
+    return {
+        "invoice": _pdf_bytes(_INVOICE_TEXT),
+        "contract": _normalize_package_bytes(
+            contract_buffer.getvalue(), ".docx"
+        ),
+        "markdown": _MARKDOWN_TEXT.encode("utf-8"),
+        "xlsx": _xlsx_bytes(),
+        "xml": _XML_TEXT.encode("utf-8"),
+        "scan": _pdf_bytes(image_only=True),
+    }
 
-    workbook = Workbook()
-    workbook.properties.created = _FIXED_DOCUMENT_TIME
-    workbook.properties.modified = _FIXED_DOCUMENT_TIME
-    worksheet = workbook.active
-    worksheet.title = "synthetic-project"
-    for row in _XLSX_ROWS:
-        worksheet.append(row)
-    workbook.save(paths["xlsx"])
-    workbook.close()
-    _normalize_package_bytes(paths["xlsx"])
 
-    paths["xml"].write_text(_XML_TEXT, encoding="utf-8")
-    _write_pdf(paths["scan"], image_only=True)
+def _create_synthetic_source(source_root: Path) -> dict[str, Path]:
+    paths = {name: source_root / filename for name, filename in SOURCE_NAMES.items()}
+    if any(path.exists() for path in paths.values()):
+        raise DryRunSafetyError("DRY_RUN.SOURCE_ALREADY_EXISTS")
+    for name, payload in _synthetic_source_bytes().items():
+        paths[name].write_bytes(payload)
     return paths
 
 
@@ -369,29 +419,11 @@ def _canonical_source_digests(paths: dict[str, Path]) -> dict[str, str]:
     return {name: _canonical_file_digest(path) for name, path in paths.items()}
 
 
-def _trusted_canonical_source_digests(source_root: Path) -> dict[str, str]:
-    reference_root = source_root.parent / ".local-agent-dry-run-canonical-reference"
-    _reject_reparse_components(reference_root)
-    if reference_root.exists():
-        raise DryRunSafetyError("DRY_RUN.SOURCE_UNSAFE")
-    reference_paths = {
-        name: reference_root / filename for name, filename in SOURCE_NAMES.items()
+def _trusted_canonical_source_digests() -> dict[str, str]:
+    return {
+        name: hashlib.sha256(payload).hexdigest()
+        for name, payload in _synthetic_source_bytes().items()
     }
-    reference_root.mkdir()
-    if (
-        _is_reparse_point(reference_root)
-        or not _is_relative_to(reference_root.resolve(), source_root.parent.resolve())
-    ):
-        raise DryRunSafetyError("DRY_RUN.SOURCE_UNSAFE")
-    try:
-        generated = _create_synthetic_source(reference_root)
-        return _canonical_source_digests(generated)
-    finally:
-        for path in reference_paths.values():
-            if path.exists():
-                if path.is_symlink() or not path.is_file():
-                    raise DryRunSafetyError("DRY_RUN.SOURCE_UNSAFE")
-                path.unlink()
 
 
 def _load_existing_synthetic_source(source_root: Path) -> dict[str, Path]:
@@ -409,7 +441,7 @@ def _load_existing_synthetic_source(source_root: Path) -> dict[str, Path]:
     files = _validated_source_paths(source_root, list(expected.values()))
     try:
         canonical = _canonical_source_digests(expected)
-        trusted = _trusted_canonical_source_digests(source_root)
+        trusted = _trusted_canonical_source_digests()
     except Exception:
         raise DryRunSafetyError("DRY_RUN.SOURCE_UNSAFE") from None
     if canonical != trusted:
@@ -781,16 +813,15 @@ def _expected_verification_findings(
     extracted_items: list[dict[str, Any]] = []
     for filename in actual_names:
         payload = strict_json_load(str(extracted_dir / filename))
-        validate_extracted_document_artifact(payload, run_id)
         manifest_item = by_filename[filename]
         if (
             payload.get("source_ref") != manifest_item["source_ref"]
             or payload.get("content_hash") != manifest_item["content_hash"]
         ):
             raise ValueError("extracted artifact binding")
-        extraction = payload.get("extraction")
-        if type(extraction) is dict:
-            extracted_items.append(extraction)
+        extracted_items.append(
+            project_extracted_document_for_verification(payload, run_id)
+        )
     findings = _review_ocr_quality(extracted_items)
     if not findings:
         findings.extend(_review_field_completeness(extracted_items))
@@ -800,16 +831,36 @@ def _expected_verification_findings(
 
 
 def _strict_text_artifact(path: Path) -> str:
-    details = os.lstat(path)
-    if (
-        not stat.S_ISREG(details.st_mode)
-        or stat.S_ISLNK(details.st_mode)
-        or getattr(details, "st_file_attributes", 0)
-        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-        or details.st_size > 128 * 1024
-    ):
-        raise ValueError("unsafe text artifact")
-    return path.read_text(encoding="utf-8")
+    limit = 128 * 1024
+    try:
+        before = os.lstat(path)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or getattr(before, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            or before.st_size > limit
+        ):
+            raise ValueError("unsafe text artifact")
+        flags = (
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags)
+        try:
+            current = os.fstat(descriptor)
+            if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+                raise ValueError("unsafe text artifact")
+            raw = os.read(descriptor, limit + 1)
+            if os.read(descriptor, 1) or len(raw) > limit:
+                raise ValueError("unsafe text artifact")
+        finally:
+            os.close(descriptor)
+        text = raw.decode("utf-8", "strict")
+        return text.replace("\r\n", "\n").replace("\r", "\n")
+    except ValueError:
+        raise
+    except (OSError, UnicodeError):
+        raise ValueError("unsafe text artifact") from None
 
 
 def _validated_review_artifact(

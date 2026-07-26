@@ -330,3 +330,75 @@ python.exe -m pytest tests/integration/test_local_agent_judgement_dry_run.py tes
 `py_compile` and `git diff --check` completed with exit code `0`. Fresh
 `governance/validate.py repository` and `all` runs still report only the same
 six upstream baseline findings; no Task 5 file is named.
+
+## Fix round 4: in-memory trust anchors and strict verification projection
+
+Trusted canonical source references no longer allocate any filesystem
+directory or file. The runner now constructs all six canonical inputs as
+bytes: PDF documents use PyMuPDF's in-memory output, DOCX is saved to a
+`BytesIO` buffer and deterministically repacked, XLSX is a minimal valid OOXML
+package assembled and normalized entirely in memory, and Markdown/XML are
+UTF-8 bytes. Actual source creation writes those bytes only to the explicit
+`root/source` directory. Reuse hashes existing raw bytes against a fresh
+in-memory canonical byte map; there is no reference directory to clean up or
+pollute across successful and rejected retries.
+
+A strict pure projection,
+`project_extracted_document_for_verification(payload, run_id)`, now validates
+the persisted Task 5 extracted-document contract and maps it to the production
+verifier's `file`, `document_type`, and `fields` inputs plus bounded provenance
+metadata. Production verification and acceptance recomputation call the same
+projection. A schema-valid contract artifact that omits required candidate
+fields therefore produces a high `field_completeness` finding and a
+`needs_correction` verdict; forging the returned and persisted report to
+`pass` is rejected by acceptance recomputation.
+
+The production verifier retains its existing legacy prepared-run capability
+through a separate, exact-key compatibility branch. That branch accepts only
+the historical wrapper version, matching run ID, complete historical key set,
+and a dictionary `extraction`; it does not relax the strict Task 5 contract or
+the acceptance boundary. Synthetic Task 5 inputs were completed with explicit
+project and contract fields required by the existing production completeness
+rules. Invoice project linkage is taken only from an explicit `采购名称` or
+`标的名称` label; invoice line-item `项目名称` headers remain excluded.
+
+Feedback Markdown acceptance now uses the same descriptor strategy as strict
+JSON loading: `lstat`, regular-file/reparse rejection, byte limit, `O_NOFOLLOW`
+where available, descriptor `fstat` device/inode binding, bounded reads, and
+strict UTF-8 decoding. Universal newline normalization preserves the former
+logical-text behavior on Windows. A replacement between `lstat` and open is
+rejected.
+
+### Fix-round-4 TDD evidence
+
+The initial focused counterexamples all failed against round 3:
+
+```text
+5 failed in 1.29s
+```
+
+They covered the absent pure projection, production verification incorrectly
+returning `pass` for missing strict candidate fields, path-based canonical
+generation, Markdown path replacement, and a forged pass over ignored strict
+fields. The same focused set passed after the boundary changes:
+
+```text
+5 passed in 1.13s
+```
+
+The invoice line-item non-inference regression failed before the explicit-label
+guard and passed together with the positive explicit procurement-name case.
+The complete legal round trip, two consecutive legal reuses, two forged retry
+rejections, Markdown replacement, and forged verification acceptance checks
+then passed as a focused seven-test set.
+
+Fresh final verification:
+
+```text
+python.exe -m pytest tests/integration/test_local_agent_judgement_dry_run.py tests/contracts/test_archive_run_artifacts.py tests/test_adversarial_verification.py tests/test_business_judgement_run.py tests/test_invoice_business_semantics.py -q
+122 passed in 25.49s
+```
+
+`py_compile` and `git diff --check` completed with exit code `0`. Fresh
+UTF-8 `governance/validate.py repository` and `all` runs still report only the
+same six upstream baseline findings; no Task 5 file is named.
