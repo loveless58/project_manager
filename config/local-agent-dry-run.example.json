@@ -1,0 +1,30 @@
+{
+  "deployment_mode": "local",
+  "business_root": "__DRY_RUN_SOURCE_ROOT__",
+  "runtime_workspace": "__DRY_RUN_RUNTIME_ROOT__",
+  "storage_bindings": [
+    {
+      "binding_id": "dry-run-source",
+      "provider": "local",
+      "node_id": "dry-run-node",
+      "logical_root": "business://dry-run-source/",
+      "physical_root": "__DRY_RUN_SOURCE_ROOT__",
+      "roles": ["source"],
+      "readable": true,
+      "writable": false,
+      "enabled": true
+    }
+  ],
+  "database": {
+    "provider": "sqlite",
+    "sqlite_path": "__DRY_RUN_SQLITE_PATH__",
+    "dsn_env_var": "PROJECT_MANAGER_DRY_RUN_DATABASE_DSN"
+  },
+  "providers": {
+    "document_store": "local",
+    "structure_index": "disabled",
+    "pageindex_dir": null,
+    "projection_writer": "filesystem",
+    "projection_root": "__DRY_RUN_PROJECTION_ROOT__"
+  }
+}
