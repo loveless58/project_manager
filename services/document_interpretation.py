@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 import json
 import math
@@ -135,6 +135,7 @@ class PreparedDocumentInterpretation:
     parse_artifact_ref: str
     request: dict[str, Any]
     business_context: dict[str, Any]
+    _request_snapshot: str = field(default="", repr=False, compare=False)
 
 
 class DocumentInterpretationService:
@@ -186,6 +187,7 @@ class DocumentInterpretationService:
             parse_artifact_ref=ref,
             request=request,
             business_context=request["business_context"],
+            _request_snapshot=_canonical_snapshot(request),
         )
 
     def complete_prepared(
@@ -195,13 +197,13 @@ class DocumentInterpretationService:
     ) -> dict[str, Any]:
         ref = _prepared_ref(prepared)
         try:
-            _validate_prepared(prepared)
+            request = _validate_prepared(prepared)
             _validate_adapter(interpreter)
             result = parse_candidate_document_interpretation(
-                interpreter.complete_json(prepared.request)
+                interpreter.complete_json(request)
             )
             _identity(result, interpreter)
-            _trace(result, prepared.business_context)
+            _trace(result, request["business_context"])
         except DocumentInterpretationSchemaError:
             return _blocked(ref, "DOCUMENT_INTERPRETATION.SCHEMA_INVALID")
         except Exception as error:
@@ -227,17 +229,20 @@ def _prepared_ref(prepared: object) -> str:
     return ""
 
 
-def _validate_prepared(prepared: object) -> None:
+def _validate_prepared(prepared: object) -> dict[str, Any]:
     if not isinstance(prepared, PreparedDocumentInterpretation):
         raise DocumentInterpretationSchemaError("prepared interpretation")
     if (
         type(prepared.request) is not dict
         or type(prepared.business_context) is not dict
+        or type(prepared._request_snapshot) is not str
         or not _artifact(prepared.parse_artifact_ref)
     ):
         raise DocumentInterpretationSchemaError("prepared interpretation")
+    if _canonical_snapshot(prepared.request) != prepared._request_snapshot:
+        raise DocumentInterpretationSchemaError("prepared interpretation")
 
-    request = prepared.request
+    request = _snapshot_request(prepared._request_snapshot)
     expected_keys = {
         "schema_version",
         "parse_artifact_ref",
@@ -247,7 +252,8 @@ def _validate_prepared(prepared: object) -> None:
     if (
         set(request) != expected_keys
         or request["parse_artifact_ref"] != prepared.parse_artifact_ref
-        or request["business_context"] is not prepared.business_context
+        or _canonical_snapshot(prepared.business_context)
+        != _canonical_snapshot(request["business_context"])
     ):
         raise DocumentInterpretationSchemaError("prepared interpretation")
 
@@ -260,7 +266,7 @@ def _validate_prepared(prepared: object) -> None:
             "text_segments": document["text_segments"],
         }
         clean_document = _document(source)
-        context = prepared.business_context
+        context = request["business_context"]
         context_evidence = BusinessContextEvidence(
             context["status"],
             tuple(context["candidates"]),
@@ -278,6 +284,30 @@ def _validate_prepared(prepared: object) -> None:
 
     if request != expected_request:
         raise DocumentInterpretationSchemaError("prepared interpretation")
+    return request
+
+
+def _canonical_snapshot(value: object) -> str:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError):
+        raise DocumentInterpretationSchemaError("prepared interpretation") from None
+
+
+def _snapshot_request(snapshot: str) -> dict[str, Any]:
+    try:
+        request = json.loads(snapshot)
+    except (TypeError, ValueError):
+        raise DocumentInterpretationSchemaError("prepared interpretation") from None
+    if type(request) is not dict:
+        raise DocumentInterpretationSchemaError("prepared interpretation")
+    return request
 
 
 def _validate_adapter(interpreter: Any) -> None:

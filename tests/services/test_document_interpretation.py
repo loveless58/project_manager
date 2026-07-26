@@ -149,6 +149,68 @@ def test_selected_agent_unavailability_never_falls_back_to_configured_interprete
     assert configured.requests == []
 
 
+def test_complete_prepared_rejects_nested_request_mutation() -> None:
+    from services.document_interpretation import DocumentInterpretationService
+
+    interpreter = CapturingInterpreter(_valid_response())
+    service = DocumentInterpretationService(StaticRetrieval(_evidence()), interpreter)
+    prepared = service.prepare(_input())
+
+    prepared.request["document"]["candidate_fields"]["contract_code"] = "CT-999"
+    result = service.complete_prepared(prepared, interpreter)
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "DOCUMENT_INTERPRETATION.SCHEMA_INVALID"
+    assert interpreter.requests == []
+
+
+@pytest.mark.parametrize(
+    "field, invalid_identity",
+    [
+        ("interpreter", "contains space"),
+        ("model", "x" * 129),
+        ("interpreter", "invalid!character"),
+    ],
+)
+def test_invalid_agent_identity_is_response_invalid_not_adapter_invalid(
+    field: str, invalid_identity: str
+) -> None:
+    from contracts.agent_judgement import RESPONSE_SCHEMA_VERSION, build_agent_judgement_request
+    from integrations.llm.agent_response_interpreter import AgentResponseInterpreter
+    from services.document_interpretation import DocumentInterpretationService
+
+    configured = CapturingInterpreter(_valid_response())
+    service = DocumentInterpretationService(StaticRetrieval(_evidence()), configured)
+    prepared = service.prepare(_input())
+    request = build_agent_judgement_request(
+        run_id="run_" + "a" * 32,
+        request_id="agent-request:invalid-identity",
+        interpretation_request=prepared.request,
+    )
+    interpretation = _valid_response(
+        interpreter=invalid_identity if field == "interpreter" else "codex_agent",
+        model=invalid_identity if field == "model" else "hosted-agent",
+    )
+    response = {
+        "schema_version": RESPONSE_SCHEMA_VERSION,
+        "run_id": request["run_id"],
+        "request_id": request["request_id"],
+        "request_hash": request["request_hash"],
+        "interpreter": interpretation["interpreter"],
+        "model": interpretation["model"],
+        "created_at": "2026-07-26T00:00:00Z",
+        "interpretation": interpretation,
+    }
+
+    result = service.complete_prepared(
+        prepared, AgentResponseInterpreter(response, request=request)
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "DOCUMENT_INTERPRETATION.LLM.RESPONSE_INVALID"
+    assert configured.requests == []
+
+
 def test_malformed_response_blocks_and_keeps_parse_ref() -> None:
     from services.document_interpretation import DocumentInterpretationService
 

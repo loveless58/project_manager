@@ -26,8 +26,8 @@ class AgentResponseInterpreter:
     def __init__(self, response: object, *, request: Mapping[str, Any]) -> None:
         self._response = response
         self._request = _json_copy(request)
-        self.name = _identity(response, "interpreter")
-        self.model = _identity(response, "model")
+        self.name = _FALLBACK_IDENTITY
+        self.model = _FALLBACK_IDENTITY
 
     def complete_json(self, request: Mapping[str, Any]) -> str:
         try:
@@ -68,14 +68,6 @@ class AgentResponseInterpreter:
             raise DocumentInterpreterRequestError(
                 "DOCUMENT_INTERPRETATION.LLM.RESPONSE_INVALID"
             ) from None
-
-
-def _identity(response: object, field: str) -> str:
-    if isinstance(response, Mapping):
-        value = response.get(field)
-        if type(value) is str and value:
-            return value
-    return _FALLBACK_IDENTITY
 
 
 def _json_copy(value: object) -> Any:
