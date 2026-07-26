@@ -522,3 +522,50 @@ The four full-suite warnings are pre-existing EasyOCR/PyTorch quantization
 deprecation warnings. No push was performed. The user-owned untracked plan at
 `docs/superpowers/plans/2026-07-26-local-agent-judgement-dry-run.md` remained
 unmodified, unstaged, and uncommitted.
+
+## Independent final-review follow-up (2026-07-27)
+
+This follow-up supersedes the final verification counts above. Its
+implementation commit is `be11365`; the evidence-only commit follows it.
+Invoice production logic and invoice contracts remain outside this scope.
+
+### Request and extracted-input sealing
+
+Each `agent_judgement_input_snapshot.v1` item now also persists the original
+validated `request_hash`. Resume rebuilds the formal request artifact through
+the production validator, requires the validated hash to equal the snapshot
+hash, and independently requires `extracted.source_ref` to equal the manifest
+source reference. These checks run before response consumption and again under
+the run lock through the existing owner validation boundary.
+
+The public `DataCleaningTools.resume_agent_judgement_run()` regression modifies
+a saved request candidate, recomputes a self-consistent request hash, supplies
+a response bound to that modified hash, and verifies
+`AGENT_JUDGEMENT.RUN_INPUT_INVALID` with every pre-consumption run artifact
+byte unchanged. A second public regression changes the extracted source
+reference and its snapshot digest together; it is rejected by the independent
+manifest binding.
+
+### Projection target protection
+
+`FilesystemProjectionWriter._resolve()` now executes its target-level protected
+root check before returning. Constructor overlap rejection remains unchanged.
+The new regression changes the adapter's protected-root binding after safe
+construction and proves the write-time guard preserves existing source bytes.
+
+### Fresh verification
+
+| Check | Exact result |
+|---|---|
+| Gateway and ProjectionWriter suites | `47 passed in 1.75s` |
+| Expanded gateway, projection, CLI, dry-run, and archive-gate suites | `146 passed, 23 subtests passed in 25.53s` |
+| Full pytest | `1669 passed, 5 skipped, 4 warnings, 183 subtests passed in 59.34s` |
+| Governance tools | `0 errors, 0 warnings` |
+| Governance repository | `0 errors, 0 warnings`; `tracked=337`, `scanned_text=336`, `skipped_binary=1`, `decode_errors=0` |
+| Governance all | `0 errors, 0 warnings`; four loop packages consistent |
+| Changed production-module `py_compile` | exit code `0` |
+| `git diff --check 510d162..be11365` and working-tree diff check | exit code `0`, no output |
+
+The four warnings remain the pre-existing EasyOCR/PyTorch quantization
+deprecation warnings. The stable configured-LLM capability code is
+`LLM.CAPABILITY_DISABLED`.
