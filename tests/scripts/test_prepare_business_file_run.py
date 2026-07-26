@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -219,6 +222,92 @@ def test_configured_mode_constructs_the_injected_interpreter_once(tmp_path, caps
     assert exit_code == 0
     assert json.loads(capsys.readouterr().out)["status"] in {"success", "needs_review"}
     assert interpreter_calls == [True]
+
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {},
+        {
+            "PROJECT_MANAGER_LLM_BASE_URL": "   ",
+            "LLM_API_KEY": "   ",
+        },
+        {
+            "PROJECT_MANAGER_LLM_BASE_URL": "https://llm.example.invalid/v1",
+            "LLM_API_KEY": "   ",
+        },
+    ],
+    ids=["missing URL", "blank standard values", "missing API key"],
+)
+def test_configured_mode_maps_provider_configuration_to_capability_block(
+    tmp_path, capsys, environment
+):
+    module = _module()
+    config, catalog, source, _, _ = _inputs(tmp_path)
+
+    provider_environment = {
+        "PROJECT_MANAGER_LLM_BASE_URL": "",
+        "LLM_BASE_URL": "",
+        "OPENAI_API_BASE": "",
+        "LLM_API_KEY": "",
+    }
+    provider_environment.update(environment)
+    with patch.dict(os.environ, provider_environment, clear=False):
+        exit_code = module.main(
+            [
+                "--config", str(config),
+                "--context", str(catalog),
+                "--source-binding", "source",
+                str(source),
+            ]
+        )
+
+    summary = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert summary == {
+        "schema_version": "business_file_judgement.cli.v1",
+        "status": "blocked",
+        "interpreter_mode": "configured_llm",
+        "error_code": "LLM.CAPABILITY_DISABLED",
+    }
+
+
+def test_configured_mode_preserves_legacy_endpoint_fallback(tmp_path, capsys):
+    from integrations.llm import OpenAICompatibleInterpreter
+
+    module = _module()
+    config, catalog, source, _, _ = _inputs(tmp_path)
+    observed = []
+
+    def legacy_interpreter():
+        configured = OpenAICompatibleInterpreter()
+        observed.append((configured.base_url, configured.api_key))
+        return FakeInterpreter()
+
+    with patch.dict(
+        os.environ,
+        {
+            "PROJECT_MANAGER_LLM_BASE_URL": "   ",
+            "LLM_BASE_URL": "   ",
+            "OPENAI_API_BASE": "https://legacy.example.invalid/v1/",
+            "LLM_API_KEY": "synthetic-legacy-key",
+        },
+        clear=False,
+    ):
+        exit_code = module.main(
+            [
+                "--config", str(config),
+                "--context", str(catalog),
+                "--source-binding", "source",
+                str(source),
+            ],
+            interpreter_factory=legacy_interpreter,
+        )
+
+    assert exit_code == 0
+    assert observed == [("https://legacy.example.invalid/v1", "synthetic-legacy-key")]
+    assert json.loads(capsys.readouterr().out)["status"] in {"success", "needs_review"}
 
 
 def test_disabled_mode_blocks_without_model_invocation(tmp_path, capsys):

@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app_bootstrap.composition import build_runtime_adapters
+from common.provider_config import ProviderConfigurationError
 from integrations.business_context import JsonBusinessContextProvider
 from integrations.llm import OpenAICompatibleInterpreter
 from ocr.providers import DisabledOcrProvider
@@ -247,6 +248,9 @@ def main(argv: Sequence[str] | None = None, *, interpreter_factory: Callable[[],
         archive = tools.execute_archive_plan(prepared["run_id"], confirmed=False)
         _emit(_summary(prepared=prepared, verification=verification, audit=audit, feedback=feedback, archive=archive, source_binding=args.source_binding, target_binding=args.target_binding))
         return 2 if prepared.get("failed", 0) else 0
+    except ProviderConfigurationError:
+        _emit(_capability_block(interpreter_mode="configured_llm"))
+        return 2
     except InputBindingError as exc:
         _emit({"schema_version": "business_file_judgement.cli.v1", "status": "blocked", "error_code": str(exc)})
         return 2
