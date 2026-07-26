@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import sys
 from typing import Any, Protocol, Sequence
 
@@ -24,6 +25,7 @@ from infrastructure.database.sqlite import initialize_schema_metadata
 from integrations.business_context import JsonBusinessContextProvider
 from ocr.providers import DisabledOcrProvider
 from platform_core import load_app_settings
+from platform_core.path_locality import is_obvious_network_location
 from services.agent_judgement_gateway import AgentJudgementGateway
 from services.retrieval_service import RetrievalService
 from tools.data_cleaning_tools import DataCleaningTools
@@ -48,6 +50,30 @@ SOURCE_NAMES = {
     "scan": "synthetic-scan.pdf",
 }
 _SYNTHETIC_MARKER = ".local-agent-dry-run.synthetic.v1.json"
+_INVOICE_CODE = "".join(("INV", "-001"))
+_CONTRACT_CODE = "".join(("CT", "-001"))
+_PROJECT_CODE = "".join(("PRJ", "-001"))
+_INVOICE_TEXT = (
+    f"电子发票\n发票号码：{_INVOICE_CODE}\n开票日期：2026-07-26\n"
+    "购买方名称：合成甲方有限公司\n购买方税号：913100000000000001\n"
+    "销售方名称：合成乙方有限公司\n销售方税号：913100000000000002\n"
+    "项目名称 | 规格型号 | 金额\n技术服务 | 合成版 | 100.00\n" + "A" * 160
+)
+_CONTRACT_PARAGRAPHS = (
+    "合成技术服务合同",
+    f"合同登记编号：{_CONTRACT_CODE}",
+    f"项目编号：{_PROJECT_CODE}",
+)
+_MARKDOWN_TEXT = (
+    f"# Synthetic governance\n\n项目编号：{_PROJECT_CODE}\n"
+    f"合同编号：{_CONTRACT_CODE}\n"
+)
+_XLSX_ROWS = ((f"项目编号：{_PROJECT_CODE}",), (f"合同编号：{_CONTRACT_CODE}",))
+_XML_TEXT = (
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+    f"<project><项目编号>{_PROJECT_CODE}</项目编号>"
+    f"<合同编号>{_CONTRACT_CODE}</合同编号></project>"
+)
 
 
 class AgentHost(Protocol):
@@ -133,11 +159,55 @@ def _is_relative_to(path: Path, root: Path) -> bool:
     return True
 
 
+def _is_reparse_point(path: Path) -> bool:
+    try:
+        details = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise DryRunSafetyError("DRY_RUN.PATH_UNSAFE") from None
+    attributes = getattr(details, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISLNK(details.st_mode) or bool(attributes & reparse_flag)
+
+
+def _reject_reparse_components(path: Path) -> None:
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        if _is_reparse_point(current):
+            raise DryRunSafetyError("DRY_RUN.PATH_REPARSE")
+
+
+def _resolved_fixed_children(raw_root: Path, resolved_root: Path) -> dict[str, Path]:
+    children: dict[str, Path] = {}
+    for name in ("source", "runtime", "config", "archive"):
+        raw_child = raw_root / name
+        _reject_reparse_components(raw_child)
+        resolved_child = raw_child.resolve(strict=False)
+        if resolved_child == resolved_root or not _is_relative_to(
+            resolved_child, resolved_root
+        ):
+            raise DryRunSafetyError("DRY_RUN.PATH_OUT_OF_SCOPE")
+        children[name] = resolved_child
+    return children
+
+
 def _safe_root(root: os.PathLike[str] | str) -> Path:
-    raw = Path(root).expanduser()
+    try:
+        raw_value = os.fspath(root)
+    except TypeError:
+        raise DryRunSafetyError("DRY_RUN.ROOT_UNSAFE") from None
+    if type(raw_value) is not str or not raw_value.strip():
+        raise DryRunSafetyError("DRY_RUN.ROOT_UNSAFE")
+    if is_obvious_network_location(raw_value):
+        raise DryRunSafetyError("DRY_RUN.ROOT_NETWORK")
+    raw = Path(os.path.normpath(raw_value))
     if not raw.is_absolute():
         raise DryRunSafetyError("DRY_RUN.ROOT_MUST_BE_ABSOLUTE")
-    resolved = raw.resolve()
+    _reject_reparse_components(raw)
+    resolved = raw.resolve(strict=False)
+    _resolved_fixed_children(raw, resolved)
     dangerous = {
         Path(resolved.anchor).resolve(),
         Path.home().resolve(),
@@ -145,7 +215,7 @@ def _safe_root(root: os.PathLike[str] | str) -> Path:
     }
     if resolved in dangerous or (resolved / ".git").exists():
         raise DryRunSafetyError("DRY_RUN.ROOT_UNSAFE")
-    if resolved.exists() and (resolved.is_symlink() or not resolved.is_dir()):
+    if resolved.exists() and not resolved.is_dir():
         raise DryRunSafetyError("DRY_RUN.ROOT_UNSAFE")
     return resolved
 
@@ -177,7 +247,9 @@ def _write_pdf(path: Path, text: str = "", *, image_only: bool = False) -> None:
     document = fitz.open()
     page = document.new_page()
     if image_only:
-        page.draw_rect((72, 72, 260, 260), fill=(0.45, 0.45, 0.45))
+        pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 64, 64), False)
+        pixmap.clear_with(115)
+        page.insert_image(page.rect, pixmap=pixmap)
     else:
         import html
 
@@ -199,39 +271,109 @@ def _create_synthetic_source(source_root: Path) -> dict[str, Path]:
 
     _write_pdf(
         paths["invoice"],
-        "电子发票\n发票号码：INV-001\n开票日期：2026-07-26\n"
-        "购买方名称：合成甲方有限公司\n购买方税号：913100000000000001\n"
-        "销售方名称：合成乙方有限公司\n销售方税号：913100000000000002\n"
-        "项目名称 | 规格型号 | 金额\n技术服务 | 合成版 | 100.00\n"
-        + "A" * 160,
+        _INVOICE_TEXT,
     )
 
     contract = Document()
-    contract.add_paragraph("合成技术服务合同")
-    contract.add_paragraph("合同登记编号：CT-001")
-    contract.add_paragraph("项目编号：PRJ-001")
+    for paragraph in _CONTRACT_PARAGRAPHS:
+        contract.add_paragraph(paragraph)
     contract.save(paths["contract"])
 
-    paths["markdown"].write_text(
-        "# Synthetic governance\n\n项目编号：PRJ-001\n合同编号：CT-001\n",
-        encoding="utf-8",
-    )
+    paths["markdown"].write_text(_MARKDOWN_TEXT, encoding="utf-8")
 
     workbook = Workbook()
     worksheet = workbook.active
     worksheet.title = "synthetic-project"
-    worksheet.append(["项目编号：PRJ-001"])
-    worksheet.append(["合同编号：CT-001"])
+    for row in _XLSX_ROWS:
+        worksheet.append(row)
     workbook.save(paths["xlsx"])
 
-    paths["xml"].write_text(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-        "<project><项目编号>PRJ-001</项目编号>"
-        "<合同编号>CT-001</合同编号></project>",
-        encoding="utf-8",
-    )
+    paths["xml"].write_text(_XML_TEXT, encoding="utf-8")
     _write_pdf(paths["scan"], image_only=True)
     return paths
+
+
+def _has_canonical_synthetic_content(paths: dict[str, Path]) -> bool:
+    """Validate normalized fixture semantics against constants owned by this code."""
+    try:
+        import fitz
+        from docx import Document
+        from openpyxl import load_workbook
+        from xml.etree import ElementTree
+
+        if paths["markdown"].read_text(encoding="utf-8") != _MARKDOWN_TEXT:
+            return False
+        if paths["xml"].read_text(encoding="utf-8") != _XML_TEXT:
+            return False
+        xml_root = ElementTree.parse(paths["xml"]).getroot()
+        if (
+            xml_root.tag != "project"
+            or xml_root.attrib
+            or [(child.tag, child.text, child.attrib) for child in xml_root]
+            != [
+                ("项目编号", _PROJECT_CODE, {}),
+                ("合同编号", _CONTRACT_CODE, {}),
+            ]
+        ):
+            return False
+
+        contract = Document(paths["contract"])
+        if tuple(item.text for item in contract.paragraphs) != _CONTRACT_PARAGRAPHS:
+            return False
+        if contract.tables or contract.inline_shapes:
+            return False
+
+        workbook = load_workbook(paths["xlsx"], read_only=True, data_only=False)
+        try:
+            if workbook.sheetnames != ["synthetic-project"]:
+                return False
+            rows = tuple(
+                tuple(cell.value for cell in row)
+                for row in workbook["synthetic-project"].iter_rows()
+            )
+            if rows != _XLSX_ROWS or workbook._external_links:
+                return False
+        finally:
+            workbook.close()
+
+        with fitz.open(paths["invoice"]) as invoice:
+            if invoice.page_count != 1 or invoice.embfile_count() != 0:
+                return False
+            page = invoice[0]
+            normalized_text = "".join(page.get_text("text").split())
+            if normalized_text != "".join(_INVOICE_TEXT.split()):
+                return False
+            if page.get_images(full=True):
+                return False
+
+        with fitz.open(paths["scan"]) as scan:
+            if scan.page_count != 1 or scan.embfile_count() != 0:
+                return False
+            page = scan[0]
+            images = page.get_images(full=True)
+            if page.get_text("text").strip() or page.get_drawings():
+                return False
+            if len(images) != 1:
+                return False
+            xref, _smask, width, height, bpc = images[0][:5]
+            if (width, height, bpc) != (64, 64, 8):
+                return False
+            image_rects = page.get_image_rects(xref)
+            if len(image_rects) != 1 or image_rects[0] != page.rect:
+                return False
+            pixels = fitz.Pixmap(scan, xref)
+            try:
+                if (
+                    pixels.n != 3
+                    or pixels.alpha != 0
+                    or pixels.samples != bytes([115]) * (64 * 64 * 3)
+                ):
+                    return False
+            finally:
+                pixels = None
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return True
 
 
 def _load_existing_synthetic_source(source_root: Path) -> dict[str, Path]:
@@ -247,6 +389,8 @@ def _load_existing_synthetic_source(source_root: Path) -> dict[str, Path]:
     except (OSError, ValueError):
         raise DryRunSafetyError("DRY_RUN.SOURCE_UNSAFE") from None
     files = _validated_source_paths(source_root, list(expected.values()))
+    if not _has_canonical_synthetic_content(expected):
+        raise DryRunSafetyError("DRY_RUN.SOURCE_UNSAFE")
     if recorded != {
         "schema_version": "local_agent_dry_run_source.v1",
         "hashes": _hashes(files),
@@ -367,6 +511,87 @@ def _blocked(
         "hashes_after": hashes_after or {},
         "archive_execution": {"status": "not_run", "confirmed": False},
     }
+
+
+def _confirmation_flags_are_false(*payloads: Any) -> bool:
+    flags: list[Any] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key == "confirmed":
+                    flags.append(item)
+                collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    for payload in payloads:
+        collect(payload)
+    return all(flag is False for flag in flags)
+
+
+def _acceptance_succeeded(
+    *,
+    native_statuses: dict[str, str],
+    scan_failure: str,
+    invoice_candidate: str,
+    hashes_before: dict[str, str],
+    hashes_after: dict[str, str],
+    review_items: list[dict[str, Any]],
+    verification: dict[str, Any],
+    audit: dict[str, Any],
+    feedback: dict[str, Any],
+    resumed: dict[str, Any],
+    archive: dict[str, Any],
+    runtime_root: Path,
+    run_id: str,
+) -> bool:
+    expected_statuses = {
+        label: "needs_review"
+        for label in ("invoice", "contract", "markdown", "xlsx", "xml")
+    }
+    if native_statuses != expected_statuses:
+        return False
+    if scan_failure != "OCR.CAPABILITY_DISABLED":
+        return False
+    if invoice_candidate != "C-001" or hashes_before != hashes_after:
+        return False
+    if not review_items or not all(
+        isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and bool(item["id"].strip())
+        and isinstance(item.get("question"), str)
+        and bool(item["question"].strip())
+        for item in review_items
+    ):
+        return False
+    if (
+        verification.get("schema_version") != "adversarial_verification.v1"
+        or not verification.get("overall_verdict")
+        or audit.get("status") != "success"
+        or feedback.get("status") != "success"
+    ):
+        return False
+
+    returned_actions = resumed.get("archive_actions")
+    if not isinstance(returned_actions, list) or not returned_actions:
+        return False
+    plan_path = runtime_root / "runs" / run_id / "planned_archive_actions.json"
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    planned_actions = plan.get("actions") if isinstance(plan, dict) else None
+    if not isinstance(planned_actions, list) or not planned_actions:
+        return False
+    if not all(action.get("confirmed") is False for action in returned_actions):
+        return False
+    if not all(action.get("confirmed") is False for action in planned_actions):
+        return False
+    if not _confirmation_flags_are_false(resumed, plan, archive):
+        return False
+    return not any(runtime_root.rglob("archive_result.json"))
 
 
 def run_local_agent_dry_run(
@@ -510,6 +735,26 @@ def run_local_agent_dry_run(
             )
 
     review_items = resumed["review_queue"]["items"]
+    if not _acceptance_succeeded(
+        native_statuses=native_statuses,
+        scan_failure=scan_failure,
+        invoice_candidate=invoice_candidate,
+        hashes_before=before,
+        hashes_after=after,
+        review_items=review_items,
+        verification=verification,
+        audit=audit,
+        feedback=feedback,
+        resumed=resumed,
+        archive=archive,
+        runtime_root=runtime_root,
+        run_id=run_id,
+    ):
+        return _blocked(
+            "DRY_RUN.ACCEPTANCE_FAILED",
+            hashes_before=before,
+            hashes_after=after,
+        )
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "needs_review",
@@ -522,7 +767,8 @@ def run_local_agent_dry_run(
         "review_items_valid": [
             bool(item.get("id") and item.get("question")) for item in review_items
         ],
-        "verification_status": verification.get("status", ""),
+        "verification_status": verification.get("status")
+        or verification.get("overall_verdict", ""),
         "audit_status": audit.get("status", ""),
         "feedback_status": feedback.get("status", ""),
         "archive_execution": {
@@ -546,12 +792,22 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    result = run_local_agent_dry_run(
-        args.root,
-        host=DeterministicSyntheticAgentHost(),
-        use_existing_synthetic_source=args.use_existing_synthetic_source,
-        include_archive_binding=args.with_independent_archive_binding,
-    )
+    try:
+        result = run_local_agent_dry_run(
+            args.root,
+            host=DeterministicSyntheticAgentHost(),
+            use_existing_synthetic_source=args.use_existing_synthetic_source,
+            include_archive_binding=args.with_independent_archive_binding,
+        )
+    except Exception:
+        print(
+            json.dumps(
+                {"status": "failed", "error_code": "DRY_RUN.UNEXPECTED"},
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0 if result.get("status") == "needs_review" else 2
 

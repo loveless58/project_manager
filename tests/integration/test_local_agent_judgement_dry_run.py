@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
+import pytest
 
 
 class StrictSyntheticAgentHost:
@@ -198,7 +201,7 @@ def test_invalid_or_missing_host_response_fails_closed(tmp_path, monkeypatch) ->
             MutatingResponseHost(
                 lambda payload: payload["responses"][0]["interpretation"][
                     "fields"
-                ].__setitem__("contract_name", "C:/unsafe/source.docx")
+                ].__setitem__("contract_name", "C:/unsafe/source.docx")  # repo-hygiene: allow=synthetic-path
             ),
             "AGENT_JUDGEMENT.RESPONSE_INVALID",
         ),
@@ -320,4 +323,378 @@ def test_cli_requires_root_and_redacts_generated_paths(
     assert code == 0
     assert payload["status"] == "needs_review"
     assert str(root) not in output
+    assert not list((root / "runtime").rglob("archive_result.json"))
+
+
+def _make_directory_junction(link: Path, target: Path) -> None:
+    completed = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert os.path.isjunction(link)
+
+
+def _tree_hashes(root: Path) -> dict[str, str]:
+    import hashlib
+
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_root_symlink_is_rejected_before_external_target_is_touched(
+    tmp_path, monkeypatch
+) -> None:
+    """Resolving a root symlink before rejecting it can redirect every write."""
+    _forbid_external_providers(monkeypatch)
+    from scripts.run_local_agent_dry_run import run_local_agent_dry_run
+
+    external = tmp_path / "external-root"
+    external.mkdir()
+    sentinel = external / "sentinel.bin"
+    sentinel.write_bytes(b"do-not-touch")
+    root_link = tmp_path / "dry-run-link"
+    root_link.symlink_to(external, target_is_directory=True)
+    before = _tree_hashes(external)
+
+    result = run_local_agent_dry_run(
+        root_link, host=StrictSyntheticAgentHost()
+    )
+
+    assert result["status"] == "blocked"
+    assert result["error_code"] == "DRY_RUN.PATH_REPARSE"
+    assert _tree_hashes(external) == before
+    assert not (external / "source").exists()
+
+
+@pytest.mark.parametrize("linked_name", ["source", "runtime", "config", "archive"])
+def test_fixed_child_junction_is_rejected_before_external_writes(
+    tmp_path, monkeypatch, linked_name
+) -> None:
+    """Following a fixed-child junction can expose source or runtime state."""
+    _forbid_external_providers(monkeypatch)
+    from scripts.run_local_agent_dry_run import run_local_agent_dry_run
+
+    root = tmp_path / f"dry-run-{linked_name}"
+    first = run_local_agent_dry_run(root, host=StrictSyntheticAgentHost())
+    assert first["status"] == "needs_review"
+
+    external = tmp_path / f"external-{linked_name}"
+    child = root / linked_name
+    if child.exists():
+        child.rename(external)
+    else:
+        external.mkdir()
+        (external / "sentinel.bin").write_bytes(b"do-not-touch")
+    _make_directory_junction(child, external)
+    before = _tree_hashes(external)
+
+    result = run_local_agent_dry_run(
+        root,
+        host=StrictSyntheticAgentHost(),
+        use_existing_synthetic_source=True,
+        include_archive_binding=linked_name == "archive",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["error_code"] == "DRY_RUN.PATH_REPARSE"
+    assert _tree_hashes(external) == before
+    assert not list(external.rglob("archive_result.json"))
+
+
+@pytest.mark.parametrize(
+    "network_root",
+    [
+        r"\\synthetic-server\synthetic-share\dry-run",  # repo-hygiene: allow=synthetic-path
+        "//synthetic-server/synthetic-share/dry-run",  # repo-hygiene: allow=synthetic-path
+        "smb://synthetic-server/synthetic-share/dry-run",
+        "nfs://synthetic-server/synthetic-share/dry-run",
+        "afp://synthetic-server/synthetic-share/dry-run",
+    ],
+)
+def test_obvious_network_root_is_rejected_before_filesystem_access(
+    monkeypatch, network_root
+) -> None:
+    """Any filesystem call before a lexical network-root block can touch remote I/O."""
+    import scripts.run_local_agent_dry_run as module
+
+    filesystem_calls = []
+
+    def forbidden(*args, **_kwargs):
+        filesystem_calls.append(args)
+        raise AssertionError("network root reached filesystem access")
+
+    monkeypatch.setattr(module.os, "lstat", forbidden)
+    monkeypatch.setattr(module, "Path", forbidden)
+
+    result = module.run_local_agent_dry_run(
+        network_root, host=StrictSyntheticAgentHost()
+    )
+
+    assert result["status"] == "blocked"
+    assert result["error_code"] == "DRY_RUN.ROOT_NETWORK"
+    assert filesystem_calls == []
+
+
+def test_reuse_rejects_forged_source_and_self_authored_marker(
+    tmp_path, monkeypatch
+) -> None:
+    """A marker inside source cannot be the trust anchor for source reuse."""
+    import hashlib
+
+    _forbid_external_providers(monkeypatch)
+    from scripts.run_local_agent_dry_run import run_local_agent_dry_run
+
+    root = tmp_path / "dry-run"
+    first = run_local_agent_dry_run(root, host=StrictSyntheticAgentHost())
+    assert first["status"] == "needs_review"
+
+    source = root / "source"
+    project_code = "".join(("PRJ", "-001"))
+    contract_code = "".join(("CT", "-001"))
+    forged = source / "synthetic-governance.md"
+    forged.write_text(
+        f"# Synthetic governance\n\n项目编号：{project_code}\n合同编号：{contract_code}\n"
+        "伪造内容：marker 不能为自己授权\n",
+        encoding="utf-8",
+    )
+    marker = source / ".local-agent-dry-run.synthetic.v1.json"
+    marker_payload = json.loads(marker.read_text(encoding="utf-8"))
+    marker_payload["hashes"][forged.name] = hashlib.sha256(
+        forged.read_bytes()
+    ).hexdigest()
+    marker.write_text(json.dumps(marker_payload), encoding="utf-8")
+    runtime_before = _tree_hashes(root / "runtime")
+
+    result = run_local_agent_dry_run(
+        root,
+        host=StrictSyntheticAgentHost(),
+        use_existing_synthetic_source=True,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["error_code"] == "DRY_RUN.SOURCE_UNSAFE"
+    assert _tree_hashes(root / "runtime") == runtime_before
+
+
+def test_acceptance_gate_rejects_missing_disabled_ocr_failure_and_cli_is_nonzero(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+    monkeypatch.setattr(
+        DataCleaningTools,
+        "prepare_file_organization_run",
+        lambda _self, _paths: {"status": "success", "failures": []},
+    )
+    from scripts.run_local_agent_dry_run import main
+
+    root = tmp_path / "dry-run"
+    code = main(["--root", str(root)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code != 0
+    assert payload["status"] == "blocked"
+    assert payload["error_code"] == "DRY_RUN.ACCEPTANCE_FAILED"
+
+
+class SourceMutatingHost(StrictSyntheticAgentHost):
+    def __init__(self, source_path: Path) -> None:
+        super().__init__()
+        self.source_path = source_path
+
+    def write_responses(self, request_path: Path, response_path: Path) -> None:
+        super().write_responses(request_path, response_path)
+        self.source_path.write_text("mutated after hand-off", encoding="utf-8")
+
+
+def test_acceptance_gate_rejects_source_hash_change(tmp_path, monkeypatch) -> None:
+    _forbid_external_providers(monkeypatch)
+    from scripts.run_local_agent_dry_run import run_local_agent_dry_run
+
+    root = tmp_path / "dry-run"
+    result = run_local_agent_dry_run(
+        root,
+        host=SourceMutatingHost(root / "source" / "synthetic-governance.md"),
+    )
+
+    assert result["status"] == "blocked"
+    assert result["error_code"] == "DRY_RUN.ACCEPTANCE_FAILED"
+    assert result["hashes_before"] != result["hashes_after"]
+
+
+def test_acceptance_gate_rejects_any_archive_result(tmp_path, monkeypatch) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+    original = DataCleaningTools.execute_archive_plan
+    root = tmp_path / "dry-run"
+
+    def plant_archive_result(self, run_id, confirmed=False):
+        result = original(self, run_id, confirmed=confirmed)
+        artifact = root / "runtime" / "runs" / run_id / "archive_result.json"
+        artifact.write_text('{"executed": false}', encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(
+        DataCleaningTools, "execute_archive_plan", plant_archive_result
+    )
+    from scripts.run_local_agent_dry_run import run_local_agent_dry_run
+
+    result = run_local_agent_dry_run(root, host=StrictSyntheticAgentHost())
+
+    assert result["status"] == "blocked"
+    assert result["error_code"] == "DRY_RUN.ACCEPTANCE_FAILED"
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "verify_file_organization_run",
+        "audit_file_organization_run",
+        "prepare_feedback_form",
+    ],
+)
+def test_acceptance_gate_requires_successful_post_run_checks(
+    tmp_path, monkeypatch, method_name
+) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+    monkeypatch.setattr(
+        DataCleaningTools,
+        method_name,
+        lambda _self, _run_id: {"status": "failed"},
+    )
+    from scripts.run_local_agent_dry_run import run_local_agent_dry_run
+
+    result = run_local_agent_dry_run(
+        tmp_path / method_name, host=StrictSyntheticAgentHost()
+    )
+
+    assert result["status"] == "blocked"
+    assert result["error_code"] == "DRY_RUN.ACCEPTANCE_FAILED"
+
+
+@pytest.mark.parametrize(
+    "counterexample",
+    ["native_status", "invoice_candidate", "review_item", "confirmed_action"],
+)
+def test_acceptance_gate_rejects_invalid_review_only_result(
+    tmp_path, monkeypatch, counterexample
+) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    _forbid_external_providers(monkeypatch)
+    original = DataCleaningTools.resume_agent_judgement_run
+
+    def mutate_result(self, run_id, response_path):
+        result = original(self, run_id, response_path)
+        if counterexample == "native_status":
+            result["candidate_interpretations"][0]["status"] = "success"
+        elif counterexample == "invoice_candidate":
+            invoice = next(
+                item
+                for item in result["candidate_interpretations"]
+                if item["source_ref"]["object_key"] == "synthetic-invoice.pdf"
+            )
+            invoice["business_relation"]["candidate_contract_id"] = "C-999"
+        elif counterexample == "review_item":
+            result["review_queue"]["items"][0]["question"] = ""
+        else:
+            result["archive_actions"][0]["confirmed"] = True
+        return result
+
+    monkeypatch.setattr(
+        DataCleaningTools, "resume_agent_judgement_run", mutate_result
+    )
+    from scripts.run_local_agent_dry_run import run_local_agent_dry_run
+
+    result = run_local_agent_dry_run(
+        tmp_path / counterexample, host=StrictSyntheticAgentHost()
+    )
+
+    assert result["status"] == "blocked"
+    assert result["error_code"] == "DRY_RUN.ACCEPTANCE_FAILED"
+
+
+def test_scan_fixture_is_a_raster_image_only_pdf(tmp_path, monkeypatch) -> None:
+    import fitz
+
+    _forbid_external_providers(monkeypatch)
+    from scripts.run_local_agent_dry_run import run_local_agent_dry_run
+
+    root = tmp_path / "dry-run"
+    result = run_local_agent_dry_run(root, host=StrictSyntheticAgentHost())
+
+    assert result["status"] == "needs_review"
+    with fitz.open(root / "source" / "synthetic-scan.pdf") as scan:
+        assert scan.page_count == 1
+        page = scan[0]
+        assert page.get_text("text").strip() == ""
+        assert page.get_images(full=True)
+        assert page.get_drawings() == []
+
+
+def test_unexpected_cli_failure_redacts_root_from_stderr(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    import scripts.run_local_agent_dry_run as module
+
+    root = tmp_path / "private-dry-run-root"
+
+    def fail_with_sensitive_path(*_args, **_kwargs):
+        raise OSError(f"cannot write {root}")
+
+    monkeypatch.setattr(module, "run_local_agent_dry_run", fail_with_sensitive_path)
+
+    code = module.main(["--root", str(root)])
+    captured = capsys.readouterr()
+
+    assert code != 0
+    assert str(root) not in captured.err
+    assert json.loads(captured.err)["error_code"] == "DRY_RUN.UNEXPECTED"
+
+
+def test_independent_archive_binding_e2e_remains_review_only(
+    tmp_path, monkeypatch
+) -> None:
+    _forbid_external_providers(monkeypatch)
+    from scripts.run_local_agent_dry_run import run_local_agent_dry_run
+
+    root = tmp_path / "dry-run"
+    result = run_local_agent_dry_run(
+        root,
+        host=StrictSyntheticAgentHost(),
+        include_archive_binding=True,
+    )
+
+    assert result["status"] == "needs_review"
+    config = json.loads(
+        (root / "config" / "project-manager.local.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    bindings = {item["binding_id"]: item for item in config["storage_bindings"]}
+    assert set(bindings) == {"dry-run-source", "dry-run-archive"}
+    archive_binding = bindings["dry-run-archive"]
+    archive_root = Path(archive_binding["physical_root"]).resolve()
+    assert archive_binding["roles"] == ["archive_target"]
+    assert archive_binding["readable"] is False
+    assert archive_binding["writable"] is True
+    assert archive_root == (root / "archive").resolve()
+    assert archive_root != (root / "source").resolve()
+    assert archive_root != (root / "runtime").resolve()
+    assert list(archive_root.iterdir()) == []
+    plan = json.loads(
+        next((root / "runtime" / "runs").glob("*/planned_archive_actions.json"))
+        .read_text(encoding="utf-8")
+    )
+    assert plan["actions"]
+    assert all(action["confirmed"] is False for action in plan["actions"])
     assert not list((root / "runtime").rglob("archive_result.json"))

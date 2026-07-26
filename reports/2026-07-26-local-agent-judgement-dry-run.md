@@ -117,3 +117,79 @@ tests. None of the Task 5 files was named in the governance output. Those
 earlier-task files were intentionally left unchanged to preserve this task's
 approved scope; the exact affected files and validator output are recorded in
 the task report.
+
+## Fix round 1: hardened boundaries and executable acceptance gate
+
+The follow-up review findings were resolved without changing the production
+agent-judgement contracts or their tests.
+
+Before any root resolution, existence scan, directory creation, or write, the
+runner now performs lexical network-location rejection and a component-by-
+component reparse audit. On Windows, the audit uses `os.lstat`,
+`st_file_attributes`, and `stat.FILE_ATTRIBUTE_REPARSE_POINT`; it also checks
+`stat.S_ISLNK` for portable symbolic-link coverage. The raw root and each fixed
+child (`source`, `runtime`, `config`, and `archive`) are audited before
+resolution. Every resolved fixed child must be a strict descendant of the
+resolved root. Tests prove that root symlinks and fixed-child junctions cannot
+modify an external sentinel tree or SQLite state.
+
+Obvious network roots are rejected lexically with `DRY_RUN.ROOT_NETWORK` before
+constructing a `Path` or invoking filesystem APIs. Covered forms are UNC,
+forward-slash UNC, SMB, NFS, and AFP.
+
+Synthetic-source reuse no longer treats the source-owned marker as its trust
+anchor. The marker remains an integrity memo, while authorization is bound to
+deterministic normalized content defined in the runner's code trust domain:
+exact Markdown and XML; exact DOCX paragraphs without tables or inline shapes;
+exact XLSX workbook, sheet, and cell values without external links; exact PDF
+text/image structure; and exact raster pixel content for the scan. A forged
+file accompanied by a matching forged marker is rejected as
+`DRY_RUN.SOURCE_UNSAFE` before runtime changes.
+
+A single acceptance gate now controls every `needs_review` success response.
+It requires all five native formats to be `needs_review`, the scan failure to
+be `OCR.CAPABILITY_DISABLED`, the invoice candidate to be `C-001`, source
+hashes to remain identical, review items to be non-empty and valid, verify,
+audit, and feedback stages to complete, returned and persisted archive actions
+to remain non-empty with every `confirmed` flag exactly `false`, and no
+`archive_result.json` anywhere under runtime. Any counterexample returns
+`DRY_RUN.ACCEPTANCE_FAILED`, and the CLI exits non-zero.
+
+The scan fixture is now a real raster image-only PDF: one 64-by-64 RGB image is
+embedded across the page, with no text layer or vector drawings. Unexpected
+CLI exceptions emit only `DRY_RUN.UNEXPECTED` to stderr and do not expose the
+physical root. A separate end-to-end case exercises the independent
+`dry-run-archive` binding and proves that it remains empty and review-only.
+
+### Fix-round TDD evidence
+
+Each class was driven from a focused failing test to a focused passing test:
+
+- Reparse boundary: `5 failed` to `5 passed` (root symlink plus
+  `source`/`runtime`/`config`/`archive` junctions).
+- Network root: `5 failed` to `5 passed` (UNC, forward UNC, SMB, NFS, AFP),
+  with a fail-fast filesystem spy.
+- Reuse trust domain: forged file plus forged marker produced `1 failed`, then
+  forged rejection and legitimate reuse produced `2 passed`.
+- Acceptance gate: all ten scan/hash/archive/check/review counterexamples first
+  produced `10 failed`, then `10 passed`.
+- Raster, stderr, and archive binding: raster and stderr first produced
+  `2 failed, 1 passed`, then the complete focused set (including reuse)
+  produced `4 passed`.
+
+Fresh focused and required regression results:
+
+```text
+python.exe -X utf8 -B -m pytest tests/integration/test_local_agent_judgement_dry_run.py -q
+31 passed in 8.82s
+
+python.exe -X utf8 -B -m pytest tests/integration/test_local_agent_judgement_dry_run.py tests/integration/test_business_judgement_usable_slice.py tests/scripts/test_prepare_business_file_run.py -q
+46 passed in 10.57s
+```
+
+The first fix-round repository governance run exposed three Task 5 static
+findings in addition to the six known baseline findings. Synthetic identifiers
+were then constructed without embedding unmarked business-like literals, and
+synthetic absolute-path test vectors received the repository's audited inline
+exemption. Fresh `repository` and `all` runs returned only the same six
+pre-existing findings; neither command named a Task 5 file.
