@@ -7,6 +7,7 @@ confirms an archive plan. OCR is deliberately disabled for this entry point.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -19,6 +20,8 @@ from app_bootstrap.composition import build_runtime_adapters
 from integrations.business_context import JsonBusinessContextProvider
 from integrations.llm import OpenAICompatibleInterpreter
 from ocr.providers import DisabledOcrProvider
+from contracts.agent_judgement import AgentJudgementSchemaError, validate_run_id
+from contracts.archive_run_artifacts import ArchiveRunArtifactError, strict_json_load, validate_task5_collection_artifact
 from platform_core import load_app_settings
 from platform_core.storage_bindings import StorageBindingError
 from services.agent_judgement_gateway import AgentJudgementGateway
@@ -85,6 +88,84 @@ def _validate_sources(registry: Any, source_binding_id: str, files: Sequence[str
     return validated
 
 
+def _agent_manifest_entries(run_dir: str, run_id: str) -> list[dict[str, Any]]:
+    try:
+        validated_run_id = validate_run_id(run_id)
+        manifest = strict_json_load(
+            str(Path(run_dir) / "input_manifest.json")
+        )
+        validate_task5_collection_artifact(
+            manifest, kind="input_manifest", run_id=validated_run_id,
+        )
+        entries = manifest["files"]
+        binding_ids = {
+            item["source_ref"]["binding_id"]
+            for item in entries
+        }
+        if len(binding_ids) != 1:
+            raise ValueError("agent manifest source binding")
+        return entries
+    except (
+        AgentJudgementSchemaError,
+        ArchiveRunArtifactError,
+        OSError,
+        TypeError,
+        ValueError,
+        KeyError,
+    ) as exc:
+        raise InputBindingError("AGENT_JUDGEMENT.RUN_INPUT_INVALID") from exc
+
+
+def _agent_manifest_source_binding(entries: Sequence[dict[str, Any]]) -> str:
+    binding_ids = {item["source_ref"]["binding_id"] for item in entries}
+    if len(binding_ids) != 1:
+        raise InputBindingError("AGENT_JUDGEMENT.RUN_INPUT_INVALID")
+    return next(iter(binding_ids))
+
+
+def _validate_agent_resume_sources(
+    tools: DataCleaningTools,
+    registry: Any,
+    source_binding_id: str,
+    files: Sequence[str],
+    run_id: str,
+) -> str:
+    files = _validate_sources(registry, source_binding_id, files)
+    try:
+        run_dir = tools._resolve_archive_run_dir(validate_run_id(run_id))
+        entries = _agent_manifest_entries(run_dir, run_id)
+        if len(files) != len(entries):
+            raise ValueError("agent manifest file count")
+        for path, entry in zip(files, entries):
+            reference = registry.document_ref_from_path(path)
+            source_ref = {
+                "storage_provider": reference.storage_provider,
+                "object_key": reference.object_key,
+                "logical_uri": reference.logical_uri,
+                "binding_id": reference.binding_id,
+            }
+            if (
+                source_ref != entry["source_ref"]
+                or hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                != entry["content_hash"]
+            ):
+                raise ValueError("agent manifest source mismatch")
+        manifest_binding = _agent_manifest_source_binding(entries)
+        if manifest_binding != source_binding_id:
+            raise ValueError("agent manifest binding mismatch")
+        return manifest_binding
+    except (
+        AgentJudgementSchemaError,
+        ArchiveRunArtifactError,
+        OSError,
+        StorageBindingError,
+        TypeError,
+        ValueError,
+        KeyError,
+    ) as exc:
+        raise InputBindingError("AGENT_JUDGEMENT.RUN_INPUT_INVALID") from exc
+
+
 def _summary(*, prepared: dict[str, Any], verification: dict[str, Any], audit: dict[str, Any], feedback: dict[str, Any], archive: dict[str, Any], source_binding: str, target_binding: str) -> dict[str, Any]:
     failures = prepared.get("failures") if isinstance(prepared.get("failures"), list) else []
     failure_codes = sorted({str(item.get("blocked_reason", "DOCUMENT_PROCESSING.BLOCKED")) for item in failures if isinstance(item, dict)})
@@ -106,7 +187,7 @@ def _summary(*, prepared: dict[str, Any], verification: dict[str, Any], audit: d
     }
 
 
-def _agent_summary(*, result: dict[str, Any], source_binding: str, target_binding: str) -> dict[str, Any]:
+def _agent_summary(*, result: dict[str, Any], source_binding: str) -> dict[str, Any]:
     """Return only host-safe identifiers and status for an agent-gateway result."""
     status = str(result.get("status", "blocked"))
     payload = {
@@ -115,7 +196,7 @@ def _agent_summary(*, result: dict[str, Any], source_binding: str, target_bindin
         "interpreter_mode": "agent",
         "run_id": str(result.get("run_id", "")),
         "source_binding": source_binding,
-        "target_binding": target_binding or None,
+        "target_binding": None,
         "artifacts": sorted((result.get("artifacts") or {}).keys()),
         "archive_execution": {"status": "", "confirmed": False},
     }
@@ -153,6 +234,9 @@ def main(argv: Sequence[str] | None = None, *, interpreter_factory: Callable[[],
         ):
             _emit(_capability_block(interpreter_mode="agent"))
             return 2
+        if args.interpreter_mode == "disabled":
+            _emit(_capability_block(interpreter_mode="disabled"))
+            return 2
         settings = load_app_settings(config_file=args.config)
         adapters = build_runtime_adapters(settings)
         registry = adapters.storage_binding_registry
@@ -160,13 +244,7 @@ def main(argv: Sequence[str] | None = None, *, interpreter_factory: Callable[[],
             raise InputBindingError("SOURCE_BINDING.INVALID")
         _source_binding(registry, args.source_binding)
         _target_binding(registry, args.target_binding)
-        if args.interpreter_mode != "agent" or not args.resume_run:
-            files = _validate_sources(registry, args.source_binding, args.files)
-        else:
-            files = []
-        if args.interpreter_mode == "disabled":
-            _emit(_capability_block(interpreter_mode="disabled"))
-            return 2
+        files = _validate_sources(registry, args.source_binding, args.files)
         context = JsonBusinessContextProvider(args.context, storage_bindings=registry)
         retrieval = RetrievalService(context, adapters.structure_index)
         tool_kwargs = {
@@ -182,16 +260,24 @@ def main(argv: Sequence[str] | None = None, *, interpreter_factory: Callable[[],
                 **tool_kwargs,
                 agent_judgement_gateway=AgentJudgementGateway(),
             )
-            result = (
-                tools.resume_agent_judgement_run(args.resume_run, args.agent_response)
-                if args.resume_run
-                else tools.prepare_agent_judgement_run(files)
-            )
+            if args.resume_run:
+                source_binding = _validate_agent_resume_sources(
+                    tools, registry, args.source_binding, files, args.resume_run,
+                )
+                result = tools.resume_agent_judgement_run(
+                    args.resume_run, args.agent_response,
+                )
+            else:
+                result = tools.prepare_agent_judgement_run(files)
+                source_binding = _agent_manifest_source_binding(
+                    _agent_manifest_entries(
+                        result["artifacts"]["run_dir"], result["run_id"],
+                    )
+                )
             _emit(
                 _agent_summary(
                     result=result,
-                    source_binding=args.source_binding,
-                    target_binding=args.target_binding,
+                    source_binding=source_binding,
                 )
             )
             return 0 if result.get("status") in {"awaiting_agent_judgement", "success", "needs_review"} else 2

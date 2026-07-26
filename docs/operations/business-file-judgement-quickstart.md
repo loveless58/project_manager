@@ -77,13 +77,20 @@ python -X utf8 -B scripts/prepare_business_file_run.py --config <node-local-conf
 
 `--agent-response` is valid only with `--interpreter-mode agent --resume-run`.
 Malformed, missing, disabled, or already-consumed agent exchanges fail closed
-with exit `2`; never retry a consumed run with another response. The response
+with exit `2`; never retry a consumed run with another response. Resume keeps
+the positional source files: provide the same ordered files from the original
+source binding, unchanged. The CLI verifies each logical source reference and
+content hash against the saved input manifest before consuming a response. The response
 can create review artifacts only. It cannot make an archive executable, and the
 CLI never calls an archive gate with `confirmed=True`.
 
 Use `--interpreter-mode disabled` when a model is intentionally unavailable.
-It returns the stable safe block `LLM.CAPABILITY_DISABLED` without invoking or
-falling back to a model.
+After CLI parameter-combination validation it returns the stable safe block
+`LLM.CAPABILITY_DISABLED` directly: it does not load the node configuration,
+build adapters, validate bindings or source files, invoke a model, or fall back
+to another model. A disabled invocation must still include the required CLI
+arguments so argparse can parse it; their paths and binding values are not read
+in this mode.
 
 ## Inspect artifacts
 

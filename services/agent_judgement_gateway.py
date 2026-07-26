@@ -143,8 +143,10 @@ class AgentJudgementGateway:
 
         try:
             return self._response_consumer(run_id, requests, responses)
-        except (ArchiveRunArtifactError, OSError, TypeError, ValueError):
-            return self._blocked(run_id, "AGENT_JUDGEMENT.RESPONSE_INVALID")
+        except ArchiveRunArtifactError as exc:
+            if str(exc) == "agent judgement run already consumed":
+                return self._blocked(run_id, "AGENT_JUDGEMENT.RESPONSE_INVALID")
+            raise
 
     @staticmethod
     def _blocked(run_id: str, blocked_reason: str) -> dict[str, Any]:

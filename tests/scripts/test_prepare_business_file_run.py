@@ -136,6 +136,25 @@ def test_agent_mode_outputs_redacted_handoff_without_model_env(tmp_path, capsys)
     assert str(source) not in stdout and str(config) not in stdout
 
 
+def test_agent_mode_does_not_report_an_invocation_target_binding(tmp_path, capsys):
+    """Reporting an arbitrary --target-binding before a review artifact exists is a bug."""
+    module = _module()
+    config, catalog, source, _, _ = _agent_inputs(tmp_path)
+
+    exit_code = module.main(
+        [
+            "--config", str(config), "--context", str(catalog),
+            "--source-binding", "source", "--target-binding", "archive",
+            "--interpreter-mode", "agent", str(source),
+        ]
+    )
+
+    summary = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert summary["source_binding"] == "source"
+    assert summary["target_binding"] is None
+
+
 def test_agent_resume_rejects_missing_response_without_configured_llm(tmp_path, capsys):
     """Dropping the resume-response guard must remain a capability block."""
     module = _module()
@@ -206,6 +225,29 @@ def test_disabled_mode_blocks_without_model_invocation(tmp_path, capsys):
     assert interpreter_calls == []
 
 
+def test_disabled_mode_blocks_before_loading_config_or_validating_files(tmp_path, capsys):
+    """Moving disabled behind adapter or source validation would re-enable side effects."""
+    module = _module()
+
+    with patch.object(
+        module,
+        "load_app_settings",
+        side_effect=AssertionError("disabled mode must not load runtime adapters"),
+    ):
+        exit_code = module.main(
+            [
+                "--config", str(tmp_path / "missing-config.json"),
+                "--context", str(tmp_path / "missing-catalog.json"),
+                "--source-binding", "invalid", "--interpreter-mode", "disabled",
+                str(tmp_path / "outside-source.md"),
+            ]
+        )
+
+    summary = json.loads(capsys.readouterr().out)
+    assert exit_code == 2
+    assert summary["error_code"] == "LLM.CAPABILITY_DISABLED"
+
+
 def test_agent_resume_creates_review_artifacts_without_executing_archive(tmp_path, capsys):
     """Changing resume to invoke archive execution (or a model) is a safety bug."""
     module = _module()
@@ -264,3 +306,143 @@ def test_agent_resume_creates_review_artifacts_without_executing_archive(tmp_pat
     assert not (run_dir / "archive_result.json").exists()
     assert interpreter_calls == []
     assert str(response_path) not in json.dumps(summary)
+
+
+def test_agent_resume_rejects_source_content_changed_after_prepare(tmp_path, capsys):
+    """Dropping the manifest content-hash comparison would consume a stale response."""
+    module = _module()
+    config, catalog, source, runtime, _ = _agent_inputs(tmp_path)
+    prepare_code = module.main(
+        [
+            "--config", str(config), "--context", str(catalog),
+            "--source-binding", "source", "--interpreter-mode", "agent", str(source),
+        ]
+    )
+    prepared = json.loads(capsys.readouterr().out)
+    assert prepare_code == 0
+    run_dir = runtime / "runs" / prepared["run_id"]
+    requests = json.loads((run_dir / "agent_judgement_requests.json").read_text(encoding="utf-8"))
+    response_path = tmp_path / "agent-response.json"
+    response_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "agent_judgement_responses.v1",
+                "run_id": prepared["run_id"],
+                "responses": [_matching_agent_response(item) for item in requests["requests"]],
+            }
+        ),
+        encoding="utf-8",
+    )
+    source.write_text("changed after prepare", encoding="utf-8")
+
+    resume_code = module.main(
+        [
+            "--config", str(config), "--context", str(catalog),
+            "--source-binding", "source", "--interpreter-mode", "agent",
+            "--resume-run", prepared["run_id"], "--agent-response", str(response_path), str(source),
+        ]
+    )
+
+    summary = json.loads(capsys.readouterr().out)
+    assert resume_code == 2
+    assert summary["error_code"] == "AGENT_JUDGEMENT.RUN_INPUT_INVALID"
+    assert not (run_dir / "agent_judgement_consumption.json").exists()
+
+
+def test_agent_resume_rejects_a_different_source_binding(tmp_path, capsys):
+    """Replacing the prepared binding with a current CLI binding is a bug."""
+    module = _module()
+    config, catalog, source, runtime, _ = _agent_inputs(tmp_path)
+    prepare_code = module.main(
+        [
+            "--config", str(config), "--context", str(catalog),
+            "--source-binding", "source", "--interpreter-mode", "agent", str(source),
+        ]
+    )
+    prepared = json.loads(capsys.readouterr().out)
+    assert prepare_code == 0
+    run_dir = runtime / "runs" / prepared["run_id"]
+    requests = json.loads((run_dir / "agent_judgement_requests.json").read_text(encoding="utf-8"))
+    response_path = tmp_path / "agent-response.json"
+    response_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "agent_judgement_responses.v1",
+                "run_id": prepared["run_id"],
+                "responses": [_matching_agent_response(item) for item in requests["requests"]],
+            }
+        ),
+        encoding="utf-8",
+    )
+    alternate_root = tmp_path / "alternate"
+    alternate_root.mkdir()
+    alternate_source = alternate_root / source.name
+    alternate_source.write_bytes(source.read_bytes())
+    config_payload = json.loads(config.read_text(encoding="utf-8"))
+    config_payload["storage_bindings"].append(
+        {
+            "binding_id": "alternate", "provider": "local", "node_id": "test-node",
+            "logical_root": "business://alternate/", "physical_root": str(alternate_root),
+            "roles": ["source"], "readable": True, "writable": False,
+        }
+    )
+    config.write_text(json.dumps(config_payload), encoding="utf-8")
+
+    resume_code = module.main(
+        [
+            "--config", str(config), "--context", str(catalog),
+            "--source-binding", "alternate", "--interpreter-mode", "agent",
+            "--resume-run", prepared["run_id"], "--agent-response", str(response_path), str(alternate_source),
+        ]
+    )
+
+    summary = json.loads(capsys.readouterr().out)
+    assert resume_code == 2
+    assert summary["error_code"] == "AGENT_JUDGEMENT.RUN_INPUT_INVALID"
+    assert not (run_dir / "agent_judgement_consumption.json").exists()
+
+
+def test_agent_resume_maps_response_consumer_os_error_to_unexpected(tmp_path, capsys):
+    """Converting transaction I/O failure into a validation block is a bug."""
+    module = _module()
+    config, catalog, source, runtime, _ = _agent_inputs(tmp_path)
+    prepare_code = module.main(
+        [
+            "--config", str(config), "--context", str(catalog),
+            "--source-binding", "source", "--interpreter-mode", "agent", str(source),
+        ]
+    )
+    prepared = json.loads(capsys.readouterr().out)
+    assert prepare_code == 0
+    run_dir = runtime / "runs" / prepared["run_id"]
+    requests = json.loads((run_dir / "agent_judgement_requests.json").read_text(encoding="utf-8"))
+    response_path = tmp_path / "agent-response.json"
+    response_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "agent_judgement_responses.v1",
+                "run_id": prepared["run_id"],
+                "responses": [_matching_agent_response(item) for item in requests["requests"]],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    with patch.object(
+        DataCleaningTools,
+        "_complete_agent_judgement_responses",
+        side_effect=OSError("synthetic disk full"),
+    ):
+        resume_code = module.main(
+            [
+                "--config", str(config), "--context", str(catalog),
+                "--source-binding", "source", "--interpreter-mode", "agent",
+                "--resume-run", prepared["run_id"], "--agent-response", str(response_path), str(source),
+            ]
+        )
+
+    summary = json.loads(capsys.readouterr().out)
+    assert resume_code == 1
+    assert summary["error_code"] == "BUSINESS_FILE_RUN.UNEXPECTED"

@@ -247,6 +247,27 @@ def test_resume_accepts_only_exact_response_and_keeps_confirmed_false(tmp_path: 
     assert not (Path(prepared["artifacts"]["run_dir"]) / "archive_result.json").exists()
 
 
+def test_resume_propagates_response_consumer_os_error_after_validation(
+    tmp_path: Path,
+) -> None:
+    """A post-validation transaction I/O failure is not an invalid agent response."""
+    from services.agent_judgement_gateway import AgentJudgementGateway
+
+    _, prepared = prepared_agent_run(tmp_path)
+    run_dir = prepared["artifacts"]["run_dir"]
+
+    def fail_after_validation(*_args: object) -> dict[str, Any]:
+        raise OSError("synthetic disk full")
+
+    gateway = AgentJudgementGateway(
+        run_dir_resolver=lambda _run_id: run_dir,
+        response_consumer=fail_after_validation,
+    )
+
+    with pytest.raises(OSError, match="synthetic disk full"):
+        gateway.resume_run(prepared["run_id"], write_matching_agent_responses(prepared))
+
+
 def test_tampered_response_keeps_all_existing_artifacts_byte_identical(tmp_path: Path) -> None:
     tools, prepared = prepared_agent_run(tmp_path)
     before = artifact_bytes(prepared["artifacts"])
