@@ -273,3 +273,81 @@ def test_invalid_internal_project_classification_is_review_pending():
     assert "invalid_document_classification" in decision["blockers"]
     assert "invalid_classification_confidence" in decision["blockers"]
     assert "invalid_requires_review" in decision["blockers"]
+
+
+def test_english_invoice_path_context_is_excluded_from_public_outputs(tmp_path):
+    """Project-path enrichment must never turn an invoice into a project document."""
+    import json
+    from docx import Document
+    from pathlib import Path
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    source = (
+        tmp_path
+        / "项目执行"
+        / "合成项目001"
+        / "原始文件"
+        / "invoice.docx"
+    )
+    source.parent.mkdir(parents=True)
+    document = Document()
+    for paragraph in (
+        "Invoice",
+        "Invoice Number: SYN-INVOICE-PATH-001",
+        "项目名称：合成项目999",
+    ):
+        document.add_paragraph(paragraph)
+    document.save(source)
+    project_fields = {
+        "project_name",
+        "lifecycle_stage",
+        "bid_status",
+        "registration_status",
+        "closed_reason_type",
+    }
+    tools = DataCleaningTools(workspace_dir=str(tmp_path / "runtime"))
+
+    extracted = tools.extract_document(str(source))
+    evidence = tools.build_evidence_pack(str(source), extracted=extracted)
+    structured = tools.extract_structured_business_output(file_paths=[str(source)])
+    structured_output = Path(structured["artifacts"]["structured_business_output"])
+    structured_payload = json.loads(structured_output.read_text(encoding="utf-8"))
+    structured_document = structured_payload["documents"][0]
+    ledger_projection = tools.process_documents_to_ledger([str(source)])
+    ledger_output = Path(ledger_projection["structured_outputs"][0])
+    ledger_artifact = json.loads(ledger_output.read_text(encoding="utf-8"))
+    prepared = tools.prepare_file_organization_run([str(source)])
+    prepared_output = Path(prepared["structured_outputs"][0])
+    prepared_artifact = json.loads(prepared_output.read_text(encoding="utf-8"))
+    action = prepared["archive_actions"][0]
+
+    assert ledger_projection["project_name"] != "合成项目001"
+    assert extracted["document_type"] == "invoice"
+    assert extracted["classification"]["business_domain"] == "finance"
+    assert extracted["classification"]["requires_review"] is True
+    assert extracted["classification"]["project_phase"] is None
+    assert extracted["classification"]["archive_phase"] is None
+    assert project_fields.isdisjoint(extracted["fields"])
+    assert evidence["path_context"] == {
+        "business_phase": "",
+        "project_name": "",
+    }
+    assert project_fields.isdisjoint(evidence["candidate_fields"])
+    assert project_fields.isdisjoint(structured_document["fields"])
+    assert project_fields.isdisjoint(
+        structured_document["accepted_business_facts"]
+    )
+    assert project_fields.isdisjoint(
+        ledger_artifact["accepted_business_facts"]
+    )
+    assert not list((tmp_path / "runtime").rglob("project_ledger.json"))
+    assert structured["project_name"] != "合成项目001"
+    assert project_fields.isdisjoint(
+        prepared_artifact["extraction"]["fields"]
+    )
+    assert project_fields.isdisjoint(
+        prepared_artifact["accepted_business_facts"]
+    )
+    assert action["status"] == "needs_review"
+    assert action["confirmed"] is False
+    assert action["archive_decision"]["classification"]["requires_review"] is True

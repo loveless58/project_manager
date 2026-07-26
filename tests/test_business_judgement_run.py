@@ -137,6 +137,94 @@ def test_preparation_builds_review_only_interpretation_and_intent_artifacts(tmp_
     assert interpreter.calls == 1
 
 
+def test_prepare_invoice_under_project_path_keeps_strict_artifact_project_free(
+    tmp_path: Path,
+) -> None:
+    from docx import Document
+    from integrations.document_store import DocumentStoreRouter, LocalDocumentStore
+    from services.archive_targets import ArchiveTargetResolver
+    from services.document_interpretation import DocumentInterpretationService
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    class InvoiceInterpreter:
+        name = "fake"
+        model = "fake-model"
+        schema_version = "candidate_document_interpretation.v1"
+        prompt_version = "document_interpretation.v1"
+        policy_version = "document_interpretation_policy.v1"
+
+        def complete_json(self, request):
+            return {
+                "schema_version": self.schema_version,
+                "status": "success",
+                "document_type": "invoice",
+                "fields": {},
+                "relations": [
+                    {
+                        "relation_type": "invoice_contract",
+                        "target_candidate_id": CANDIDATE_ID,
+                    }
+                ],
+                "evidence": [
+                    {
+                        "kind": "business_context",
+                        "candidate_id": CANDIDATE_ID,
+                        "field": "contract_code",
+                    }
+                ],
+                "confidence": 0.94,
+                "interpreter": self.name,
+                "model": self.model,
+                "prompt_version": self.prompt_version,
+                "policy_version": self.policy_version,
+            }
+
+    source_root = tmp_path / "source"
+    source = source_root / "项目执行" / "合成项目001" / "原始文件" / "invoice.docx"
+    source.parent.mkdir(parents=True)
+    document = Document()
+    document.add_paragraph("Invoice")
+    document.add_paragraph("Invoice Number: SYN-INVOICE-STRICT-001")
+    document.add_paragraph("项目名称：合成项目999")
+    document.save(source)
+    archive_root = tmp_path / "archive"
+    archive_root.mkdir()
+    registry = StorageBindingRegistry([
+        _binding("source", source_root, ("source",)),
+        _binding(
+            "archive", archive_root, ("archive_target",),
+            readable=False, writable=True,
+        ),
+    ])
+    router = DocumentStoreRouter(
+        registry, {"source": LocalDocumentStore(source_root)}
+    )
+    retrieval = StaticRetrieval(_matched_context())
+    interpretation = DocumentInterpretationService(
+        retrieval, InvoiceInterpreter()
+    )
+    tools = DataCleaningTools(
+        workspace_dir=str(tmp_path / "runtime"),
+        storage_binding_registry=registry,
+        document_store_router=router,
+        retrieval_service=retrieval,
+        interpretation_service=interpretation,
+        archive_target_resolver=ArchiveTargetResolver(registry),
+    )
+
+    result = tools.prepare_file_organization_run([str(source)])
+    artifact = json.loads(Path(result["structured_outputs"][0]).read_text(encoding="utf-8"))
+
+    assert artifact["document_type"] == "invoice"
+    assert "project_name" not in artifact["candidate_fields"]
+    assert "lifecycle_stage" not in artifact["candidate_fields"]
+    assert artifact["classification"]["business_domain"] == "finance"
+    assert artifact["classification"]["requires_review"] is True
+    assert result["candidate_interpretations"][0]["status"] == "needs_review"
+    assert result["archive_actions"][0]["status"] == "needs_review"
+    assert result["archive_actions"][0]["confirmed"] is False
+
+
 def test_runtime_workspace_must_stay_outside_storage_bindings(tmp_path: Path) -> None:
     from services.archive_targets import ArchiveTargetResolver
     from tools.data_cleaning_tools import DataCleaningTools

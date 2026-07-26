@@ -159,6 +159,13 @@ CLASSIFICATION_KEYWORDS = {
 }
 
 _INVOICE_DOCUMENT_TYPES = frozenset({"发票", "invoice"})
+_PROJECT_PATH_CONTEXT_FIELDS = frozenset({
+    "project_name",
+    "lifecycle_stage",
+    "bid_status",
+    "registration_status",
+    "closed_reason_type",
+})
 
 
 def _is_invoice_document_type(document_type: object) -> bool:
@@ -1080,14 +1087,17 @@ class DataCleaningTools:
         document_type = document_type_hint or self._classify_text_document(file_path, text)
         phase = self._business_phase_from_path(file_path)
         is_invoice = _is_invoice_document_type(document_type)
+        classification_phase = None if is_invoice else phase or None
         domain = "finance" if is_invoice else ("bid_project" if phase or document_type != "未分类" or "项目名称" in text else "unknown")
-        requires_review = domain == "unknown" or (is_invoice and not phase)
-        return DocumentClassification(document_type, domain, phase or None, phase or None, 0.9 if document_type != "未分类" else 0.3, [f"filename:{filename}"], requires_review).payload()
+        requires_review = domain == "unknown" or is_invoice
+        return DocumentClassification(document_type, domain, classification_phase, classification_phase, 0.9 if document_type != "未分类" else 0.3, [f"filename:{filename}"], requires_review).payload()
     def _classify_text_document(self, file_path: str, text: str) -> str:
         filename = os.path.basename(file_path)
         haystack = f"{filename}\n{text[:5000]}"
         if filename.startswith("项目记录"):
             return "项目记录"
+        if re.search(r"(?im)^\s*invoice(?:\s|$)", text):
+            return "invoice"
         if "电子发票" in haystack or "发票号码" in haystack:
             return "发票"
         if (
@@ -1172,7 +1182,9 @@ class DataCleaningTools:
                 for key, value in (item.get("fields") or {}).items()
                 if key not in {"document_type", "source_filename"}
             }
-            facts.setdefault("project_name", inferred_project_name)
+            is_invoice = _is_invoice_document_type(item.get("document_type"))
+            if not is_invoice:
+                facts.setdefault("project_name", inferred_project_name)
 
             source_type = self._source_type_for_document(item.get("document_type", ""), item.get("filename", ""))
             accepted_facts, field_quality = filter_business_facts(
@@ -1193,7 +1205,7 @@ class DataCleaningTools:
                 for field in accepted_facts.keys()
             ]
 
-            if accepted_facts:
+            if accepted_facts and not is_invoice:
                 ledger_result = ledger.apply_patch({
                     "project_name": accepted_facts.get("project_name", inferred_project_name),
                     "source_type": source_type,
@@ -1205,7 +1217,7 @@ class DataCleaningTools:
             else:
                 ledger_result = self._archive_only_ledger_result(
                     inferred_project_name,
-                    {"project_name": inferred_project_name},
+                    accepted_facts if is_invoice else {"project_name": inferred_project_name},
                     evidence,
                 )
 
@@ -1266,15 +1278,25 @@ class DataCleaningTools:
                 "text": text[:4000],
             })
 
+        document_type = extracted.get("document_type", "")
+        is_invoice = _is_invoice_document_type(document_type)
         fields = dict(extracted.get("fields") or {})
-        path_project = self._project_name_from_phase_path(self._path_parts(file_path))
-        if path_project:
-            fields.setdefault("project_name", path_project)
-        path_phase = self._business_phase_from_path(file_path)
-        if path_phase == "项目执行":
-            fields.setdefault("lifecycle_stage", "execution")
-        elif path_phase == "项目丢标":
-            fields.setdefault("lifecycle_stage", "closed")
+        if is_invoice:
+            for field in _PROJECT_PATH_CONTEXT_FIELDS:
+                fields.pop(field, None)
+            path_project = ""
+            path_phase = ""
+        else:
+            path_project = self._project_name_from_phase_path(
+                self._path_parts(file_path)
+            )
+            if path_project:
+                fields.setdefault("project_name", path_project)
+            path_phase = self._business_phase_from_path(file_path)
+            if path_phase == "项目执行":
+                fields.setdefault("lifecycle_stage", "execution")
+            elif path_phase == "项目丢标":
+                fields.setdefault("lifecycle_stage", "closed")
 
         return {
             "schema_version": "document.evidence_pack.v1",
@@ -1422,14 +1444,23 @@ class DataCleaningTools:
                 trace.append({"stage": "extract_document", "file": path, "status": failure["status"]})
                 continue
 
-            fields = self._apply_source_path_context(extracted.get("fields") or {}, path)
+            document_type = extracted.get("document_type", "")
+            is_invoice = _is_invoice_document_type(document_type)
+            fields = self._apply_source_path_context(
+                extracted.get("fields") or {}, path, document_type,
+            )
             extracted["fields"] = fields
             evidence_pack = self.build_evidence_pack(path, extracted=extracted)
             evidence_pack["candidate_fields"] = fields
             semantic_structure = self.semantic_structure_document(evidence_pack)
-            inferred_project_name = fields.get("project_name") or self._project_name_from_phase_path(self._path_parts(path)) or project_name or "未命名项目"
+            inferred_project_name = (
+                "待确认"
+                if is_invoice
+                else fields.get("project_name") or self._project_name_from_phase_path(self._path_parts(path)) or project_name or "未命名项目"
+            )
             facts = {key: value for key, value in fields.items() if key not in {"document_type", "source_filename"}}
-            facts.setdefault("project_name", inferred_project_name)
+            if not is_invoice:
+                facts.setdefault("project_name", inferred_project_name)
             extraction_trust = self._business_fact_gate(extracted)
             if not extraction_trust.get("trusted", True):
                 facts = {
@@ -1445,7 +1476,8 @@ class DataCleaningTools:
             )
             field_quality["extraction_trust"] = extraction_trust
             judgement_facts = dict(accepted_facts) if accepted_facts else dict(facts)
-            judgement_facts.setdefault("project_name", inferred_project_name)
+            if not is_invoice:
+                judgement_facts.setdefault("project_name", inferred_project_name)
             business_judgement = BidProjectRuleEngine().evaluate(judgement_facts)
             cases = self._business_cases_for_structured_output(
                 project_name=inferred_project_name,
@@ -2547,11 +2579,20 @@ class DataCleaningTools:
                 continue
 
             extracted_items.append(extracted)
-            fields = self._apply_source_path_context(extracted.get("fields") or {}, path)
+            document_type = extracted.get("document_type", "")
+            is_invoice = _is_invoice_document_type(document_type)
+            fields = self._apply_source_path_context(
+                extracted.get("fields") or {}, path, document_type,
+            )
             extracted["fields"] = fields
-            inferred_project_name = project_name or fields.get("project_name") or "未命名项目"
+            inferred_project_name = (
+                "待确认"
+                if is_invoice
+                else project_name or fields.get("project_name") or "未命名项目"
+            )
             facts = {key: value for key, value in fields.items() if key not in {"document_type", "source_filename"}}
-            facts.setdefault("project_name", inferred_project_name)
+            if not is_invoice:
+                facts.setdefault("project_name", inferred_project_name)
             source_type = self._source_type_for_document(extracted.get("document_type", ""), extracted.get("filename", ""))
             accepted_facts, field_quality = filter_business_facts(
                 facts,
@@ -2573,6 +2614,11 @@ class DataCleaningTools:
             ]
 
             fact_gate = self._business_fact_gate(extracted)
+            if is_invoice:
+                fact_gate = {
+                    "trusted": False,
+                    "blocked_reason": "invoice_requires_review",
+                }
             if fact_gate["trusted"] and accepted_facts:
                 ledger_result = ledger.apply_patch({
                     "project_name": accepted_facts.get("project_name", inferred_project_name),
@@ -2590,17 +2636,21 @@ class DataCleaningTools:
                         "blocked_reason": "no_accepted_business_facts",
                     }
                 extracted["business_fact_gate"] = fact_gate
-                quality_reviews.append({
+                quality_review = {
                     "type": "extraction_quality_review",
                     "severity": "medium",
-                    "project_name": inferred_project_name,
                     "file": path,
                     "reason": fact_gate["blocked_reason"],
                     "field_quality": field_quality,
                     "extract_method": extracted.get("extract_method", ""),
                     "recommended_action": "人工复核提取文本后再写入业务账本",
-                })
-                archive_only_facts = dict(accepted_facts) if accepted_facts else {"project_name": inferred_project_name}
+                }
+                if not is_invoice:
+                    quality_review["project_name"] = inferred_project_name
+                quality_reviews.append(quality_review)
+                archive_only_facts = dict(accepted_facts)
+                if not archive_only_facts and not is_invoice:
+                    archive_only_facts["project_name"] = inferred_project_name
                 ledger_result = self._archive_only_ledger_result(inferred_project_name, archive_only_facts, evidence)
 
             extracted_path = os.path.join(extracted_dir, f"{self._structured_output_stem(path)}_extracted.json")
@@ -4003,8 +4053,17 @@ class DataCleaningTools:
                 phase = "项目投标"
         return os.path.join(self.project_files_dir, phase)
 
-    def _apply_source_path_context(self, fields: Dict[str, Any], source_path: str) -> Dict[str, Any]:
+    def _apply_source_path_context(
+        self,
+        fields: Dict[str, Any],
+        source_path: str,
+        document_type: str = "",
+    ) -> Dict[str, Any]:
         enriched = dict(fields)
+        if _is_invoice_document_type(document_type):
+            for field in _PROJECT_PATH_CONTEXT_FIELDS:
+                enriched.pop(field, None)
+            return enriched
         parts_list = self._path_parts(source_path)
         parts = set(parts_list)
         project_name_from_path = self._project_name_from_phase_path(parts_list)
@@ -4538,6 +4597,7 @@ class DataCleaningTools:
             "schema_version": "archive_action.v1",
             "run_id": run_id,
             "status": "already_archived" if already_archived and not blockers else ("ready" if not blockers else "needs_review"),
+            "confirmed": False,
             "source_file": source_file,
             "project_name": project_name,
             "document_type": document_type,
