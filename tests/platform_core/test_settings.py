@@ -384,3 +384,75 @@ def test_duplicate_storage_binding_id_is_rejected_while_loading_settings(tmp_pat
         match=r"storage_bindings\[1\].binding_id duplicates storage_bindings\[0\].binding_id",
     ):
         load_app_settings(config_file=config_file, environ={})
+
+@pytest.mark.parametrize(
+    ("binding_id", "roles", "readable", "writable"),
+    [
+        ("source", ["source"], True, False),
+        ("archive", ["archive_target"], False, True),
+    ],
+)
+@pytest.mark.parametrize(
+    ("field_name", "protected_name"),
+    [
+        ("runtime_workspace", "runtime"),
+        ("projection_root", "projection"),
+        ("sqlite_path", "state.sqlite3"),
+    ],
+)
+@pytest.mark.parametrize("placement", ["equal", "descendant"])
+def test_storage_bindings_cannot_be_inside_runtime_owned_paths(
+    tmp_path,
+    binding_id,
+    roles,
+    readable,
+    writable,
+    field_name,
+    protected_name,
+    placement,
+):
+    """Allowing a binding below runtime lets runtime writers mutate business data."""
+    from platform_core.settings import SettingsError, load_app_settings
+
+    runtime = tmp_path / "runtime"
+    projection = tmp_path / "projection"
+    sqlite_path = tmp_path / "state.sqlite3"
+    protected = {
+        "runtime_workspace": runtime,
+        "projection_root": projection,
+        "sqlite_path": sqlite_path,
+    }[field_name]
+    binding_root = protected if placement == "equal" else protected / "business-data"
+    config_file = tmp_path / "project-manager.local.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "deployment_mode": "local",
+                "business_root": str(tmp_path / "legacy-business"),
+                "runtime_workspace": str(runtime),
+                "database": {"provider": "sqlite", "sqlite_path": str(sqlite_path)},
+                "providers": {"projection_root": str(projection)},
+                "storage_bindings": [
+                    {
+                        "binding_id": binding_id,
+                        "provider": "local",
+                        "node_id": "node-a",
+                        "logical_root": f"business://{binding_id}/",
+                        "physical_root": str(binding_root),
+                        "roles": roles,
+                        "readable": readable,
+                        "writable": writable,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    expected_message = (
+        rf"{field_name} must not be inside storage binding"
+        if placement == "equal"
+        else rf"storage binding must not be inside {field_name}"
+    )
+    with pytest.raises(SettingsError, match=expected_message):
+        load_app_settings(config_file=config_file, environ={})

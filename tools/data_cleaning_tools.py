@@ -90,6 +90,7 @@ from ledger import ProjectLedger
 from ocr import normalize_ocr_result
 from ocr import provider_registry
 from platform_core.models import BusinessContextEvidence, BusinessContextQuery, DocumentRef
+from platform_core.path_locality import is_path_within
 from platform_core.storage_bindings import (
     AmbiguousStorageBindingError,
     StorageBindingNotFoundError,
@@ -375,11 +376,12 @@ class DataCleaningTools:
         if self.storage_binding_registry is not None:
             workspace_path = Path(self.workspace_dir).expanduser().resolve()
             for binding in self.storage_binding_registry.bindings:
-                try:
-                    workspace_path.relative_to(binding.physical_root)
-                except ValueError:
-                    continue
-                raise ValueError("runtime workspace must be outside storage bindings")
+                if is_path_within(workspace_path, binding.physical_root):
+                    raise ValueError("runtime workspace must be outside storage bindings")
+                if is_path_within(binding.physical_root, workspace_path):
+                    raise ValueError(
+                        "storage binding must be outside runtime workspace"
+                    )
 
     def scan_raw_files(self, source_dir: Optional[str] = None) -> Dict:
         """扫描原始文件目录，返回文件列表"""

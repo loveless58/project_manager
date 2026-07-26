@@ -150,3 +150,51 @@ def test_runtime_does_not_create_a_router_store_for_unreadable_binding(tmp_path)
     adapters = build_runtime_adapters(settings)
 
     assert adapters.document_store_router.stores_by_binding == {}
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["runtime_workspace", "projection_root", "sqlite_path"],
+)
+def test_runtime_composition_rejects_binding_nested_in_runtime_owned_path(
+    tmp_path,
+    field_name,
+):
+    """Hand-built AppSettings must not bypass Settings path isolation."""
+    from dataclasses import replace
+
+    from app_bootstrap.composition import build_runtime_adapters
+    from platform_core.settings import SettingsError
+    from platform_core.storage_bindings import StorageBinding
+
+    settings = load_app_settings(
+        config_file="",
+        environ={
+            "PROJECT_MANAGER_BUSINESS_ROOT": str(tmp_path / "business"),
+            "PROJECT_MANAGER_WORKSPACE_DIR": str(tmp_path / "runtime"),
+            "PROJECT_MANAGER_SQLITE_PATH": str(tmp_path / "state.sqlite3"),
+            "PROJECT_MANAGER_PROJECTION_ROOT": str(tmp_path / "projection"),
+        },
+    )
+    protected = {
+        "runtime_workspace": settings.runtime_workspace,
+        "projection_root": settings.providers.projection_root,
+        "sqlite_path": settings.database.sqlite_path,
+    }[field_name]
+    assert protected is not None
+    binding = StorageBinding(
+        "source",
+        "local",
+        "node-a",
+        "business://source/",
+        protected / "source",
+        ("source",),
+        True,
+        False,
+    )
+    settings = replace(settings, storage_bindings=(binding,))
+
+    with pytest.raises(
+        SettingsError,
+        match=rf"storage binding must not be inside {field_name}",
+    ):
+        build_runtime_adapters(settings)

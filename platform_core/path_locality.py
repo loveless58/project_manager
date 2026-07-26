@@ -32,6 +32,17 @@ def is_obvious_network_location(value: PathLike) -> bool:
     return raw.startswith((r"\\", "//"))
 
 
+def is_path_within(path: PathLike, root: PathLike) -> bool:
+    """Return whether *path* equals or descends from canonical *root*."""
+    candidate = Path(path).expanduser().resolve()
+    canonical_root = Path(root).expanduser().resolve()
+    try:
+        candidate.relative_to(canonical_root)
+    except ValueError:
+        return False
+    return True
+
+
 def ensure_node_local_path(
     *,
     field_name: str,
@@ -66,4 +77,5 @@ __all__ = [
     "NodeLocalPathError",
     "ensure_node_local_path",
     "is_obvious_network_location",
+    "is_path_within",
 ]

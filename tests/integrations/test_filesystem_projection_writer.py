@@ -114,3 +114,29 @@ def test_projection_writer_removes_temporary_file_when_replacement_fails(tmp_pat
         FilesystemProjectionWriter(tmp_path).write(request)
 
     assert list(target.parent.glob("*.tmp")) == []
+
+def test_projection_writer_cannot_overwrite_a_protected_source_sentinel(
+    tmp_path: Path,
+) -> None:
+    """Dropping protected-root validation would replace business source bytes."""
+    from integrations.projections.filesystem_writer import (
+        FilesystemProjectionWriter,
+        ProjectionPathError,
+    )
+
+    projection_root = tmp_path / "projection"
+    source_root = projection_root / "source"
+    source_root.mkdir(parents=True)
+    sentinel = source_root / "sentinel.md"
+    original = b"source-owned-sentinel"
+    sentinel.write_bytes(original)
+    request = ProjectionRequest(
+        "markdown", "source/sentinel.md", "runtime replacement", "text/markdown"
+    )
+
+    with pytest.raises(ProjectionPathError, match="protected storage root"):
+        FilesystemProjectionWriter(
+            projection_root, protected_roots=(source_root,)
+        ).write(request)
+
+    assert sentinel.read_bytes() == original

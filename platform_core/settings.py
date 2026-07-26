@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
 
-from .path_locality import NodeLocalPathError, ensure_node_local_path
+from .path_locality import (
+    NodeLocalPathError,
+    ensure_node_local_path,
+    is_path_within,
+)
 from .storage_bindings import StorageBinding
 
 
@@ -285,12 +289,27 @@ def _ensure_outside_storage_bindings(
     storage_bindings: tuple[StorageBinding, ...],
 ) -> Path:
     for binding in storage_bindings:
-        try:
-            path.relative_to(binding.physical_root)
-        except ValueError:
-            continue
-        raise SettingsError(f"{field_name} must not be inside storage binding")
+        if is_path_within(path, binding.physical_root):
+            raise SettingsError(f"{field_name} must not be inside storage binding")
+        if is_path_within(binding.physical_root, path):
+            raise SettingsError(f"storage binding must not be inside {field_name}")
     return path
+
+
+def validate_runtime_storage_isolation(settings: "AppSettings") -> None:
+    """Reject manually assembled settings that overlap runtime and business data."""
+    protected_paths = [
+        ("runtime_workspace", settings.runtime_workspace),
+        ("projection_root", settings.providers.projection_root),
+    ]
+    if settings.database.provider == "sqlite" and settings.database.sqlite_path is not None:
+        protected_paths.append(("sqlite_path", settings.database.sqlite_path))
+    for field_name, path in protected_paths:
+        _ensure_outside_storage_bindings(
+            field_name=field_name,
+            path=path,
+            storage_bindings=settings.storage_bindings,
+        )
 
 def _pick(
     explicit: Any,

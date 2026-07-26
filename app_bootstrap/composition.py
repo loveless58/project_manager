@@ -12,7 +12,7 @@ from integrations.projections import FilesystemProjectionWriter
 from platform_core.models import CapabilityReport, StructureIndexRequest, StructureIndexResult
 from platform_core.ports import DocumentStore, ProjectionWriter, StructureIndex
 from platform_core.registry import AdapterKind, AdapterRegistry
-from platform_core.settings import AppSettings
+from platform_core.settings import AppSettings, validate_runtime_storage_isolation
 from platform_core.storage_bindings import StorageBindingRegistry
 from services.archive_targets import ArchiveTargetResolver
 
@@ -86,7 +86,10 @@ def build_default_registry() -> AdapterRegistry:
     registry.register(
         AdapterKind.PROJECTION_WRITER,
         "filesystem",
-        lambda settings: FilesystemProjectionWriter(settings.providers.projection_root),
+        lambda settings: FilesystemProjectionWriter(
+            settings.providers.projection_root,
+            protected_roots=tuple(binding.physical_root for binding in settings.storage_bindings),
+        ),
     )
     return registry
 
@@ -97,6 +100,7 @@ def build_runtime_adapters(
 ) -> RuntimeAdapters:
     """Build the adapters configured by ``settings`` without implicit discovery."""
     selected = registry or build_default_registry()
+    validate_runtime_storage_isolation(settings)
     storage_binding_registry = StorageBindingRegistry(settings.storage_bindings)
     stores_by_binding = {
         binding.binding_id: LocalDocumentStore(binding.physical_root)

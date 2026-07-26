@@ -707,3 +707,24 @@ def test_archive_target_resolution_is_explicit_unique_and_never_defaults(
         assert result.candidate_target_binding_ids == ("archive",)
     else:
         assert result.resolved_binding_id == ""
+
+def test_storage_binding_must_stay_outside_runtime_workspace(tmp_path: Path) -> None:
+    """Direct DataCleaningTools construction must reject reverse overlap too."""
+    from services.archive_targets import ArchiveTargetResolver
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    workspace = tmp_path / "runtime"
+    binding_root = workspace / "source"
+    registry = StorageBindingRegistry([
+        _binding("source", binding_root, ("source",)),
+    ])
+
+    with pytest.raises(
+        ValueError,
+        match="storage binding must be outside runtime workspace",
+    ):
+        DataCleaningTools(
+            workspace_dir=str(workspace),
+            storage_binding_registry=registry,
+            archive_target_resolver=ArchiveTargetResolver(registry),
+        )

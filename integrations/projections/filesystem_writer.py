@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Union
 
+from platform_core.path_locality import is_path_within
 from platform_core.models import ProjectionRef, ProjectionRequest
 from platform_core.logical_paths import LogicalPathError, resolve_logical_path
 
@@ -23,8 +24,22 @@ class FilesystemProjectionWriter:
 
     name = "filesystem"
 
-    def __init__(self, root: Union[str, Path]) -> None:
+    def __init__(
+        self,
+        root: Union[str, Path],
+        *,
+        protected_roots: tuple[Union[str, Path], ...] = (),
+    ) -> None:
         self.root = Path(root).expanduser().resolve()
+        self.protected_roots = tuple(
+            Path(path).expanduser().resolve() for path in protected_roots
+        )
+        if any(
+            is_path_within(self.root, protected)
+            or is_path_within(protected, self.root)
+            for protected in self.protected_roots
+        ):
+            raise ProjectionPathError("projection root must not overlap a protected storage root")
 
     def _resolve(self, relative_path: str) -> tuple[Path, str]:
         try:
@@ -35,6 +50,10 @@ class FilesystemProjectionWriter:
                 "non-canonical paths may resolve outside configured root"
             ) from exc
         return target, canonical.value
+        if any(is_path_within(target, protected) for protected in self.protected_roots):
+            raise ProjectionPathError(
+                "projection path must not target a protected storage root"
+            )
 
     def write(self, request: ProjectionRequest) -> ProjectionRef:
         target, logical_path = self._resolve(request.relative_path)
