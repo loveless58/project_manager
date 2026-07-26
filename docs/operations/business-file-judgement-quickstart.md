@@ -1,4 +1,4 @@
-﻿# Safe business-file judgement CLI quickstart
+# Safe business-file judgement CLI quickstart
 
 `prepare_business_file_run.py` creates a reviewable business-file judgement run. It never automatically applies feedback and never physically archives, moves, overwrites, renames, or deletes a source file.
 
@@ -16,15 +16,15 @@ Copy the repository example configuration to a protected local configuration loc
 ```json
 {
   "deployment_mode": "local",
-  "runtime_workspace": "D:\\ProjectManagerRuntime",
+  "runtime_workspace": "<node-local-runtime>",
   "storage_bindings": [
-    {"binding_id": "incoming", "provider": "local", "node_id": "win-ops", "logical_root": "business://incoming/", "physical_root": "E:\\TeamShare\\incoming", "roles": ["source"], "readable": true, "writable": false},
-    {"binding_id": "archive", "provider": "local", "node_id": "win-ops", "logical_root": "business://archive/", "physical_root": "E:\\TeamShare\\archive", "roles": ["archive_target"], "readable": false, "writable": true}
+    {"binding_id": "incoming", "provider": "local", "node_id": "win-ops", "logical_root": "business://incoming/", "physical_root": "<source-mount>", "roles": ["source"], "readable": true, "writable": false},
+    {"binding_id": "archive", "provider": "local", "node_id": "win-ops", "logical_root": "business://archive/", "physical_root": "<archive-mount>", "roles": ["archive_target"], "readable": false, "writable": true}
   ]
 }
 ```
 
-On macOS, a node can map `physical_root` to `/Volumes/TeamShare/incoming`; on a remote Synology node it may be `/volume1/teamshare/incoming`. Both can still use `business://incoming/`, but each must use a node-local runtime. Never put runtime state on SynologyDrive, SMB/NFS, OneDrive, or another sync volume.
+On macOS, a node can map `physical_root` to `<mac-source-mount>`; on a remote Synology node it may be `<synology-source-mount>`. Both can still use `business://incoming/`, but each must use a node-local runtime. Never put runtime state on SynologyDrive, SMB/NFS, OneDrive, or another sync volume.
 
 ## Catalog and LLM environment
 
@@ -41,13 +41,13 @@ $env:LLM_BASE_URL = "https://<approved-endpoint>/v1"
 Windows PowerShell:
 
 ```powershell
-python -X utf8 -B scripts/prepare_business_file_run.py --config C:\ops\project-manager.json --context C:\ops\business_context_catalog.json --source-binding incoming --target-binding archive E:\TeamShare\incoming\contract.md
+python -X utf8 -B scripts/prepare_business_file_run.py --config <node-local-config> --context <node-local-catalog> --source-binding incoming --target-binding archive <bound-source-file>
 ```
 
 macOS or Synology shell:
 
 ```bash
-python3 -X utf8 -B scripts/prepare_business_file_run.py --config /opt/project-manager/config.json --context /opt/project-manager/business_context_catalog.json --source-binding incoming /Volumes/TeamShare/incoming/contract.md
+python3 -X utf8 -B scripts/prepare_business_file_run.py --config /opt/project-manager/config.json --context /opt/project-manager/business_context_catalog.json --source-binding incoming <bound-source-file>
 ```
 
 Exit `0` means review artifacts were prepared; exit `2` means a safe block; exit `1` is an unexpected error. Stdout is redacted JSON: it contains run ID, binding IDs, statuses, failure codes, and artifact names, but never physical paths or credentials.

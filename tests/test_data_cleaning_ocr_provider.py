@@ -357,3 +357,41 @@ def test_scan_blocks_without_easyocr(tmp_path, monkeypatch):
 
     assert result["failures"][0]["blocked_reason"] == "OCR.CAPABILITY_DISABLED"
     assert result["failures"][0]["ocr"]["engine"] == "disabled"
+
+@pytest.mark.parametrize("suffix", [".pdf", ".png", ".jpg"])
+def test_disabled_adapter_short_circuits_all_ocr_probes(tmp_path, suffix):
+    """An explicit disabled adapter must run before every OCR capability probe."""
+    from ocr.provider_registry import extract_pdf_or_image
+    from ocr.providers import DisabledOcrProvider
+
+    source = tmp_path / f"image-only{suffix}"
+    source.write_bytes(b"synthetic image-only fixture")
+    dependency_calls, binary_calls = [], []
+
+    result = extract_pdf_or_image(
+        str(source),
+        ocr_adapter=DisabledOcrProvider().extract,
+        dependency_probe=lambda name: dependency_calls.append(name) or False,
+        binary_probe=lambda name: binary_calls.append(name) or None,
+    )
+
+    assert dependency_calls == []
+    assert binary_calls == []
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "OCR.CAPABILITY_DISABLED"
+
+
+def test_default_image_provider_failure_keeps_ocr_engine_failed(tmp_path):
+    """The legacy no-adapter image fallback remains distinguishable from disabled OCR."""
+    from ocr.provider_registry import extract_pdf_or_image
+
+    source = tmp_path / "image.png"
+    source.write_bytes(b"synthetic image-only fixture")
+    result = extract_pdf_or_image(
+        str(source),
+        dependency_probe=lambda _name: False,
+        binary_probe=lambda _name: None,
+    )
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "ocr_engine_failed"

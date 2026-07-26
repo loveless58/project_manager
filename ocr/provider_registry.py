@@ -29,9 +29,32 @@ def extract_pdf_or_image(
 ) -> Dict:
     """Extract PDF/image content through stable project-level OCR providers."""
     ext = os.path.splitext(file_path)[1].lower()
-    candidates = _engine_candidates(file_path, dependency_probe, binary_probe)
     if ocr_adapter is not None:
-        candidates = []
+        if ext == ".pdf":
+            extracted = _extract_pdf_text_with_pymupdf(file_path)
+            if extracted.get("status") == "success":
+                return _document_success(
+                    file_path,
+                    ext,
+                    extracted.get("text", ""),
+                    "pdf_text",
+                    is_scanned=extracted.get("is_scanned", False),
+                    engine_candidates=[],
+                )
+        ocr = _run_custom_ocr_adapter(file_path, ocr_adapter)
+        if ocr.get("status") == "success":
+            text = ocr.get("text", "") or ""
+            return _document_success(file_path, ext, text, "ocr", ocr=ocr, engine_candidates=[])
+        return _blocked_document(
+            file_path,
+            ext,
+            [],
+            error=ocr.get("error", "OCR adapter failed"),
+            ocr=ocr,
+            blocked_reason=ocr.get("blocked_reason"),
+        )
+
+    candidates = _engine_candidates(file_path, dependency_probe, binary_probe)
 
     if ext == ".ofd":
         sidecar = _find_ocr_sidecar(file_path, extra_extensions=(".xml", ".txt", ".md"))
@@ -72,18 +95,6 @@ def extract_pdf_or_image(
                 engine_candidates=candidates,
             )
 
-    if ocr_adapter is not None:
-        ocr = _run_custom_ocr_adapter(file_path, ocr_adapter)
-        if ocr.get("status") == "success":
-            text = ocr.get("text", "") or ""
-            return _document_success(file_path, ext, text, "ocr", ocr=ocr, engine_candidates=candidates)
-        return _blocked_document(
-            file_path,
-            ext,
-            candidates,
-            error=ocr.get("error", "OCR adapter failed"),
-            ocr=ocr,
-        )
 
     if ext in {".png", ".jpg", ".jpeg"} and dependency_probe("easyocr"):
         ocr = EasyOcrProvider(dependency_probe=dependency_probe).extract(file_path)
@@ -257,10 +268,8 @@ def _blocked_document(
             "blocked_reason": blocked_reason or "ocr_adapter_unavailable",
             "error": error,
         })
-    if blocked_reason is None and ocr.get('blocked_reason'):
-        blocked_reason = ocr['blocked_reason']
     if blocked_reason is None:
-        blocked_reason = 'ocr_engine_failed' if ext in {'.png', '.jpg', '.jpeg'} else 'ocr_adapter_unavailable'
+        blocked_reason = "ocr_engine_failed" if ext in {".png", ".jpg", ".jpeg"} else "ocr_adapter_unavailable"
     return {
         "schema_version": "document.extract.v1",
         "status": "blocked",
