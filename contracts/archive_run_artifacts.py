@@ -12,6 +12,11 @@ from contracts.document_interpretation import (
     DocumentInterpretationSchemaError,
     parse_candidate_document_interpretation,
 )
+from contracts.agent_judgement import (
+    AgentJudgementSchemaError,
+    build_agent_judgement_request,
+    parse_agent_judgement_response,
+)
 from platform_core.models import BusinessContextEvidence
 from platform_core.document_refs import (
     DocumentRefValidationError,
@@ -649,6 +654,77 @@ def validate_task5_collection_artifact(
                 raise ArchiveRunArtifactError("manifest name")
 
 
+
+
+def validate_agent_judgement_requests_artifact(
+    payload: dict[str, Any], *, run_id: str,
+) -> list[dict[str, Any]]:
+    """Validate an ordered, immutable set of local agent requests."""
+    try:
+        validate_json_tree(payload)
+        if (
+            type(payload) is not dict
+            or set(payload) != {"schema_version", "run_id", "requests"}
+            or payload.get("schema_version") != "agent_judgement_requests.v1"
+            or payload.get("run_id") != run_id
+            or type(payload.get("requests")) is not list
+            or not payload["requests"]
+            or len(payload["requests"]) > MAX_COLLECTION
+        ):
+            raise ArchiveRunArtifactError("agent request artifact")
+        requests: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for item in payload["requests"]:
+            if type(item) is not dict:
+                raise ArchiveRunArtifactError("agent request envelope")
+            rebuilt = build_agent_judgement_request(
+                run_id=run_id,
+                request_id=item.get("request_id"),
+                interpretation_request=item.get("interpretation_request"),
+            )
+            if item != rebuilt or item["request_id"] in seen_ids:
+                raise ArchiveRunArtifactError("agent request binding")
+            seen_ids.add(item["request_id"])
+            requests.append(rebuilt)
+        return requests
+    except (AgentJudgementSchemaError, KeyError, TypeError, ValueError):
+        raise ArchiveRunArtifactError("agent request artifact") from None
+
+
+def validate_agent_judgement_responses_artifact(
+    payload: dict[str, Any], *, run_id: str, requests: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Require exact count and order before any response is made observable."""
+    try:
+        validate_json_tree(payload)
+        if (
+            type(payload) is not dict
+            or set(payload) != {"schema_version", "run_id", "responses"}
+            or payload.get("schema_version") != "agent_judgement_responses.v1"
+            or payload.get("run_id") != run_id
+            or type(payload.get("responses")) is not list
+            or len(payload["responses"]) != len(requests)
+            or not requests
+        ):
+            raise ArchiveRunArtifactError("agent response artifact")
+        responses: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for response, request in zip(payload["responses"], requests):
+            if type(response) is not dict or type(request) is not dict:
+                raise ArchiveRunArtifactError("agent response envelope")
+            parsed = parse_agent_judgement_response(response, request=request)
+            if (
+                parsed != response
+                or response.get("request_id") != request.get("request_id")
+                or response.get("request_hash") != request.get("request_hash")
+                or response["request_id"] in seen_ids
+            ):
+                raise ArchiveRunArtifactError("agent response binding")
+            seen_ids.add(response["request_id"])
+            responses.append(parsed)
+        return responses
+    except (AgentJudgementSchemaError, KeyError, TypeError, ValueError):
+        raise ArchiveRunArtifactError("agent response artifact") from None
 def validate_candidate_interpretation(entry: dict[str, Any], run_id: str) -> None:
     validate_json_tree(entry)
     blocked_fields = {
@@ -798,6 +874,8 @@ __all__ = [
     "validate_archive_intent", "validate_candidate_interpretation",
     "validate_extracted_document_artifact", "validate_json_tree",
     "validate_task5_collection_artifact",
+    "validate_agent_judgement_requests_artifact",
+    "validate_agent_judgement_responses_artifact",
 ]
 
 

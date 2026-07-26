@@ -57,6 +57,7 @@ from contracts.archive_run_artifacts import (
     validate_json_tree,
     validate_task5_collection_artifact,
 )
+from contracts.agent_judgement import build_agent_judgement_request
 from contracts.feedback_schema import (
     FeedbackValidationError,
     build_parser_test_candidates,
@@ -87,13 +88,17 @@ from contracts.test_candidate_schema import (
 from ledger import ProjectLedger
 from ocr import normalize_ocr_result
 from ocr import provider_registry
-from platform_core.models import BusinessContextEvidence, BusinessContextQuery
+from platform_core.models import BusinessContextEvidence, BusinessContextQuery, DocumentRef
 from platform_core.storage_bindings import (
     AmbiguousStorageBindingError,
     StorageBindingNotFoundError,
 )
 from services.archive_targets import ArchiveTargetResolution
-from services.document_interpretation import DocumentInterpretationService
+from services.document_interpretation import (
+    DocumentInterpretationService,
+    PreparedDocumentInterpretation,
+)
+from integrations.llm.agent_response_interpreter import AgentResponseInterpreter
 
 
 _FEEDBACK_INPUT_FIELDS = {
@@ -321,6 +326,7 @@ class DataCleaningTools:
         retrieval_service: Any = None,
         interpretation_service: Any = None,
         archive_target_resolver: Any = None,
+        agent_judgement_gateway: Any = None,
     ):
         if workspace_dir is None:
             config = resolve_workspace_config()
@@ -342,6 +348,14 @@ class DataCleaningTools:
         self.retrieval_service = retrieval_service
         self.interpretation_service = interpretation_service
         self.archive_target_resolver = archive_target_resolver
+        self.agent_judgement_gateway = agent_judgement_gateway
+        if self.agent_judgement_gateway is not None:
+            self.agent_judgement_gateway.bind(
+                request_preparer=self._prepare_agent_judgement_requests,
+                response_consumer=self._complete_agent_judgement_responses,
+                run_dir_resolver=self._resolve_archive_run_dir,
+                artifact_writer=self._save_structured_json,
+            )
         if self.storage_binding_registry is not None:
             workspace_path = Path(self.workspace_dir).expanduser().resolve()
             for binding in self.storage_binding_registry.bindings:
@@ -1951,6 +1965,416 @@ class DataCleaningTools:
             "review_queue": review_queue,
             "archive_actions": archive_actions,
             "artifacts": artifacts,
+        }
+
+
+    @staticmethod
+    def _agent_judgement_blocked(run_id: object, reason: str) -> Dict[str, Any]:
+        return {
+            "schema_version": "agent_judgement_gateway.run.v1",
+            "status": "blocked",
+            "run_id": str(run_id),
+            "blocked_reason": reason,
+            "archive_actions": [],
+            "boundary": {
+                "agent_response_consumed": False,
+                "archive_plan_executed": False,
+                "confirmed": False,
+            },
+        }
+
+    def prepare_agent_judgement_run(self, files: List[str]) -> Dict[str, Any]:
+        """Create only an explicit, local agent-judgement request artifact."""
+        if self.agent_judgement_gateway is None:
+            return self._agent_judgement_blocked("", "LLM.CAPABILITY_DISABLED")
+        return self.agent_judgement_gateway.prepare_run(files)
+
+    def resume_agent_judgement_run(self, run_id: str, response_path: str) -> Dict[str, Any]:
+        """Validate one supplied response artifact before any review artifact changes."""
+        if self.agent_judgement_gateway is None:
+            return self._agent_judgement_blocked(run_id, "LLM.CAPABILITY_DISABLED")
+        return self.agent_judgement_gateway.resume_run(run_id, response_path)
+
+    def _prepare_agent_judgement_requests(self, files: List[str]) -> Dict[str, Any]:
+        if self.retrieval_service is None:
+            return self._agent_judgement_blocked("", "LLM.CAPABILITY_DISABLED")
+        if self.storage_binding_registry is None or self.document_store_router is None:
+            return self._agent_judgement_blocked("", "DOCUMENT_STORE.CAPABILITY_DISABLED")
+        run_id, run_dir = self._claim_archive_intent_run()
+        artifacts = {"run_dir": run_dir}
+        try:
+            if type(files) is not list or not files or any(type(path) is not str for path in files):
+                raise ValueError("agent source files")
+            extracted_dir = os.path.join(run_dir, "extracted")
+            os.makedirs(extracted_dir, exist_ok=False)
+
+            class RequestOnlyAdapter:
+                name = "agent_request"
+                model = "agent_request"
+                schema_version = "candidate_document_interpretation.v1"
+                prompt_version = "document_interpretation.v1"
+                policy_version = "document_interpretation_policy.v1"
+
+            service = DocumentInterpretationService(self.retrieval_service, RequestOnlyAdapter())
+            requests: List[Dict[str, Any]] = []
+            manifest: List[Dict[str, Any]] = []
+            extracted_payloads: List[tuple[str, Dict[str, Any]]] = []
+            request_ids: set[str] = set()
+            for path in files:
+                self._source_identity(path)
+                source_ref = self.storage_binding_registry.document_ref_from_path(path)
+                ref_payload = self._logical_ref_payload(source_ref)
+                snapshot_path, content_hash, source_identity = self._read_source_snapshot(
+                    path, source_ref, run_dir,
+                )
+                if self._source_identity(path) != source_identity:
+                    raise ValueError("DOCUMENT_SOURCE.REPLACED")
+                extracted = self.extract_document(snapshot_path)
+                if (
+                    type(extracted) is not dict
+                    or "error" in extracted
+                    or extracted.get("status") == "blocked"
+                ):
+                    raise ValueError("DOCUMENT_PARSE.FAILED")
+                parse_ref = f"artifact:parsed:{content_hash[:24]}"
+                native_summary = normalize_native_parse_output(extracted)
+                classification = normalize_document_classification(
+                    native_summary["classification"],
+                    fallback_document_type=native_summary["document_type"],
+                )
+                fields = self._interpretation_fields(native_summary["candidate_fields"])
+                text = native_summary["text"].strip()
+                evidence_pack = {
+                    "parse_artifact_ref": parse_ref,
+                    "document_type_hint": self._interpretation_document_type(
+                        native_summary["document_type"],
+                    ),
+                    "candidate_fields": fields,
+                    "text_segments": ([{"id": "text-0", "text": text[:4000]}] if text else []),
+                }
+                prepared = service.prepare(evidence_pack)
+                request_id = f"agent-request:{content_hash[:24]}"
+                if request_id in request_ids:
+                    raise ValueError("duplicate agent request")
+                request_ids.add(request_id)
+                requests.append(build_agent_judgement_request(
+                    run_id=run_id,
+                    request_id=request_id,
+                    interpretation_request=prepared.request,
+                ))
+                extracted_payload = {
+                    "schema_version": "file_organization.extracted_document.v1",
+                    "run_id": run_id,
+                    "parse_artifact_ref": parse_ref,
+                    "source_ref": ref_payload,
+                    "content_hash": content_hash,
+                    "document_type": native_summary["document_type"],
+                    "classification": classification,
+                    "candidate_fields": native_summary["candidate_fields"],
+                    "text_length": len(text),
+                }
+                validate_extracted_document_artifact(extracted_payload, run_id)
+                extracted_payloads.append((
+                    os.path.join(extracted_dir, f"{content_hash[:24]}_extracted.json"),
+                    extracted_payload,
+                ))
+                manifest.append({
+                    "run_id": run_id,
+                    "source_ref": ref_payload,
+                    "name": os.path.basename(path),
+                    "content_hash": content_hash,
+                })
+            input_manifest_path = os.path.join(run_dir, "input_manifest.json")
+            self._save_task5_collection(
+                input_manifest_path,
+                {
+                    "schema_version": "file_organization.input_manifest.v1",
+                    "run_id": run_id,
+                    "files": manifest,
+                },
+                kind="input_manifest",
+                run_id=run_id,
+            )
+            for output_path, payload in extracted_payloads:
+                self._save_structured_json(output_path, payload)
+            artifacts.update({
+                "input_manifest": input_manifest_path,
+                "extracted_dir": extracted_dir,
+            })
+            return {
+                "status": "ready",
+                "run_id": run_id,
+                "run_dir": run_dir,
+                "requests": requests,
+                "artifacts": artifacts,
+            }
+        except (
+            AmbiguousStorageBindingError,
+            StorageBindingNotFoundError,
+            ArchiveRunArtifactError,
+            OSError,
+            TypeError,
+            ValueError,
+        ):
+            return {
+                **self._agent_judgement_blocked(run_id, "AGENT_JUDGEMENT.REQUEST_INVALID"),
+                "artifacts": artifacts,
+            }
+
+    def _complete_agent_judgement_responses(
+        self,
+        run_id: str,
+        requests: List[Dict[str, Any]],
+        responses: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        run_dir = self._resolve_archive_run_dir(run_id)
+        request_artifact = {
+            "schema_version": "agent_judgement_requests.v1",
+            "run_id": run_id,
+            "requests": requests,
+        }
+        saved_request_artifact = strict_json_load(
+            os.path.join(run_dir, "agent_judgement_requests.json"),
+        )
+        if saved_request_artifact != request_artifact:
+            raise ArchiveRunArtifactError("agent request replay")
+        manifest = strict_json_load(os.path.join(run_dir, "input_manifest.json"))
+        validate_task5_collection_artifact(manifest, kind="input_manifest", run_id=run_id)
+        entries = manifest["files"]
+        if len(entries) != len(requests) or len(responses) != len(requests):
+            raise ArchiveRunArtifactError("agent response count")
+
+        class RequestOnlyAdapter:
+            name = "agent_request"
+            model = "agent_request"
+            schema_version = "candidate_document_interpretation.v1"
+            prompt_version = "document_interpretation.v1"
+            policy_version = "document_interpretation_policy.v1"
+
+        service = DocumentInterpretationService(self.retrieval_service, RequestOnlyAdapter())
+        candidate_interpretations: List[Dict[str, Any]] = []
+        archive_intents: List[Dict[str, Any]] = []
+        archive_actions: List[Dict[str, Any]] = []
+        review_findings: List[Dict[str, Any]] = []
+        trace: List[Dict[str, Any]] = []
+        for request, response, manifest_entry in zip(requests, responses, entries):
+            content_hash = manifest_entry["content_hash"]
+            extracted = strict_json_load(
+                os.path.join(run_dir, "extracted", f"{content_hash[:24]}_extracted.json"),
+            )
+            validate_extracted_document_artifact(extracted, run_id)
+            request_payload = request["interpretation_request"]
+            if request_payload["parse_artifact_ref"] != extracted["parse_artifact_ref"]:
+                raise ArchiveRunArtifactError("agent parse artifact binding")
+            context_raw = request_payload["business_context"]
+            context = BusinessContextEvidence(
+                context_raw["status"],
+                tuple(context_raw["candidates"]),
+                tuple(context_raw["evidence"]),
+                tuple(context_raw["conflicts"]),
+                tuple(context_raw["diagnostics"]),
+            )
+            context, context_payload = normalize_business_context(context)
+            prepared = PreparedDocumentInterpretation(
+                parse_artifact_ref=extracted["parse_artifact_ref"],
+                request=request_payload,
+                business_context=request_payload["business_context"],
+                _request_snapshot=json.dumps(
+                    request_payload,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+            interpretation = service.complete_prepared(
+                prepared,
+                AgentResponseInterpreter(response, request=request),
+            )
+            interpretation = normalize_interpretation_output(
+                interpretation,
+                parse_artifact_ref=extracted["parse_artifact_ref"],
+            )
+            ref_payload = manifest_entry["source_ref"]
+            interpretation_entry = dict(interpretation)
+            interpretation_entry.update({
+                "run_id": run_id,
+                "source_ref": ref_payload,
+                "content_hash": content_hash,
+                "business_context": context_payload,
+                "business_relation": self._business_relation(interpretation),
+            })
+            validate_candidate_interpretation(interpretation_entry, run_id)
+            candidate_interpretations.append(interpretation_entry)
+            candidate_ids = list(dict.fromkeys(
+                list(context_payload.get("candidate_ids") or [])
+                + [
+                    relation.get("target_candidate_id")
+                    for relation in interpretation.get("relations") or []
+                    if isinstance(relation, dict)
+                    and isinstance(relation.get("target_candidate_id"), str)
+                ]
+            ))
+            review_evidence_refs = list(context.evidence_refs) + list(
+                interpretation.get("evidence") or [],
+            )
+            review_findings.append({
+                "type": "business_relation_review",
+                "severity": "high" if context.status == "blocked" or interpretation.get("status") == "blocked" else "medium",
+                "source_ref": ref_payload,
+                "candidate_ids": candidate_ids,
+                "evidence_refs": review_evidence_refs,
+                "conflicts": list(context.conflicts),
+                "content_hash": content_hash,
+                "artifact_schema_version": interpretation.get("schema_version", "candidate_document_interpretation.v1"),
+                "interpreter": interpretation.get("interpreter", ""),
+                "model": interpretation.get("model", ""),
+                "prompt_version": interpretation.get("prompt_version", ""),
+                "policy_version": interpretation.get("policy_version", ""),
+                "confirmed": False,
+            })
+            source_ref = DocumentRef(
+                ref_payload["storage_provider"],
+                ref_payload["object_key"],
+                ref_payload["logical_uri"],
+                ref_payload["binding_id"],
+            )
+            if self.archive_target_resolver is None:
+                resolution = ArchiveTargetResolution(
+                    "unresolved", (), "", ("ARCHIVE_TARGET.CAPABILITY_DISABLED", "ARCHIVE_TARGET.UNRESOLVED"),
+                )
+            else:
+                resolution = self.archive_target_resolver.resolve(source_ref, ())
+            relation_ids = tuple(
+                relation.get("target_candidate_id")
+                for relation in interpretation.get("relations") or []
+                if isinstance(relation, dict) and isinstance(relation.get("target_candidate_id"), str)
+            )
+            intent = ArchiveIntent(
+                source_ref=source_ref,
+                destination_status=resolution.destination_status,
+                candidate_target_binding_ids=resolution.candidate_target_binding_ids,
+                project_id=relation_ids[0] if len(relation_ids) == 1 else "",
+                archive_phase=extracted["classification"].get("archive_phase") or "",
+                content_hash=content_hash,
+            )
+            blockers = self._interpretation_blockers(
+                extracted["classification"], context, interpretation, resolution,
+            )
+            intent_payload = intent.payload()
+            intent_payload.update({
+                "run_id": run_id,
+                "intent_id": f"archive-intent:{content_hash[:24]}",
+                "normalized_status": "blocked" if context.status == "blocked" or interpretation.get("status") == "blocked" else "needs_review",
+                "blockers": blockers,
+                "classification": extracted["classification"],
+            })
+            validate_archive_intent(intent_payload, run_id)
+            archive_intents.append(intent_payload)
+            review_findings.append({
+                "type": "archive_target_review",
+                "severity": "high" if intent_payload["normalized_status"] == "blocked" else "medium",
+                "source_ref": ref_payload,
+                "candidate_ids": candidate_ids,
+                "candidate_target_binding_ids": list(intent.candidate_target_binding_ids),
+                "evidence_refs": review_evidence_refs,
+                "conflicts": list(context.conflicts),
+                "destination_status": intent.destination_status,
+                "content_hash": content_hash,
+                "artifact_schema_version": intent_payload["schema_version"],
+                "interpreter": interpretation.get("interpreter", ""),
+                "model": interpretation.get("model", ""),
+                "prompt_version": interpretation.get("prompt_version", ""),
+                "policy_version": interpretation.get("policy_version", ""),
+                "blockers": blockers,
+                "confirmed": False,
+            })
+            action = self._review_only_archive_action(run_id, source_ref, blockers, intent_payload)
+            validate_archive_action(action, run_id)
+            archive_actions.append(action)
+            trace.extend([
+                {"stage": "agent_response", "source_ref": ref_payload, "status": "success"},
+                {"stage": "archive_intent", "source_ref": ref_payload, "status": intent_payload["normalized_status"]},
+                {"stage": "stop", "source_ref": ref_payload, "status": "needs_review"},
+            ])
+
+        review_queue = normalize_review_queue(run_id=run_id, raw_items=review_findings)
+        validate_review_queue(review_queue, run_id)
+        feedback_form = build_feedback_form(
+            run_id=run_id,
+            review_queue=review_queue,
+            audit_review={},
+            adversarial_verification={},
+        )
+        artifacts = {
+            "input_manifest": os.path.join(run_dir, "input_manifest.json"),
+            "agent_judgement_requests": os.path.join(run_dir, "agent_judgement_requests.json"),
+            "candidate_interpretations": os.path.join(run_dir, "candidate_interpretations.json"),
+            "archive_intents": os.path.join(run_dir, "archive_intents.json"),
+            "review_queue": os.path.join(run_dir, "review_queue.json"),
+            "planned_archive_actions": os.path.join(run_dir, "planned_archive_actions.json"),
+            "feedback_form_json": os.path.join(run_dir, "feedback_form.json"),
+            "feedback_form_md": os.path.join(run_dir, "feedback_form.md"),
+            "trace": os.path.join(run_dir, "trace.json"),
+            "run_dir": run_dir,
+        }
+        collections = {
+            artifacts["candidate_interpretations"]: {
+                "schema_version": "candidate_interpretations.v1", "run_id": run_id,
+                "items": candidate_interpretations,
+            },
+            artifacts["archive_intents"]: {
+                "schema_version": "archive_intents.v1", "run_id": run_id,
+                "items": archive_intents,
+            },
+            artifacts["planned_archive_actions"]: {
+                "schema_version": "archive_plan.v1", "run_id": run_id,
+                "archive_intent_required": True, "actions": archive_actions,
+            },
+        }
+        validate_task5_collection_artifact(
+            collections[artifacts["candidate_interpretations"]],
+            kind="candidate_interpretations", run_id=run_id,
+        )
+        validate_task5_collection_artifact(
+            collections[artifacts["archive_intents"]], kind="archive_intents", run_id=run_id,
+        )
+        validate_task5_collection_artifact(
+            collections[artifacts["planned_archive_actions"]],
+            kind="planned_archive_actions", run_id=run_id,
+        )
+        trace_payload = {
+            "schema_version": "file_organization.trace.v1", "run_id": run_id,
+            "events": trace,
+        }
+        validate_json_tree(trace_payload)
+        payloads = {
+            path: self._encode_feedback_json(payload)
+            for path, payload in collections.items()
+        }
+        payloads[artifacts["review_queue"]] = self._encode_feedback_json(review_queue)
+        payloads[artifacts["feedback_form_json"]] = self._encode_feedback_json(feedback_form)
+        payloads[artifacts["feedback_form_md"]] = render_feedback_form_markdown(feedback_form).encode("utf-8")
+        payloads[artifacts["trace"]] = self._encode_feedback_json(trace_payload)
+        with _feedback_thread_lock(run_dir):
+            with _feedback_process_lock(run_dir):
+                if strict_json_load(artifacts["agent_judgement_requests"]) != request_artifact:
+                    raise ArchiveRunArtifactError("agent request replay")
+                self._commit_feedback_transaction(run_dir, payloads)
+        return {
+            "schema_version": "agent_judgement_gateway.resume.v1",
+            "status": "success",
+            "run_id": run_id,
+            "candidate_interpretations": candidate_interpretations,
+            "archive_intents": archive_intents,
+            "review_queue": review_queue,
+            "archive_actions": archive_actions,
+            "artifacts": artifacts,
+            "boundary": {
+                "agent_response_consumed": True,
+                "archive_plan_executed": False,
+                "confirmed": False,
+            },
         }
 
     @staticmethod

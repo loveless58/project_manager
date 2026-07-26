@@ -462,6 +462,17 @@ def test_business_candidate_id_matching_archive_binding_is_not_a_storage_selecti
     assert "ARCHIVE_TARGET.UNRESOLVED" in intent["blockers"]
 
 
+def test_agent_run_without_explicit_gateway_is_capability_disabled(tmp_path: Path) -> None:
+    from tools.data_cleaning_tools import DataCleaningTools
+
+    tools = DataCleaningTools(workspace_dir=str(tmp_path / "runtime"))
+
+    result = tools.prepare_agent_judgement_run([str(tmp_path / "not-used.md")])
+
+    assert result["status"] == "blocked"
+    assert result["blocked_reason"] == "LLM.CAPABILITY_DISABLED"
+
+
 @pytest.mark.parametrize("malicious_kind", ["path", "credential", "deep", "oversized", "nan"])
 def test_malicious_native_parse_is_rejected_before_extracted_artifact_persistence(
     tmp_path: Path, malicious_kind: str,
