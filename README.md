@@ -196,7 +196,7 @@ PageIndex、OCR、真实业务样本和外部服务集成测试不是普通快�
 | `LLM_API_KEY` | 仅 LLM 模式 | LLMPlanner API 密钥。 |
 | `PROJECT_MANAGER_LLM_BASE_URL` | LLM 启用时 | 统一的 LLM API endpoint；无默认值。 |
 | `LLM_BASE_URL` / `OPENAI_API_BASE` | 兼容入口 | 仅作为旧部署 fallback；新配置应使用 `PROJECT_MANAGER_LLM_BASE_URL`。 |
-| `LLM_MODEL` | 否 | LLM 模型名。 |
+| `LLM_MODEL` | 否 | LLM 模型名；未设置时使用当前默认值 `minimax-m3-mxfp8`。要求显式批准模型的部署必须设置此变量。 |
 | `PROJECT_MANAGER_DEPLOYMENT_MODE` | 否 | `local`（SQLite 配置形状）或 `central`（PostgreSQL 配置预留）。 |
 | `PROJECT_MANAGER_BUSINESS_ROOT` | 否 | 当前节点可访问的业务根目录；可以是同步业务目录。 |
 | `PROJECT_MANAGER_WORKSPACE_DIR` | 否 | 当前节点的本机非同步运行工作区。 |
@@ -221,17 +221,18 @@ MIT
 
 Use `scripts/prepare_business_file_run.py` for an explicit, small business-file review run. It requires `--config`, `--context`, `--source-binding`, explicit files, and optionally `--target-binding`. It writes only node-local review artifacts.
 
-This entry point injects disabled OCR: native PDF, DOCX, XLSX, Markdown, and XML continue through native parsing; scanned documents return `OCR.CAPABILITY_DISABLED` with exit code `2`, without probing or calling an OCR engine. The CLI calls `execute_archive_plan(..., confirmed=False)` once, never applies feedback automatically, and never moves, overwrites, renames, or deletes source files. Its stdout is redacted JSON. See [the safe business-file judgement quickstart](docs/operations/business-file-judgement-quickstart.md).
+This entry point injects disabled OCR: native PDF, DOCX, XLSX, Markdown, and XML continue through native parsing; scanned documents return `OCR.CAPABILITY_DISABLED` with exit code `2`, without probing or calling an OCR engine. In `configured_llm` mode only, the CLI calls `execute_archive_plan(..., confirmed=False)` once after preparing the complete review package. `agent` and `disabled` do not call it. No mode applies feedback automatically or moves, overwrites, renames, or deletes source files. Stdout is redacted JSON. See [the safe business-file judgement quickstart](docs/operations/business-file-judgement-quickstart.md).
 
 ### Judgement modes
 
-| `--interpreter-mode` | Intended operation | Fallback behavior | Archive authority |
+| `--interpreter-mode` | Configuration and fallback | Exit/artifact lifecycle | Archive execution check |
 |---|---|---|---|
-| `configured_llm` (default) | Unattended-capable when the approved endpoint, model, and credential environment are configured | Fails closed; it never silently switches to `agent`, rules, or another model | None |
-| `agent` | Interactive, local-only, two-phase handoff to a separately operated host | No discovery and no fallback; the response must be supplied explicitly | None |
-| `disabled` | Explicit capability-off check | Returns `LLM.CAPABILITY_DISABLED` | None |
+| `configured_llm` (default) | Requires `PROJECT_MANAGER_LLM_BASE_URL` and `LLM_API_KEY`. If `LLM_MODEL` is unset, it uses the current default `minimax-m3-mxfp8`; deployments that require an explicitly approved model must set `LLM_MODEL`. Missing endpoint or credential fails closed, with no fallback to `agent`, rules, or another model. | Exit `0` only when preparation has no document failures. Produces input, candidate interpretation, archive-intent, review, adversarial-verification, audit, feedback, plan, and trace artifacts. A parse/OCR block exits `2`. | Calls `execute_archive_plan(..., confirmed=False)` exactly once after the full review package. Strict archive intents remain non-executable; no `archive_result.json` is written. |
+| `agent`, phase 1 | Interactive, local-only handoff; no host discovery or fallback. | Exit `0` with `awaiting_agent_judgement`. Produces only input/request-side artifacts (`input_manifest.json`, native extracted staging, and `agent_judgement_requests.json`), not candidates, review, feedback, or a plan. | None; no gate call or gate artifact. |
+| `agent`, phase 2 | Requires one explicit, strict response for the same run and unchanged ordered inputs. | A valid response exits `0` and adds consumption, candidate interpretation, archive-intent, review, feedback, plan, and trace artifacts. Invalid or replayed input exits `2`. | None; no gate call, `archive_execution_gate.json`, or `archive_result.json`. |
+| `disabled` | Explicit capability-off check. | Exits `2` with `LLM.CAPABILITY_DISABLED` before loading node configuration or creating a run, so there are no run artifacts. | None. |
 
-Both judgement modes produce review artifacts only. Neither mode enables archive execution or replaces the separate human confirmation required by the archive gate.
+The judgement paths are review-only. None grants archive authority or replaces the separate human confirmation required by a later archive workflow. In the current strict-intent path, the `configured_llm` check returns a blocked gate result without persisting `archive_execution_gate.json`; that filename is reserved for legacy executable-plan gate evaluation.
 
 The `agent` mode is visible and operator-driven:
 

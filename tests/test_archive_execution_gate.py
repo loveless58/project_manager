@@ -33,6 +33,9 @@ def test_agent_mode_cannot_upgrade_review_only_archive_to_confirmed(
     result = tools.execute_archive_plan(prepared["run_id"], confirmed=True)
 
     assert result["status"] == "blocked"
+    assert result["moved"] == 0
+    assert result["failed"] == 1
+    assert result["gate"]["blockers"] == ["archive_intent_not_executable"]
     run_dir = Path(prepared["artifacts"]["run_dir"])
     assert not list(run_dir.rglob("archive_result.json"))
 
