@@ -122,7 +122,7 @@ def _task8_llm(events):
             response_fields = {"contract_code": "CT-001"}
             relation = "contract_project"
         else:
-            response_fields = {"project_code": "PRJ-001"}
+            response_fields = {"project_code": "SYN-PROJECT-001"}
             relation = "contract_project"
         response = {
             "schema_version": "candidate_document_interpretation.v1",
@@ -220,7 +220,7 @@ def test_business_judgement_usable_slice_exercises_real_boundaries(tmp_path, mon
     invoice = source / "invoice.pdf"
     _task8_pdf(
         invoice,
-        "\u7535\u5b50\u53d1\u7968\n\u53d1\u7968\u53f7\u7801\uff1aINV-001\n\u5f00\u7968\u65e5\u671f\uff1a2026-07-25\n"
+        "\u7535\u5b50\u53d1\u7968\n\u53d1\u7968\u53f7\u7801\uff1aSYN-INV-001\n\u5f00\u7968\u65e5\u671f\uff1a2026-07-25\n"
         "\u8d2d\u4e70\u65b9\u540d\u79f0\uff1a\u5408\u6210\u7532\u65b9\u6709\u9650\u516c\u53f8\n\u8d2d\u4e70\u65b9\u7a0e\u53f7\uff1a913100000000000001\n"
         "\u9500\u552e\u65b9\u540d\u79f0\uff1a\u5408\u6210\u4e59\u65b9\u6709\u9650\u516c\u53f8\n\u9500\u552e\u65b9\u7a0e\u53f7\uff1a913100000000000002\n"
         "\u9879\u76ee\u540d\u79f0 | \u89c4\u683c\u578b\u53f7 | \u91d1\u989d\n\u6280\u672f\u670d\u52a1 | \u6807\u51c6\u7248 | 100.00"
@@ -230,16 +230,16 @@ def test_business_judgement_usable_slice_exercises_real_boundaries(tmp_path, mon
     document = Document()
     document.add_paragraph("\u6280\u672f\u5f00\u53d1\u5408\u540c")
     document.add_paragraph("\u5408\u540c\u767b\u8bb0\u7f16\u53f7\uff1aCT-001")
-    document.add_paragraph("\u9879\u76ee\u7f16\u53f7\uff1aPRJ-001")
+    document.add_paragraph("\u9879\u76ee\u7f16\u53f7\uff1aSYN-PROJECT-001")
     document.save(contract)
     governance = source / "PRD-project-manager-governance.md"
-    governance.write_text("# synthetic governance\n\u9879\u76ee\u7f16\u53f7\uff1aPRJ-001", encoding="utf-8")
+    governance.write_text("# synthetic governance\n\u9879\u76ee\u7f16\u53f7\uff1aSYN-PROJECT-001", encoding="utf-8")
     project = source / "project.xlsx"
     workbook = Workbook()
-    workbook.active.append(["\u9879\u76ee\u7f16\u53f7\uff1aPRJ-001"])
+    workbook.active.append(["\u9879\u76ee\u7f16\u53f7\uff1aSYN-PROJECT-001"])
     workbook.save(project)
     xml = source / "project.xml"
-    xml.write_text("<project><\u9879\u76ee\u7f16\u53f7>PRJ-001</\u9879\u76ee\u7f16\u53f7></project>", encoding="utf-8")
+    xml.write_text("<project><\u9879\u76ee\u7f16\u53f7>SYN-PROJECT-001</\u9879\u76ee\u7f16\u53f7></project>", encoding="utf-8")
     context_pdf = source / "context-contract.pdf"
     _task8_pdf(context_pdf, "synthetic context")
     scan = source / "scan.pdf"
@@ -248,6 +248,7 @@ def test_business_judgement_usable_slice_exercises_real_boundaries(tmp_path, mon
     catalog_payload = json.loads(
         (Path(__file__).resolve().parents[1] / "fixtures" / "business_context_catalog.v1.json").read_text(encoding="utf-8")
     )
+    catalog_payload["records"][0]["facts"]["project_code"] = "SYN-PROJECT-001"
     catalog_payload["records"][0]["documents"][0]["path"] = str(context_pdf)
     catalog_payload["records"][0]["documents"][0]["content_hash"] = hashlib.sha256(context_pdf.read_bytes()).hexdigest()
     catalog = tmp_path / "business_context_catalog.v1.json"

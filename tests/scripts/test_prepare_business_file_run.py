@@ -45,9 +45,9 @@ def _inputs(tmp_path: Path):
 
 def _agent_inputs(tmp_path: Path):
     config, catalog, source, runtime, original = _inputs(tmp_path)
-    source.write_text("\u9879\u76ee\u7f16\u53f7\uff1aPRJ-001\n\u9879\u76ee\u540d\u79f0\uff1a\u5408\u6210\u9879\u76ee", encoding="utf-8")
+    source.write_text("\u9879\u76ee\u7f16\u53f7\uff1aSYN-PROJECT-001\n\u9879\u76ee\u540d\u79f0\uff1a\u5408\u6210\u9879\u76ee", encoding="utf-8")
     catalog_payload = json.loads(catalog.read_text(encoding="utf-8"))
-    catalog_payload["records"][0]["facts"] = {"project_code": "PRJ-001"}
+    catalog_payload["records"][0]["facts"] = {"project_code": "SYN-PROJECT-001"}
     catalog_payload["records"][0]["documents"][0]["content_hash"] = hashlib.sha256(source.read_bytes()).hexdigest()
     catalog.write_text(json.dumps(catalog_payload), encoding="utf-8")
     return config, catalog, source, runtime, original
@@ -61,7 +61,7 @@ def _matching_agent_response(request: dict) -> dict:
         "interpreter": "approved_agent", "model": "approved_local_model", "created_at": "2026-07-26T00:00:00Z",
         "interpretation": {
             "schema_version": "candidate_document_interpretation.v1", "status": "success",
-            "document_type": interpretation_request["document"]["document_type_hint"], "fields": {"project_code": "PRJ-001"},
+            "document_type": interpretation_request["document"]["document_type_hint"], "fields": {"project_code": "SYN-PROJECT-001"},
             "relations": [], "evidence": [interpretation_request["business_context"]["evidence"][0]], "confidence": 0.94,
             "interpreter": "approved_agent", "model": "approved_local_model",
             "prompt_version": "document_interpretation.v1", "policy_version": "document_interpretation_policy.v1",

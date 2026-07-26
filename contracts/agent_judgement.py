@@ -25,7 +25,7 @@ _ARTIFACT_REF = re.compile(r"^artifact:[a-z][a-z0-9_-]{0,31}:[A-Za-z0-9_.:-]{1,1
 _ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _UTC_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
 _CREDENTIAL = re.compile(r"(?<!\w)(?:(?:authorization|token|api[_-]?(?:key|token)|password)\s*[:=]\s*\S|bearer\s+\S)", re.IGNORECASE)
-_PHYSICAL_PATH = re.compile(r"(?:^|[\s\"'(=])(?:file:///|//[^/\s]+/[^/\s]+|[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/][^\\/\s]+|/(?!/))")
+_PHYSICAL_PATH = re.compile(r"(?:^|[\s\"'(=])(?:file:///|//[^/\s]+/[^/\s]+|[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/][^\\/\s]+|/(?!/))")  # repo-hygiene: allow=synthetic-path
 
 _REQUEST_ROOT = {"schema_version", "run_id", "request_id", "interpretation_request", "request_hash"}
 _RESPONSE_ROOT = {"schema_version", "run_id", "request_id", "request_hash", "interpreter", "model", "created_at", "interpretation"}
@@ -374,7 +374,7 @@ def _looks_physical_path(value: str) -> bool:
     return bool(
         _PHYSICAL_PATH.search(value)
         or re.search(r"(?:^|[^a-z0-9_])(?:file|ref):(?:/{1,3}|\\)", normalized)
-        or re.search(r"(?:^|[\s\"'(=])(?:[^/\\\s]+[/\\])+(?:[^/\\\s]+\.(?:pdf|docx|xlsx|xls|csv|xml|json|md|txt))\b", value, re.IGNORECASE)
+        or re.search(r"(?:^|[\s\"'(=])(?:[^/\\\s]+[/\\])+(?:[^/\\\s]+\.(?:pdf|docx|xlsx|xls|csv|xml|json|md|txt))\b", value, re.IGNORECASE)  # repo-hygiene: allow=synthetic-path
     )
 
 

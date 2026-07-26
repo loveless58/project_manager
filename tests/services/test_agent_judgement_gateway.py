@@ -41,13 +41,13 @@ class StaticRetrieval:
                     "id": "C-001",
                     "document_type": "contract",
                     "parties": {},
-                    "facts": {"contract_code": "CT-001"},
+                    "facts": {"contract_code": "SYN-CONTRACT-001"},
                 },
                 {
                     "id": "C-002",
                     "document_type": "contract",
                     "parties": {},
-                    "facts": {"contract_code": "CT-002"},
+                    "facts": {"contract_code": "SYN-CONTRACT-002"},
                 },
             ),
             (
@@ -65,7 +65,7 @@ class StaticRetrieval:
 def native_markdown(tmp_path: Path, name: str = "contract.md") -> Path:
     source = tmp_path / "source" / name
     source.parent.mkdir(exist_ok=True)
-    source.write_text("合同\n合同编号：CT-001\n项目名称：合成项目", encoding="utf-8")
+    source.write_text("合同\n合同编号：SYN-CONTRACT-001\n项目名称：合成项目", encoding="utf-8")
     return source
 
 
@@ -113,7 +113,7 @@ def prepared_agent_run(tmp_path: Path, count: int = 1):
     for index in range(2, count + 1):
         source = native_markdown(tmp_path, f"contract-{index}.md")
         source.write_text(
-            f"合同\n合同编号：CT-{index:03d}\n项目名称：合成项目{index}", encoding="utf-8"
+            f"合同\n合同编号：SYN-CONTRACT-{index:03d}\n项目名称：合成项目{index}", encoding="utf-8"
         )
         files.append(str(source))
     return tools, tools.prepare_agent_judgement_run(files)
@@ -133,7 +133,7 @@ def matching_response(request: dict[str, Any]) -> dict[str, Any]:
             "schema_version": "candidate_document_interpretation.v1",
             "status": "success",
             "document_type": interpretation_request["document"]["document_type_hint"],
-            "fields": {"contract_code": "CT-001"},
+            "fields": {"contract_code": "SYN-CONTRACT-001"},
             "relations": [
                 {
                     "relation_type": "contract_project",
@@ -300,7 +300,7 @@ def test_tampered_response_keeps_all_existing_artifacts_byte_identical(tmp_path:
         ),
         lambda payload: payload["responses"][0].__setitem__("created_at", "2026-02-30T00:00:00Z"),
         lambda payload: payload["responses"][0]["interpretation"]["fields"].__setitem__(
-            "contract_code", {"nested": "CT-001"}
+            "contract_code", {"nested": "SYN-CONTRACT-001"}
         ),
         lambda payload: payload["responses"][0]["interpretation"].__setitem__("confirmed", True),
     ],

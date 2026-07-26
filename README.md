@@ -222,3 +222,27 @@ MIT
 Use `scripts/prepare_business_file_run.py` for an explicit, small business-file review run. It requires `--config`, `--context`, `--source-binding`, explicit files, and optionally `--target-binding`. It writes only node-local review artifacts.
 
 This entry point injects disabled OCR: native PDF, DOCX, XLSX, Markdown, and XML continue through native parsing; scanned documents return `OCR.CAPABILITY_DISABLED` with exit code `2`, without probing or calling an OCR engine. The CLI calls `execute_archive_plan(..., confirmed=False)` once, never applies feedback automatically, and never moves, overwrites, renames, or deletes source files. Its stdout is redacted JSON. See [the safe business-file judgement quickstart](docs/operations/business-file-judgement-quickstart.md).
+
+### Judgement modes
+
+| `--interpreter-mode` | Intended operation | Fallback behavior | Archive authority |
+|---|---|---|---|
+| `configured_llm` (default) | Unattended-capable when the approved endpoint, model, and credential environment are configured | Fails closed; it never silently switches to `agent`, rules, or another model | None |
+| `agent` | Interactive, local-only, two-phase handoff to a separately operated host | No discovery and no fallback; the response must be supplied explicitly | None |
+| `disabled` | Explicit capability-off check | Returns `LLM.CAPABILITY_DISABLED` | None |
+
+Both judgement modes produce review artifacts only. Neither mode enables archive execution or replaces the separate human confirmation required by the archive gate.
+
+The `agent` mode is visible and operator-driven:
+
+```powershell
+# Phase 1: prepare the local, redacted request artifact
+python -X utf8 -B scripts/prepare_business_file_run.py --config <node-local-config> --context <node-local-catalog> --source-binding incoming --interpreter-mode agent <bound-source-file>
+
+# Phase 2: after the host writes one strict response, resume the same run
+python -X utf8 -B scripts/prepare_business_file_run.py --config <node-local-config> --context <node-local-catalog> --source-binding incoming --interpreter-mode agent --resume-run <run_id> --agent-response <strict-response-json> <bound-source-file>
+```
+
+Keep `runtime_workspace`, SQLite, response files, and all run artifacts on the executing node's local, non-synced disk and outside every source/archive binding. Remote Synology operation and PostgreSQL-backed central coordination are intentionally deferred.
+
+Invoice-specific PDF/OCR metadata propagation, schema/action/ledger refinements, and high-confidence classification require a separate plan. The current boundary must not infer a project name from a filename or physical path.

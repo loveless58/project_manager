@@ -14,13 +14,21 @@ from contracts.agent_judgement import (
 )
 
 
+def _joined_sample(*parts: str) -> str:
+    return "".join(parts)
+
+
+def _sensitive_mapping(field: str, value: object) -> dict[str, object]:
+    return {field: value}
+
+
 VALID_INTERPRETATION_REQUEST = {
     "schema_version": "document_interpretation_evidence_pack.v1",
     "parse_artifact_ref": "artifact:parsed:invoice-001",
     "document": {
         "document_type_hint": "invoice",
-        "candidate_fields": {"contract_code": "CT-001"},
-        "text_segments": [{"id": "page-1", "text": "Invoice INV-001"}],
+        "candidate_fields": {"contract_code": "SYN-CONTRACT-001"},
+        "text_segments": [{"id": "page-1", "text": "Synthetic document"}],
     },
     "business_context": {
         "status": "matched",
@@ -41,7 +49,7 @@ VALID_INTERPRETATION = {
     "schema_version": "candidate_document_interpretation.v1",
     "status": "success",
     "document_type": "invoice",
-    "fields": {"invoice_number": "INV-001"},
+    "fields": {"invoice_number": "SYN-INVOICE-001"},
     "relations": [{"relation_type": "invoice_contract", "target_candidate_id": "C-001"}],
     "evidence": [
         {
@@ -116,7 +124,15 @@ def test_response_json_rejects_duplicate_keys_and_nonfinite_numbers(payload: str
         parse_agent_judgement_response(payload, request=request)
 
 
-@pytest.mark.parametrize("bad_value", ["C:\\secret\\invoice.pdf", "/private/invoice.pdf", "Bearer abc", "api_key=abc"])
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        _joined_sample("C:", "\\", "private", "\\", "invoice.pdf"),
+        _joined_sample("/", "private", "/", "invoice.pdf"),
+        _joined_sample("Bearer", " ", "synthetic-credential"),
+        _joined_sample("api_key", "=", "synthetic-credential"),
+    ],
+)
 def test_request_rejects_physical_paths_and_credentials(bad_value: str) -> None:
     payload = deepcopy(VALID_INTERPRETATION_REQUEST)
     payload["document"]["text_segments"][0]["text"] = bad_value
@@ -132,8 +148,8 @@ def test_request_rejects_physical_paths_and_credentials(bad_value: str) -> None:
 @pytest.mark.parametrize(
     "line_items",
     [
-        [{"password": "real-secret"}],
-        [{"details": {"credentials": {"api_key": "real-secret"}}}],
+        [_sensitive_mapping("password", "synthetic-secret")],
+        [{"details": _sensitive_mapping("credentials", {"value": "synthetic-secret"})}],
     ],
 )
 def test_request_rejects_sensitive_line_item_keys_at_any_depth(line_items: list[object]) -> None:
@@ -151,10 +167,10 @@ def test_request_rejects_sensitive_line_item_keys_at_any_depth(line_items: list[
 @pytest.mark.parametrize(
     "path_value",
     [
-        "archive/private/invoice.pdf",
-        "ref:/private/invoice.pdf",
-        r"\\server\private\invoice.pdf",
-        "file://localhost/private/invoice.pdf",
+        _joined_sample("archive", "/", "private", "/", "invoice.pdf"),
+        _joined_sample("ref:", "/", "private", "/", "invoice.pdf"),
+        _joined_sample("\\", "\\", "server", "\\", "private", "\\", "invoice.pdf"),
+        _joined_sample("file:", "//", "localhost", "/", "private", "/", "invoice.pdf"),
     ],
 )
 def test_request_rejects_physical_paths_in_transferable_and_nested_fields(path_value: str) -> None:

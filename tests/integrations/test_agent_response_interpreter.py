@@ -16,8 +16,8 @@ def valid_exchange() -> tuple[dict[str, object], dict[str, object]]:
         "parse_artifact_ref": "artifact:parsed:invoice-001",
         "document": {
             "document_type_hint": "invoice",
-            "candidate_fields": {"contract_code": "CT-001"},
-            "text_segments": [{"id": "page-1", "text": "Invoice INV-001"}],
+            "candidate_fields": {"contract_code": "SYN-CONTRACT-001"},
+            "text_segments": [{"id": "page-1", "text": "Synthetic document"}],
         },
         "business_context": {
             "status": "matched",
@@ -50,7 +50,7 @@ def valid_exchange() -> tuple[dict[str, object], dict[str, object]]:
             "schema_version": "candidate_document_interpretation.v1",
             "status": "success",
             "document_type": "invoice",
-            "fields": {"invoice_number": "INV-001"},
+            "fields": {"invoice_number": "SYN-INVOICE-001"},
             "relations": [
                 {
                     "relation_type": "invoice_contract",

@@ -9,6 +9,34 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
+def completed_agent_run(tmp_path: Path):
+    """Complete the persisted agent hand-off without archive authority."""
+    from tests.services.test_agent_judgement_gateway import (
+        prepared_agent_run,
+        write_matching_agent_responses,
+    )
+
+    tools, prepared = prepared_agent_run(tmp_path)
+    resumed = tools.resume_agent_judgement_run(
+        prepared["run_id"],
+        write_matching_agent_responses(prepared),
+    )
+    assert resumed["status"] == "success"
+    return tools, prepared
+
+
+def test_agent_mode_cannot_upgrade_review_only_archive_to_confirmed(
+    tmp_path: Path,
+) -> None:
+    tools, prepared = completed_agent_run(tmp_path)
+
+    result = tools.execute_archive_plan(prepared["run_id"], confirmed=True)
+
+    assert result["status"] == "blocked"
+    run_dir = Path(prepared["artifacts"]["run_dir"])
+    assert not list(run_dir.rglob("archive_result.json"))
+
+
 class ArchiveExecutionGateTests(unittest.TestCase):
     def test_unconfirmed_archive_intent_has_zero_side_effects(self):
         from tools.data_cleaning_tools import DataCleaningTools
