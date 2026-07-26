@@ -41,7 +41,7 @@ Copy the repository example configuration to a protected local configuration loc
 On macOS, a node can map `physical_root` to a local mount while retaining the stable `business://incoming/` logical root. Runtime and SQLite still remain on that node's local, non-synced disk.
 Remote Synology execution/provider integration is intentionally deferred. Never put runtime state on SynologyDrive, SMB/NFS, OneDrive, or another sync volume.
 
-`configured_llm` constructs only the configured interpreter. `PROJECT_MANAGER_LLM_BASE_URL` and `LLM_API_KEY` are required; a missing endpoint or credential fails closed. If `LLM_MODEL` is unset or blank, the current implementation uses `minimax-m3-mxfp8`. A deployment policy that requires an explicitly approved model must therefore set `LLM_MODEL`. The CLI never falls back to `agent`, a rule-based interpretation, another model, or an OCR provider.
+`configured_llm` constructs only the configured interpreter. It requires `LLM_API_KEY` and an endpoint resolvable from the standard `PROJECT_MANAGER_LLM_BASE_URL` or, for an existing deployment, the legacy `LLM_BASE_URL` / `OPENAI_API_BASE` fallback. New deployments should set `PROJECT_MANAGER_LLM_BASE_URL`; legacy deployments may temporarily retain a fallback variable while migrating. If no endpoint can be resolved or the credential is missing, the CLI fails closed. If `LLM_MODEL` is unset or blank, the current implementation uses `minimax-m3-mxfp8`. A deployment policy that requires an explicitly approved model must therefore set `LLM_MODEL`. The CLI never falls back to `agent`, a rule-based interpretation, another model, or an OCR provider.
 
 ## Catalog and LLM environment
 
