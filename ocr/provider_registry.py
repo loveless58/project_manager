@@ -29,7 +29,7 @@ def extract_pdf_or_image(
 ) -> Dict:
     """Extract PDF/image content through stable project-level OCR providers."""
     ext = os.path.splitext(file_path)[1].lower()
-    if ocr_adapter is not None:
+    if _is_disabled_ocr_adapter(ocr_adapter):
         if ext == ".pdf":
             extracted = _extract_pdf_text_with_pymupdf(file_path)
             if extracted.get("status") == "success":
@@ -96,6 +96,19 @@ def extract_pdf_or_image(
             )
 
 
+    if ocr_adapter is not None:
+        ocr = _run_custom_ocr_adapter(file_path, ocr_adapter)
+        if ocr.get("status") == "success":
+            text = ocr.get("text", "") or ""
+            return _document_success(file_path, ext, text, "ocr", ocr=ocr, engine_candidates=candidates)
+        return _blocked_document(
+            file_path,
+            ext,
+            candidates,
+            error=ocr.get("error", "OCR adapter failed"),
+            ocr=ocr,
+            blocked_reason=ocr.get("blocked_reason"),
+        )
     if ext in {".png", ".jpg", ".jpeg"} and dependency_probe("easyocr"):
         ocr = EasyOcrProvider(dependency_probe=dependency_probe).extract(file_path)
         if ocr.get("status") == "success":
@@ -111,6 +124,10 @@ def extract_pdf_or_image(
 
     return _blocked_document(file_path, ext, candidates, error="No OCR/PDF engine provider available for this file")
 
+def _is_disabled_ocr_adapter(ocr_adapter: Optional[Callable[[str], Any]]) -> bool:
+    """Identify the explicit disabled capability without fragile name matching."""
+    provider = getattr(ocr_adapter, "__self__", None)
+    return bool(getattr(provider, "disables_ocr_capability", False))
 
 def describe_ocr_capabilities(
     file_path: str = "",

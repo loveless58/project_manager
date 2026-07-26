@@ -10,6 +10,7 @@ class DisabledOcrProvider:
 
     name = "disabled"
     blocked_reason = "OCR.CAPABILITY_DISABLED"
+    disables_ocr_capability = True
 
     def probe(self) -> dict[str, Any]:
         """Describe the selected disabled capability without environment discovery."""
