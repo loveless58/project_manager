@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 
@@ -38,6 +39,9 @@ def build_agent_run(
         "loaded_skills": [],
         "items": [],
         "artifacts": deepcopy(dict(artifacts)),
+        "created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "agent": {"name": "DocumentManagementAgent", "version": "1.0"},
+        "safety": {"source_files": "read_only", "archive": "not_requested"},
     }
 
 

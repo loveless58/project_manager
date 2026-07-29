@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import PurePosixPath
 from typing import Any, Mapping
 
 from .artifact_reference import validate_artifact_reference
@@ -52,6 +53,7 @@ def build_document_result(
             "source_ref": deepcopy(parse["source_ref"]),
             "content_hash": parse["content_hash"],
             "media_type": parse["media_type"],
+            "original_filename": PurePosixPath(str(parse["source_ref"].get("object_key", ""))).name,
         },
         "parse": parse,
         "facts": deepcopy(dict(facts)),
@@ -66,7 +68,7 @@ def _run_view(run: Mapping[str, Any]) -> dict[str, str]:
     run_id, goal, status = run.get("run_id"), run.get("goal"), run.get("status")
     if not all(isinstance(value, str) and value.strip() for value in (run_id, goal, status)):
         raise ValueError("run is invalid")
-    return {"run_id": run_id, "goal": goal, "status": status}
+    return {key: deepcopy(run[key]) for key in ("run_id", "goal", "status", "created_at_utc", "agent", "safety") if key in run}
 
 
 def _parse_view(structured_document: Mapping[str, Any]) -> dict[str, Any]:

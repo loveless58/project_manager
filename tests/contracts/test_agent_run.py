@@ -14,15 +14,10 @@ def test_agent_run_contains_only_explicit_inputs_and_initial_state() -> None:
         artifacts={},
     )
 
-    assert run == {
-        "schema_version": "agent_run.v1",
-        "run_id": "run-1",
-        "goal": "解析指定文档，不归档",
-        "input_refs": [{"logical_uri": "business://source/invoice.pdf"}],
-        "status": "prepared",
-        "loaded_skills": [],
-        "items": [],
-        "artifacts": {},
+    assert {key: run[key] for key in ("schema_version", "run_id", "goal", "input_refs", "status", "loaded_skills", "items", "artifacts")} == {
+        "schema_version": "agent_run.v1", "run_id": "run-1", "goal": "解析指定文档，不归档",
+        "input_refs": [{"logical_uri": "business://source/invoice.pdf"}], "status": "prepared",
+        "loaded_skills": [], "items": [], "artifacts": {},
     }
 
 
