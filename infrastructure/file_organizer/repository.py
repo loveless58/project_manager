@@ -259,6 +259,48 @@ class FileOrganizationRepository:
             (_json(_validate_location(target_location)), _utc_now(), item_id),
         )
 
+    def archive_context(self, item_id: str) -> dict[str, Any] | None:
+        row = self._connection.execute(
+            "SELECT oi.item_state, oi.target_location_json, oi.document_id, d.content_hash, "
+            "dl.binding_id, dl.logical_uri, dl.storage_provider, dl.object_key "
+            "FROM organization_items oi JOIN documents d ON d.id = oi.document_id "
+            "LEFT JOIN document_locations dl ON dl.document_id = d.id AND dl.is_current = 1 "
+            "WHERE oi.id = ?",
+            (item_id,),
+        ).fetchone()
+        if row is None or row["target_location_json"] is None or row["binding_id"] is None:
+            return None
+        try:
+            target = json.loads(row["target_location_json"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(target, dict):
+            return None
+        source = {key: row[key] for key in _LOCATION_KEYS}
+        return {"item_state": row["item_state"], "document_id": row["document_id"], "content_hash": row["content_hash"], "source_location": source, "target_location": target}
+
+
+    def item_for_run(self, run_id: str, item_id: str) -> dict[str, Any] | None:
+        row = self._connection.execute(
+            "SELECT item_state, proposal_json FROM organization_items WHERE run_id = ? AND id = ?",
+            (run_id, item_id),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            proposal = json.loads(row["proposal_json"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(proposal, dict):
+            return None
+        return {"item_state": row["item_state"], "proposal": proposal}
+
+    def skip_item(self, item_id: str) -> None:
+        self._connection.execute(
+            "UPDATE organization_items SET item_state = 'skipped' WHERE id = ? AND item_state = 'pending'",
+            (item_id,),
+        )
+
 
 def _new_id() -> str:
     return str(uuid.uuid4())
