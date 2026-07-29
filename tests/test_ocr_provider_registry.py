@@ -80,7 +80,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
         from ocr.providers.easyocr_provider import EasyOcrProvider
 
         fake_easyocr = types.SimpleNamespace(
-            Reader=lambda languages, gpu=False, verbose=False, model_storage_directory=None: types.SimpleNamespace(
+            Reader=lambda languages, gpu=False, verbose=False, model_storage_directory=None, download_enabled=False: types.SimpleNamespace(
                 readtext=lambda path, detail=1, paragraph=False: [
                     ([[0, 0], [1, 0], [1, 1], [0, 1]], "项目名称：合成项目025", 0.91),
                     ([[0, 2], [1, 2], [1, 3], [0, 3]], "采购人：合成机构013有限公司", 0.83),
@@ -114,7 +114,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
             return [([[0, 0], [1, 0], [1, 1], [0, 1]], "项目名称：合成项目023", 0.92)]
 
         fake_easyocr = types.SimpleNamespace(
-            Reader=lambda languages, gpu=False, verbose=False, model_storage_directory=None: types.SimpleNamespace(
+            Reader=lambda languages, gpu=False, verbose=False, model_storage_directory=None, download_enabled=False: types.SimpleNamespace(
                 readtext=readtext
             )
         )
@@ -137,7 +137,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
         from ocr.providers.easyocr_provider import EasyOcrProvider
 
         fake_easyocr = types.SimpleNamespace(
-            Reader=lambda languages, gpu=False, verbose=False, model_storage_directory=None: types.SimpleNamespace(
+            Reader=lambda languages, gpu=False, verbose=False, model_storage_directory=None, download_enabled=False: types.SimpleNamespace(
                 readtext=lambda path, detail=1, paragraph=False: [
                     ([[0, 0], [1, 0], [1, 1], [0, 1]], "收款人：合成机构011有限公司", 0.33),
                 ]
@@ -165,7 +165,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
         easyocr_provider._READER_CACHE.clear()
         reader_count = {"count": 0}
 
-        def make_reader(languages, gpu=False, verbose=False, model_storage_directory=None):
+        def make_reader(languages, gpu=False, verbose=False, model_storage_directory=None, download_enabled=False):
             reader_count["count"] += 1
             return types.SimpleNamespace(
                 readtext=lambda path, detail=1, paragraph=False: [
@@ -211,7 +211,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
                 pass
 
         fake_easyocr = types.SimpleNamespace(
-            Reader=lambda languages, gpu=False, verbose=False, model_storage_directory=None: types.SimpleNamespace(
+            Reader=lambda languages, gpu=False, verbose=False, model_storage_directory=None, download_enabled=False: types.SimpleNamespace(
                 readtext=lambda path, detail=1, paragraph=False: [
                     ([[0, 0], [1, 0], [1, 1], [0, 1]], f"项目名称：合成项目PDF扫描-{os.path.basename(path)}", 0.9),
                 ]
@@ -233,7 +233,7 @@ class TestOcrProviderRegistry(unittest.TestCase):
         from ocr.provider_registry import extract_pdf_or_image
 
         fake_easyocr = types.SimpleNamespace(
-            Reader=lambda languages, gpu=False, verbose=False, model_storage_directory=None: types.SimpleNamespace(
+            Reader=lambda languages, gpu=False, verbose=False, model_storage_directory=None, download_enabled=False: types.SimpleNamespace(
                 readtext=lambda path, detail=1, paragraph=False: [
                     ([[0, 0], [1, 0], [1, 1], [0, 1]], "项目名称：合成项目026", 0.88),
                 ]
