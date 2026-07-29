@@ -1,4 +1,7 @@
+# synthetic fixture data only
 from __future__ import annotations
+
+SYN_DOC_REF = "1234567890" * 2
 
 import hashlib
 from pathlib import Path
@@ -67,10 +70,10 @@ def _build_agent(tmp_path: Path, database_path, parse_skill: _ParseSkill):
     )
 
 
-INVOICE_TEXT = """电子发票（普通发票）
-发票号码：26112000002732686171
-购方名称：北京华胜天成科技股份有限公司
-销方名称：普华和诚（北京）信息有限公司
+INVOICE_TEXT = f"""电子发票（普通发票）
+发票号码：{SYN_DOC_REF}
+购方名称：合成采购股份有限公司
+销方名称：合成服务有限公司
 价税合计（小写）：¥48000.00
 """
 

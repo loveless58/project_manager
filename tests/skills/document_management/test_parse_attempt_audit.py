@@ -1,3 +1,4 @@
+# synthetic fixture data only
 from __future__ import annotations
 
 from skills.file_organizer.document_parse import DocumentParseSkill

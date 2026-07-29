@@ -1,14 +1,17 @@
+# synthetic fixture data only
 from __future__ import annotations
+
+SYN_DOC_REF = "1234567890" * 2
 
 from skills.document_management.document_facts.skill import DocumentFactsSkill
 
 
 def test_invoice_skill_extracts_tax_ids_amount_breakdown_rate_and_remarks_with_evidence() -> None:
     text = """增值税电子普通发票
-发票号码：26112000002732686171
-购方名称：北京华胜天成科技股份有限公司
+发票号码：{SYN_DOC_REF}
+购方名称：合成采购股份有限公司
 购方税号：91110000123456789A
-销方名称：普华和诚（北京）信息有限公司
+销方名称：合成服务有限公司
 销方税号：91110108123456789B
 金额：45283.02
 税额：2716.98

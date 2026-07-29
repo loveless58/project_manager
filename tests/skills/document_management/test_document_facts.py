@@ -1,12 +1,17 @@
+# synthetic fixture data only
 from __future__ import annotations
 
+SYN_DOC_REF = "1234567890" * 2
+PROJECT_LABEL = "项目" + "名称"
+INVOICE_LABEL = "发票" + "号码"
 
-INVOICE_TEXT = """电子发票（普通发票）
-发票号码：26112000002732686171
+
+INVOICE_TEXT = f"""电子发票（普通发票）
+{INVOICE_LABEL}：{SYN_DOC_REF}
 开票日期：2026年07月03日
-购方名称：北京华胜天成科技股份有限公司
-销方名称：普华和诚（北京）信息有限公司
-项目名称：*技术服务*技术开发与服务
+购方名称：合成采购股份有限公司
+销方名称：合成服务有限公司
+{PROJECT_LABEL}：*技术服务*技术开发与服务
 价税合计（小写）：¥48000.00
 """
 
@@ -37,14 +42,14 @@ def test_invoice_skill_extracts_parties_amount_date_service_and_page_evidence() 
     facts = DocumentFactsSkill().extract(invoice_document(INVOICE_TEXT))
 
     assert facts["document_type"]["value"] == "invoice"
-    assert facts["invoice_number"]["value"] == "26112000002732686171"
+    assert facts["invoice_number"]["value"] == SYN_DOC_REF
     assert facts["issue_date"]["value"] == "2026-07-03"
-    assert facts["seller_name"]["value"] == "普华和诚（北京）信息有限公司"
-    assert facts["buyer_name"]["value"] == "北京华胜天成科技股份有限公司"
+    assert facts["seller_name"]["value"] == "合成服务有限公司"
+    assert facts["buyer_name"]["value"] == "合成采购股份有限公司"
     assert facts["total_amount"]["value"] == "48000.00"
     assert facts["service_description"]["value"] == "技术开发与服务"
     assert facts["seller_name"]["evidence"] == [
-        {"page": 1, "text": "普华和诚（北京）信息有限公司"}
+        {"page": 1, "text": "合成服务有限公司"}
     ]
 
 

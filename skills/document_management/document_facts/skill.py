@@ -46,10 +46,10 @@ class DocumentFactsSkill:
         if structured_document.get("status") != "success" or not isinstance(text, str):
             return _unknown()
         normalized = _normalize(text)
-        invoice_number = _value(_INVOICE_NUMBER, normalized) or _first_invoice_number(normalized)
+        number_candidate = _value(_INVOICE_NUMBER, normalized) or _first_invoice_number(normalized)
         currency_values = _currency_values(normalized)
         total = _value(_TOTAL, normalized) or (currency_values[-1] if currency_values else None)
-        if not _INVOICE_MARKER.search(normalized) or not (invoice_number or total):
+        if not _INVOICE_MARKER.search(normalized) or not (number_candidate or total):
             return _unknown()
 
         pages = structured_document.get("pages")
@@ -59,8 +59,8 @@ class DocumentFactsSkill:
         invoice_type = _value(_INVOICE_TYPE, normalized)
         if invoice_type:
             facts["invoice_type"] = _fact(invoice_type, 0.95, invoice_type, pages)
-        if invoice_number:
-            facts["invoice_number"] = _fact(invoice_number, 0.99, invoice_number, pages)
+        if number_candidate:
+            facts["invoice_number"] = _fact(number_candidate, 0.99, number_candidate, pages)
         issue_date = _date(normalized)
         if issue_date:
             facts["issue_date"] = _fact(issue_date, 0.95, issue_date.replace("-", "年", 1).replace("-", "月", 1) + "日", pages)

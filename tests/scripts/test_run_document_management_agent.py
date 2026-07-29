@@ -1,4 +1,7 @@
+# synthetic fixture data only
 from __future__ import annotations
+
+SYN_DOC_REF = "1234567890" * 2
 
 import json
 from pathlib import Path
@@ -25,7 +28,7 @@ def _config(tmp_path: Path, database_path: Path, *, include_results_root: bool) 
     source_root = tmp_path / "source"
     source_root.mkdir(exist_ok=True)
     source = source_root / "input.txt"
-    source.write_text("电子发票（普通发票）\n发票号码：26112000002732686171", encoding="utf-8")
+    source.write_text("电子发票（普通发票）\n发票号码：{SYN_DOC_REF}", encoding="utf-8")
     config = {
         "database_path": str(database_path),
         "source_binding_id": "incoming",
