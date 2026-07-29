@@ -1,5 +1,6 @@
 {
   "database_path": "<node-local-runtime>/file-organizer.sqlite3",
+  "results_root": "<external-node-local-results-root>",
   "source_binding_id": "incoming",
   "archive_binding_id": "archive",
   "pageindex_min_text_length": 16000,

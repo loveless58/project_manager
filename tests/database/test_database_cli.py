@@ -71,8 +71,8 @@ def test_json_status_envelope_has_stable_schema_without_creating_database(tmp_pa
         "error_code": None,
         "details": {
             "current_version": 0,
-            "target_version": 1,
-            "pending_versions": [1],
+            "target_version": 2,
+            "pending_versions": [1, 2],
         },
     }
     assert stdout

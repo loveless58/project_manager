@@ -81,5 +81,5 @@ def test_production_catalog_contains_file_organization_migration():
     root = Path(__file__).resolve().parents[2]
     catalog = database.load_migration_catalog(root / "migrations" / "sqlite")
 
-    assert database.catalog_target_version(catalog) == 1
-    assert [(item.version, item.name) for item in catalog] == [(1, "file_organization")]
+    assert database.catalog_target_version(catalog) == 2
+    assert [(item.version, item.name) for item in catalog] == [(1, "file_organization"), (2, "document_artifacts")]
