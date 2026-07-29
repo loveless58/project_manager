@@ -46,8 +46,9 @@ class DocumentFactsSkill:
         if structured_document.get("status") != "success" or not isinstance(text, str):
             return _unknown()
         normalized = _normalize(text)
-        invoice_number = _value(_INVOICE_NUMBER, normalized)
-        total = _value(_TOTAL, normalized)
+        invoice_number = _value(_INVOICE_NUMBER, normalized) or _first_invoice_number(normalized)
+        currency_values = _currency_values(normalized)
+        total = _value(_TOTAL, normalized) or (currency_values[-1] if currency_values else None)
         if not _INVOICE_MARKER.search(normalized) or not (invoice_number or total):
             return _unknown()
 
@@ -89,7 +90,33 @@ class DocumentFactsSkill:
         service = _service(normalized)
         if service:
             facts["service_description"] = _fact(service, 0.9, service, pages)
+        _apply_detached_layout_fallback(facts, normalized, pages, currency_values)
         return facts
+
+
+
+def _first_invoice_number(text: str) -> str | None:
+    match = re.search(r"(?<![A-Za-z0-9])([0-9]{18,20})(?![A-Za-z0-9])", text)
+    return match.group(1) if match else None
+
+def _currency_values(text: str) -> list[str]:
+    return [m.group(1) for m in re.finditer(r"[¥￥]\s*([0-9][0-9,]*(?:\.\d{1,2})?)", text)]
+
+def _apply_detached_layout_fallback(facts: dict[str, dict[str, Any]], text: str, pages: object, values: list[str]) -> None:
+    companies = re.findall(r"([^\n\r]*?(?:股份有限公司|有限公司|公司))", text)
+    tax_ids = re.findall(r"(?<![A-Za-z0-9])([0-9A-Z]{18})(?![A-Za-z0-9])", text)
+    if len(companies) >= 2:
+        for name, value in (("seller_name", _clean(companies[0])), ("buyer_name", _clean(companies[1]))): facts.setdefault(name, _fact(value, 0.75, value, pages))
+    if len(tax_ids) >= 2:
+        for name, value in (("seller_tax_id", tax_ids[0]), ("buyer_tax_id", tax_ids[1])): facts.setdefault(name, _fact(value, 0.75, value, pages))
+    if len(values) >= 3:
+        for name, raw in (("untaxed_amount", values[0]), ("tax_amount", values[1]), ("total_amount", values[-1])):
+            amount = _amount(raw)
+            if amount is not None: facts.setdefault(name, _fact(amount, 0.75, raw, pages))
+    match = re.search(r"\*[^*\n]+\*([^\n]+)\n\s*([^\n]+)", text)
+    if match and "service_description" not in facts:
+        value = _clean(match.group(1) + match.group(2))
+        facts["service_description"] = _fact(value, 0.75, value, pages)
 
 
 def _unknown() -> dict[str, dict[str, Any]]:
