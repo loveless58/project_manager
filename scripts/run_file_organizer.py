@@ -13,7 +13,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
 from agents.file_organizer.agent import FileOrganizerAgent
+from integrations.pageindex.structure_index import PageIndexStructureIndex
 from ocr.provider_chain import OcrProviderChain
 from ocr.providers import EasyOcrProvider, MineruProvider, RapidOcrProvider
 from platform_core.storage_bindings import StorageBinding, StorageBindingRegistry
@@ -67,12 +72,20 @@ def _build_agent(config_path: Path) -> FileOrganizerAgent:
             enabled=bool(raw.get("enabled", True)),
         ))
     chain = OcrProviderChain([RapidOcrProvider(), MineruProvider(), EasyOcrProvider()])
+    pageindex = config.get("pageindex", {})
+    structure_index = None
+    if isinstance(pageindex, dict) and pageindex.get("enabled"):
+        pageindex_dir = str(pageindex.get("directory", "")).strip()
+        if not pageindex_dir or pageindex_dir.startswith("<"):
+            raise ValueError("enabled PageIndex requires a node-local directory")
+        structure_index = PageIndexStructureIndex(pageindex_dir)
     return FileOrganizerAgent(
         Path(str(config["database_path"])),
         StorageBindingRegistry(bindings),
         DocumentParseSkill(ocr_chain=chain),
         source_binding_id=str(config["source_binding_id"]),
         archive_binding_id=str(config["archive_binding_id"]),
+        structure_index=structure_index,
         pageindex_min_text_length=int(config.get("pageindex_min_text_length", 16_000)),
     )
 

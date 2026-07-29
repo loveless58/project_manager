@@ -3,6 +3,7 @@
   "source_binding_id": "incoming",
   "archive_binding_id": "archive",
   "pageindex_min_text_length": 16000,
+  "pageindex": {"enabled": false, "directory": "<optional-pageindex-installation>"},
   "bindings": [
     {
       "binding_id": "incoming",
