@@ -71,8 +71,8 @@ def test_json_status_envelope_has_stable_schema_without_creating_database(tmp_pa
         "error_code": None,
         "details": {
             "current_version": 0,
-            "target_version": 0,
-            "pending_versions": [],
+            "target_version": 1,
+            "pending_versions": [1],
         },
     }
     assert stdout
@@ -93,7 +93,10 @@ def test_read_only_commands_do_not_create_missing_database(tmp_path, command):
     assert not database.exists()
 
 
-def test_status_human_output_is_logical_and_redacted(tmp_path):
+def test_status_human_output_is_logical_and_redacted(monkeypatch, tmp_path):
+    from infrastructure.database import cli
+
+    monkeypatch.setattr(cli, "_load_production_catalog", lambda: ())
     database = tmp_path / "private-state.sqlite3"
     initialize_database(database)
 
@@ -106,7 +109,10 @@ def test_status_human_output_is_logical_and_redacted(tmp_path):
     assert str(database) not in stdout
 
 
-def test_check_reports_current_initialized_database(tmp_path):
+def test_check_reports_current_initialized_database(monkeypatch, tmp_path):
+    from infrastructure.database import cli
+
+    monkeypatch.setattr(cli, "_load_production_catalog", lambda: ())
     database = tmp_path / "state.sqlite3"
     initialize_database(database)
 
@@ -315,6 +321,7 @@ def test_migrate_without_pending_versions_creates_no_backup(monkeypatch, tmp_pat
         "create_sqlite_backup",
         lambda *args, **kwargs: calls.append("backup"),
     )
+    monkeypatch.setattr(cli, "_load_production_catalog", lambda: ())
 
     code, payload, _, _ = _json_invoke(
         "--database",

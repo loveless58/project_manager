@@ -77,7 +77,9 @@ def test_sqlite_package_does_not_export_fault_or_publication_internals():
     assert all(not hasattr(sqlite_database, name) for name in forbidden)
 
 
-def test_production_catalog_stays_at_version_zero():
+def test_production_catalog_contains_file_organization_migration():
     root = Path(__file__).resolve().parents[2]
-    assert list((root / "migrations" / "sqlite").glob("*.sql")) == []
-    assert database.catalog_target_version(()) == 0
+    catalog = database.load_migration_catalog(root / "migrations" / "sqlite")
+
+    assert database.catalog_target_version(catalog) == 1
+    assert [(item.version, item.name) for item in catalog] == [(1, "file_organization")]

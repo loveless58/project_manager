@@ -247,3 +247,11 @@ python -X utf8 -B scripts/prepare_business_file_run.py --config <node-local-conf
 Keep `runtime_workspace`, SQLite, and all run artifacts on the executing node's local, non-synced disk and outside every source/archive binding. Agent response files must use the fixed `<runtime_workspace>/agent-host-responses/` exchange; external response import is not implemented. Remote Synology operation and PostgreSQL-backed central coordination are intentionally deferred.
 
 Invoice-specific PDF/OCR metadata propagation, schema/action/ledger refinements, and high-confidence classification require a separate plan. The current boundary must not infer a project name from a filename or physical path.
+
+## 文件整理 Agent 的 SQLite 权威边界
+
+首个文件整理 Agent 将 SQLite 作为节点本地的权威业务事实源：项目、文档内容哈希、逻辑位置历史、项目关联、整理运行及其确认/执行状态均写入 SQLite。原始文件仍由配置的存储绑定管理；Agent 不把同步盘、盘符或物理文件名当作业务身份。
+
+JSON 和 Markdown 只用于人工复核、导出与审计快照，可以由 SQLite 中的业务记录重新生成；它们不是第二份可写权威数据源。OCR、文档解析和 PageIndex 仅提供可替换的解析或证据能力，缺失时会让单个文件进入复核，不会改变 SQLite 的权威边界。
+
+生产迁移从 `migrations/sqlite/0001_file_organization.sql` 开始。升级前必须通过数据库 CLI 创建并验证备份；SQLite、备份和运行工作区必须位于执行节点本地的非同步目录，且在全部源/归档存储绑定之外。
