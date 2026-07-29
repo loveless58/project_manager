@@ -1,0 +1,28 @@
+{
+  "database_path": "C:/ProjectManager/runtime/file-organizer.sqlite3",
+  "source_binding_id": "incoming",
+  "archive_binding_id": "archive",
+  "pageindex_min_text_length": 16000,
+  "bindings": [
+    {
+      "binding_id": "incoming",
+      "provider": "local",
+      "node_id": "replace-with-this-node",
+      "logical_root": "business://incoming/",
+      "physical_root": "E:/Business/Incoming",
+      "roles": ["source"],
+      "readable": true,
+      "writable": false
+    },
+    {
+      "binding_id": "archive",
+      "provider": "local",
+      "node_id": "replace-with-this-node",
+      "logical_root": "business://archive/",
+      "physical_root": "E:/Business/Archive",
+      "roles": ["archive"],
+      "readable": true,
+      "writable": true
+    }
+  ]
+}
