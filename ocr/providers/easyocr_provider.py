@@ -68,6 +68,7 @@ class EasyOcrProvider:
             reader_kwargs = {
                 "gpu": self.gpu,
                 "verbose": False,
+                "download_enabled": False,
             }
             if self.model_dir:
                 reader_kwargs["model_storage_directory"] = self.model_dir
