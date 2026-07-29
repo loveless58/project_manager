@@ -77,7 +77,7 @@ class DocumentFactsSkill:
             amount = _amount(raw_amount) if raw_amount else None
             if amount is not None:
                 facts[name] = _fact(amount, 0.95, raw_amount, pages)
-        tax_rate = _value(_TAX_RATE, normalized)
+        tax_rate = _value(_TAX_RATE, normalized) or _detached_tax_rate(normalized)
         if tax_rate:
             facts["tax_rate"] = _fact(tax_rate, 0.9, tax_rate, pages)
         remarks = _value(_REMARKS, normalized)
@@ -156,7 +156,12 @@ def _service(text: str) -> str | None:
     value = _clean(match.group(1))
     if "*" in value:
         value = _clean(value.split("*")[-1])
-    return value or None
+    return None if value in {"规格型号", "单 位", "数量", "单价", "金额", "税率/征收率"} else (value or None)
+
+
+def _detached_tax_rate(text: str) -> str | None:
+    values = re.findall(r"(?<![0-9])([0-9]+(?:\.[0-9]+)?%)(?![0-9])", text)
+    return values[-1] if values else None
 
 
 def _amount(value: str) -> str | None:
