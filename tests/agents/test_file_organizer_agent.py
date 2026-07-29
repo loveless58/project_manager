@@ -16,10 +16,10 @@ class _ParseSkill:
             "media_type": "text/markdown",
             "status": "success",
             "parser": "native_markdown",
-            "text": "项目编号：PRJ-001\n合同正文",
+            "text": "项目编号：SYN-001\n合同正文",
             "pages": [],
             "tables": [],
-            "fields": {"project_code": "PRJ-001"},
+            "fields": {"project_code": "SYN-001"},
         }
 
 
@@ -39,7 +39,7 @@ def test_agent_prepares_explicit_file_then_executes_only_confirmed_item(tmp_path
     source.write_text("contract", encoding="utf-8")
     registry = _registry(source_root, archive_root)
     with database_path.write_uow() as connection:
-        FileOrganizationRepository(connection).create_project("项目 A", "PRJ-001")
+        FileOrganizationRepository(connection).create_project("项目 A", "SYN-001")
     agent = FileOrganizerAgent(
         database_path.path,
         registry,
@@ -60,4 +60,4 @@ def test_agent_prepares_explicit_file_then_executes_only_confirmed_item(tmp_path
 
     assert result["items"][0]["status"] == "executed"
     assert not source.exists()
-    assert (archive_root / "PRJ-001" / "contract.md").exists()
+    assert (archive_root / "SYN-001" / "contract.md").exists()

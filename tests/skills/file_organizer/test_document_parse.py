@@ -14,7 +14,7 @@ class _SuccessfulOcr:
         return {
             "status": "success",
             "provider": "mineru",
-            "text": "项目编号：PRJ-001\n扫描合同正文",
+            "text": "项目编号：SYN-001\n扫描合同正文",
             "pages": [{"page": 1, "text": "扫描合同正文", "confidence": 0.9}],
             "attempts": [{"provider": "rapidocr", "status": "blocked"}],
         }
@@ -39,7 +39,7 @@ def test_parse_skill_prefers_native_parser_and_preserves_source_reference(tmp_pa
         return {
             "status": "success",
             "parser": "native_docx",
-            "text": "合同编号：CT-001\n项目编号：PRJ-001",
+            "text": "合同编号：SYN-002\n项目编号：SYN-001",
             "pages": [],
             "tables": [],
         }
@@ -53,7 +53,7 @@ def test_parse_skill_prefers_native_parser_and_preserves_source_reference(tmp_pa
     assert result["parser"] == "native_docx"
     assert result["content_hash"] == expected_hash
     assert result["source_ref"] == SOURCE_REF
-    assert result["fields"]["project_code"] == "PRJ-001"
+    assert result["fields"]["project_code"] == "SYN-001"
 
 
 def test_parse_skill_uses_declared_ocr_chain_when_native_parse_is_blocked(tmp_path):
@@ -67,7 +67,7 @@ def test_parse_skill_uses_declared_ocr_chain_when_native_parse_is_blocked(tmp_pa
 
     assert result["status"] == "success"
     assert result["parser"] == "mineru"
-    assert result["fields"]["project_code"] == "PRJ-001"
+    assert result["fields"]["project_code"] == "SYN-001"
     assert result["pages"][0]["page"] == 1
 
 

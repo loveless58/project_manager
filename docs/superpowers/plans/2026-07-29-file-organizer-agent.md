@@ -96,7 +96,7 @@ def test_contract_accepts_native_parse_result_with_bounded_text():
         text="合同正文",
         pages=[],
         tables=[],
-        fields={"contract_code": "CT-001"},
+        fields={"contract_code": "SYN-002"},
     )
     assert validate_structured_document(payload)["schema_version"] == "structured_document.v1"
 
@@ -240,9 +240,9 @@ def test_repository_keeps_project_link_as_candidate_until_confirmed(database_pat
     migrate(database_path)
     with SqliteUnitOfWork(database_path, mode="write") as uow:
         repository = FileOrganizationRepository(uow.connection)
-        project_id = repository.create_project("项目 A", "PRJ-001")
+        synthetic_project_ref = repository.create_project("合成项目 A", "SYN-001")
         document_id = repository.upsert_document(STRUCTURED_DOCUMENT)
-        link_id = repository.link_document_to_project(document_id, project_id, "candidate", "project_code", "medium")
+        link_id = repository.link_document_to_project(document_id, synthetic_project_ref, "candidate", "project_code", "medium")
         repository.confirm_project_link(link_id)
         uow.commit()
     assert read_link_state(database_path, link_id) == "confirmed"
@@ -304,7 +304,7 @@ git commit -m "feat: persist file organization records in sqlite"
 
 ```python
 def test_parse_skill_prefers_native_docx_parser(tmp_path, source_binding):
-    source = create_docx(tmp_path / "contract.docx", "合同编号：CT-001")
+    source = create_docx(tmp_path / "contract.docx", "合同编号：SYN-002")
     result = DocumentParseSkill(native_parser=REAL_NATIVE_PARSER, ocr_chain=FORBIDDEN_OCR).parse(str(source))
     assert result["status"] == "success"
     assert result["parser"] == "native_docx"
@@ -329,9 +329,9 @@ Call the existing native parser first. Normalize DOCX/XLSX/PDF/Markdown/XML outp
 
 ```python
 def test_business_query_proposes_confirmed_project_code_match(repository, fake_index):
-    repository.create_project("项目 A", "PRJ-001")
+    repository.create_project("项目 A", "SYN-001")
     proposal = BusinessQuerySkill(repository, fake_index, pageindex_min_text_length=100).propose(
-        structured_document(project_code="PRJ-001", text="付款条款见第三章"),
+        structured_document(project_code="SYN-001", text="付款条款见第三章"),
         goal="按项目整理",
     )
     assert proposal["candidate_project"]["name"] == "项目 A"
@@ -424,7 +424,7 @@ The skill must resolve source and target through `StorageBindingRegistry`; verif
 
 ```python
 def test_agent_returns_one_proposal_per_explicit_file_and_continues_after_parse_failure(tmp_path, agent):
-    good = create_docx(tmp_path / "good.docx", "项目编号：PRJ-001")
+    good = create_docx(tmp_path / "good.docx", "项目编号：SYN-001")
     unreadable = tmp_path / "bad.pdf"
     unreadable.write_bytes(b"not a PDF")
     run = agent.prepare([str(good), str(unreadable)], goal="按项目整理")
@@ -483,7 +483,7 @@ git commit -m "feat: add confirmed file organizer agent workflow"
 ```python
 def test_file_organizer_processes_native_and_scanned_documents_without_unconfirmed_moves(tmp_path):
     source_root, archive_root, runtime_root = make_node_roots(tmp_path)
-    contract = create_docx(source_root / "contract.docx", "项目编号：PRJ-001")
+    contract = create_docx(source_root / "contract.docx", "项目编号：SYN-001")
     scan = create_image_only_pdf(source_root / "scan.pdf")
     agent = configured_agent(source_root, archive_root, runtime_root, ocr_chain=FAKE_RAPIDOCR)
 

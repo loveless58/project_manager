@@ -1,5 +1,5 @@
 {
-  "database_path": "C:/ProjectManager/runtime/file-organizer.sqlite3",
+  "database_path": "<node-local-runtime>/file-organizer.sqlite3",
   "source_binding_id": "incoming",
   "archive_binding_id": "archive",
   "pageindex_min_text_length": 16000,
@@ -9,7 +9,7 @@
       "provider": "local",
       "node_id": "replace-with-this-node",
       "logical_root": "business://incoming/",
-      "physical_root": "E:/Business/Incoming",
+      "physical_root": "<source-binding-root>",
       "roles": ["source"],
       "readable": true,
       "writable": false
@@ -19,7 +19,7 @@
       "provider": "local",
       "node_id": "replace-with-this-node",
       "logical_root": "business://archive/",
-      "physical_root": "E:/Business/Archive",
+      "physical_root": "<archive-binding-root>",
       "roles": ["archive"],
       "readable": true,
       "writable": true

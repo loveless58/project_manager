@@ -15,18 +15,18 @@ STRUCTURED_DOCUMENT = {
     "schema_version": "structured_document.v1",
     "source_ref": {
         "binding_id": "source",
-        "logical_uri": "business://source/contracts/CT-001.docx",
+        "logical_uri": "business://source/contracts/SYN-002.docx",
         "storage_provider": "local",
-        "object_key": "contracts/CT-001.docx",
+        "object_key": "contracts/SYN-002.docx",
     },
     "content_hash": "a" * 64,
     "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "status": "success",
     "parser": "native_docx",
-    "text": "合同编号：CT-001",
+    "text": "合同编号：SYN-002",
     "pages": [],
     "tables": [],
-    "fields": {"project_code": "PRJ-001", "contract_code": "CT-001"},
+    "fields": {"project_code": "SYN-001", "contract_code": "SYN-002"},
 }
 
 
@@ -51,9 +51,9 @@ def test_repository_records_document_current_location_and_history(tmp_path):
     source_location = STRUCTURED_DOCUMENT["source_ref"]
     archive_location = {
         "binding_id": "archive",
-        "logical_uri": "business://archive/project-a/contracts/CT-001.docx",
+        "logical_uri": "business://archive/project-a/contracts/SYN-002.docx",
         "storage_provider": "local",
-        "object_key": "project-a/contracts/CT-001.docx",
+        "object_key": "project-a/contracts/SYN-002.docx",
     }
 
     with SqliteUnitOfWork(database_path, mode="write") as uow:
@@ -80,7 +80,7 @@ def test_repository_keeps_project_link_as_candidate_until_confirmed(tmp_path):
 
     with SqliteUnitOfWork(database_path, mode="write") as uow:
         repository = FileOrganizationRepository(uow.connection)
-        project_id = repository.create_project("项目 A", "PRJ-001")
+        project_id = repository.create_project("项目 A", "SYN-001")
         document_id = repository.upsert_document(STRUCTURED_DOCUMENT)
         link_id = repository.link_document_to_project(
             document_id,
@@ -90,7 +90,7 @@ def test_repository_keeps_project_link_as_candidate_until_confirmed(tmp_path):
             "medium",
         )
         repository.confirm_project_link(link_id)
-        candidates = repository.find_project_candidates({"project_code": "PRJ-001"})
+        candidates = repository.find_project_candidates({"project_code": "SYN-001"})
         uow.commit()
 
     with sqlite3.connect(database_path) as connection:
@@ -99,7 +99,7 @@ def test_repository_keeps_project_link_as_candidate_until_confirmed(tmp_path):
         ).fetchone()[0]
 
     assert state == "confirmed"
-    assert candidates == [{"id": project_id, "name": "项目 A", "project_code": "PRJ-001"}]
+    assert candidates == [{"id": project_id, "name": "项目 A", "project_code": "SYN-001"}]
 
 
 def test_repository_records_idempotent_run_item_and_confirmation(tmp_path):
@@ -107,9 +107,9 @@ def test_repository_records_idempotent_run_item_and_confirmation(tmp_path):
     _migrate(database_path, tmp_path)
     target_location = {
         "binding_id": "archive",
-        "logical_uri": "business://archive/project-a/contracts/CT-001.docx",
+        "logical_uri": "business://archive/project-a/contracts/SYN-002.docx",
         "storage_provider": "local",
-        "object_key": "project-a/contracts/CT-001.docx",
+        "object_key": "project-a/contracts/SYN-002.docx",
     }
 
     with SqliteUnitOfWork(database_path, mode="write") as uow:
