@@ -1,0 +1,6 @@
+# Optional OCR providers for the File Organizer Agent.
+# Install only on machines that need the corresponding local engine.
+rapidocr>=3.0
+onnxruntime>=1.18
+mineru[all]>=3.0
+easyocr>=1.7

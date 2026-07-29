@@ -8,6 +8,7 @@ Mirrors the EasyOcrProvider contract:
 
 import importlib
 import os
+import sys
 import tempfile
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -42,16 +43,27 @@ class RapidOcrProvider:
         self.min_confidence = min_confidence
 
     def extract(self, file_path: str) -> Dict[str, Any]:
-        if not self.dependency_probe("rapidocr_onnxruntime"):
+        module_name = (
+            "rapidocr"
+            if "rapidocr" in sys.modules
+            else "rapidocr_onnxruntime"
+            if "rapidocr_onnxruntime" in sys.modules
+            else "rapidocr"
+            if self.dependency_probe("rapidocr")
+            else "rapidocr_onnxruntime"
+            if self.dependency_probe("rapidocr_onnxruntime")
+            else None
+        )
+        if module_name is None:
             return normalize_ocr_result({
                 "status": "blocked",
                 "engine": "rapidocr",
                 "blocked_reason": "ocr_provider_unavailable",
-                "error": "rapidocr_onnxruntime is not installed",
+                "error": "neither rapidocr nor rapidocr_onnxruntime is installed",
             })
 
         try:
-            rapidocr_module = importlib.import_module("rapidocr_onnxruntime")
+            rapidocr_module = importlib.import_module(module_name)
             engine = self._get_engine(rapidocr_module)
         except Exception as exc:
             return normalize_ocr_result({
