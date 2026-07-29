@@ -35,7 +35,7 @@
 **Interfaces:**
 - `build_agent_run(*, run_id, goal, input_refs, status, artifacts) -> dict`
 - `build_artifact_reference(*, kind, logical_uri, sha256, size_bytes) -> dict`
-- `build_document_result(*, run, structured_document, facts, decision, artifacts) -> dict`
+- `build_document_result(*, run, document_id, structured_document, facts, decision, artifacts) -> dict`
 - `WorkflowState = RECEIVED, SCOPED, PROFILED, PARSED, FACTS_EXTRACTED, ARTIFACTS_PUBLISHED, AWAITING_REVIEW, COMPLETED`
 
 - [ ] **Step 1: Write the failing tests**
@@ -44,6 +44,7 @@
 def test_document_result_preserves_parse_text_and_non_archive_decision():
     result = build_document_result(
         run={"run_id": "run-1", "goal": "解析", "status": "prepared"},
+        document_id="doc-1",
         structured_document=success_document(text="正文"),
         facts={"document_type": {"value": "invoice", "confidence": 0.99, "evidence": []}},
         decision={"status": "needs_review", "suggested_action": "no_archive", "reasons": []},
@@ -217,7 +218,7 @@ Commit message: `feat: add invoice document facts skill`.
 
 **Interfaces:**
 - `DocumentParseWorkflowSkill.parse(path, *, source_ref)` delegates to tested `skills.file_organizer.document_parse.DocumentParseSkill`.
-- `DocumentReviewSkill.build(run, structured_document, facts) -> document_result.v1` always uses `suggested_action="no_archive"`.
+- `DocumentReviewSkill.build(run, document_id, structured_document, facts) -> document_result.v1` always uses `suggested_action="no_archive"`.
 - `FileOrganizationRepository.record_artifact(run_id, document_id, artifact) -> str`.
 - `FileOrganizationRepository.artifacts_for_run(run_id) -> list[dict]`.
 
@@ -226,7 +227,7 @@ Commit message: `feat: add invoice document facts skill`.
 ```python
 def test_review_skill_keeps_parse_failure_reviewable_without_archive_target():
     result = DocumentReviewSkill().build(
-        RUN, unavailable_document("NATIVE.UNSUPPORTED_MEDIA"), {}
+        RUN, "doc-1", unavailable_document("NATIVE.UNSUPPORTED_MEDIA"), {}
     )
     assert result["parse"]["status"] == "needs_review"
     assert result["decision"] == {
@@ -322,9 +323,10 @@ Expected: import failure for `DocumentManagementAgent`.
 
 ```python
 parsed = self._parse_skill.parse(source_path, source_ref=source_ref)
+document_id = repository.upsert_document(parsed)
 skills = self._catalog.for_document(parsed)
 facts = self._facts_skill.extract(parsed) if "document_facts" in skills else {}
-result = self._review_skill.build(run, parsed, facts)
+result = self._review_skill.build(run, document_id, parsed, facts)
 refs = self._artifact_store.publish_document(run, result)
 ```
 
