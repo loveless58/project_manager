@@ -26,7 +26,7 @@ class FileOrganizationRepository:
         self._connection = connection
 
     def upsert_document(self, structured_document: Mapping[str, Any]) -> str:
-        payload = validate_structured_document(dict(structured_document))
+        payload = _normalize_document(structured_document)
         content_hash = payload["content_hash"]
         existing = self._connection.execute(
             "SELECT id FROM documents WHERE content_hash = ?", (content_hash,)
@@ -300,6 +300,29 @@ class FileOrganizationRepository:
             "UPDATE organization_items SET item_state = 'skipped' WHERE id = ? AND item_state = 'pending'",
             (item_id,),
         )
+
+
+def _normalize_document(structured_document: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(structured_document)
+    if payload.get("status") == "success":
+        return validate_structured_document(payload)
+    if payload.get("status") != "needs_review":
+        raise ValueError("document parse status is unsupported")
+    candidate = {
+        "schema_version": payload.get("schema_version"),
+        "source_ref": payload.get("source_ref"),
+        "content_hash": payload.get("content_hash"),
+        "media_type": payload.get("media_type"),
+        "status": "success",
+        "parser": payload.get("parser"),
+        "text": payload.get("text", ""),
+        "pages": payload.get("pages", []),
+        "tables": payload.get("tables", []),
+        "fields": payload.get("fields", {}),
+    }
+    normalized = validate_structured_document(candidate)
+    normalized["status"] = "needs_review"
+    return normalized
 
 
 def _new_id() -> str:

@@ -49,7 +49,15 @@ class FileOrganizerAgent:
                 source_ref = self._source_ref(source_path)
                 parsed = self._parse_skill.parse(source_path, source_ref=source_ref)
                 if parsed.get("status") != "success":
-                    items.append({"source_ref": source_ref, "status": "needs_review", "reason": parsed.get("reason", "PARSE.UNAVAILABLE")})
+                    document_id = repository.upsert_document(parsed)
+                    repository.record_location(document_id, source_ref, current=True)
+                    proposal = {
+                        "schema_version": "organization_proposal.v1",
+                        "status": "needs_review",
+                        "reasons": [str(parsed.get("reason", "PARSE.UNAVAILABLE"))],
+                    }
+                    item_id = repository.record_item(run_id, document_id, proposal)
+                    items.append({"item_id": item_id, "document_id": document_id, "proposal": proposal})
                     continue
                 document_id = repository.upsert_document(parsed)
                 repository.record_location(document_id, source_ref, current=True)
