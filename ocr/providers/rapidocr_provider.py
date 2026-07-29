@@ -25,6 +25,8 @@ def _default_dependency_probe(module_name: str) -> bool:
 
 
 class RapidOcrProvider:
+    name = "rapidocr"
+
     """Lazy RapidOCR adapter (ONNX runtime, PaddleOCR-derived).
 
     RapidOCR is intentionally optional: this provider reports structured

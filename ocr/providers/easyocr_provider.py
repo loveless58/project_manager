@@ -16,6 +16,8 @@ def _default_dependency_probe(module_name: str) -> bool:
 
 
 class EasyOcrProvider:
+    name = "easyocr"
+
     """Lazy EasyOCR adapter.
 
     EasyOCR is intentionally optional: this provider reports structured blocked
