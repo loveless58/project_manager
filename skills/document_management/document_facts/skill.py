@@ -20,6 +20,15 @@ _SECTION_PARTY = {
     "seller_name": re.compile(r"(?:销售方|销方|销货方)\s*信息[\s\S]{0,240}?名称\s*[：:]\s*([^\n\r]+)"),
 }
 _SERVICE = re.compile(r"(?:项目名称|货物或应税劳务、服务名称)\s*[：:]?\s*([^\n\r]+)")
+_INVOICE_TYPE = re.compile(r"((?:增值税)?(?:电子|数电)?(?:普通|专用)?发票)")
+_TAX_ID = {
+    "buyer_tax_id": re.compile(r"(?:购方|购买方|购货方)\s*(?:税号|纳税人识别号)\s*[：:]\s*([A-Za-z0-9]{8,32})"),
+    "seller_tax_id": re.compile(r"(?:销方|销售方|销货方)\s*(?:税号|纳税人识别号)\s*[：:]\s*([A-Za-z0-9]{8,32})"),
+}
+_UNTAXED = re.compile(r"(?:不含税金额|金额)\s*[：:]?\s*(?:[¥￥]|CNY)?\s*([0-9][0-9,]*(?:\.\d{1,2})?)")
+_TAX_AMOUNT = re.compile(r"税额\s*[：:]?\s*(?:[¥￥]|CNY)?\s*([0-9][0-9,]*(?:\.\d{1,2})?)")
+_TAX_RATE = re.compile(r"税率\s*[：:]?\s*([0-9]+(?:\.[0-9]+)?%)")
+_REMARKS = re.compile(r"备注\s*[：:]?\s*([^\n\r]+)")
 
 
 class DocumentFactsSkill:
@@ -46,6 +55,9 @@ class DocumentFactsSkill:
         facts: dict[str, dict[str, Any]] = {
             "document_type": _fact("invoice", 0.99, "发票", pages),
         }
+        invoice_type = _value(_INVOICE_TYPE, normalized)
+        if invoice_type:
+            facts["invoice_type"] = _fact(invoice_type, 0.95, invoice_type, pages)
         if invoice_number:
             facts["invoice_number"] = _fact(invoice_number, 0.99, invoice_number, pages)
         issue_date = _date(normalized)
@@ -55,6 +67,21 @@ class DocumentFactsSkill:
             party = _party(name, normalized)
             if party:
                 facts[name] = _fact(party, 0.95, party, pages)
+        for name, pattern in _TAX_ID.items():
+            tax_id = _value(pattern, normalized)
+            if tax_id:
+                facts[name] = _fact(tax_id, 0.95, tax_id, pages)
+        for name, pattern in (("untaxed_amount", _UNTAXED), ("tax_amount", _TAX_AMOUNT)):
+            raw_amount = _value(pattern, normalized)
+            amount = _amount(raw_amount) if raw_amount else None
+            if amount is not None:
+                facts[name] = _fact(amount, 0.95, raw_amount, pages)
+        tax_rate = _value(_TAX_RATE, normalized)
+        if tax_rate:
+            facts["tax_rate"] = _fact(tax_rate, 0.9, tax_rate, pages)
+        remarks = _value(_REMARKS, normalized)
+        if remarks:
+            facts["remarks"] = _fact(remarks, 0.85, remarks, pages)
         if total:
             amount = _amount(total)
             if amount is not None:
