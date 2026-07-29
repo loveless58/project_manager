@@ -27,6 +27,7 @@ _REQUIRED_KEYS = {
     "tables",
     "fields",
 }
+_OPTIONAL_KEYS = {"attempts"}
 
 
 class StructuredDocumentError(ValueError):
@@ -53,6 +54,7 @@ def build_structured_document(
     pages: list[dict[str, Any]],
     tables: list[dict[str, Any]],
     fields: Mapping[str, Any],
+    attempts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build and validate one successful normalized document result."""
     return validate_structured_document(
@@ -67,13 +69,14 @@ def build_structured_document(
             "pages": list(pages),
             "tables": list(tables),
             "fields": dict(fields),
+            "attempts": list(attempts or []),
         }
     )
 
 
 def validate_structured_document(payload: object) -> dict[str, Any]:
     """Validate and return a detached ``structured_document.v1`` payload."""
-    if not isinstance(payload, dict) or set(payload) != _REQUIRED_KEYS:
+    if not isinstance(payload, dict) or not _REQUIRED_KEYS.issubset(payload) or set(payload) - (_REQUIRED_KEYS | _OPTIONAL_KEYS):
         raise StructuredDocumentError("structured document fields are invalid")
     if payload.get("schema_version") != SCHEMA_VERSION:
         raise StructuredDocumentError("structured document version is invalid")
@@ -100,6 +103,8 @@ def validate_structured_document(payload: object) -> dict[str, Any]:
         raise StructuredDocumentError("structured document page data is invalid")
     if not isinstance(payload.get("fields"), dict):
         raise StructuredDocumentError("structured document fields are invalid")
+    if not isinstance(payload.get("attempts", []), list) or not all(isinstance(item, dict) for item in payload.get("attempts", [])):
+        raise StructuredDocumentError("structured document attempts are invalid")
     return {
         "schema_version": SCHEMA_VERSION,
         "source_ref": dict(source_ref),
@@ -111,6 +116,7 @@ def validate_structured_document(payload: object) -> dict[str, Any]:
         "pages": list(payload["pages"]),
         "tables": list(payload["tables"]),
         "fields": dict(payload["fields"]),
+        "attempts": list(payload.get("attempts", [])),
     }
 
 

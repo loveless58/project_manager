@@ -29,7 +29,7 @@ class DocumentParseSkill:
     ) -> dict[str, Any]:
         path = Path(source_path)
         if not path.is_file():
-            return _review_result(path, source_ref, "INPUT.FILE_UNAVAILABLE")
+            return _review_result(path, source_ref, "INPUT.FILE_UNAVAILABLE", attempts=[{"stage": "input", "provider": "filesystem", "status": "unavailable"}])
         resolved_source_ref = _source_ref(path, source_ref)
         content_hash = _sha256(path)
         media_type = _media_type(path)
@@ -39,6 +39,7 @@ class DocumentParseSkill:
             native = {"status": "blocked", "reason": "NATIVE.PARSE_FAILED"}
 
         native_text = native.get("text") if isinstance(native.get("text"), str) else ""
+        native_attempt = {"stage": "native", "provider": str(native.get("parser") or "native"), "status": str(native.get("status") or "blocked")}
         if native.get("status") == "success" and native_text.strip():
             return build_structured_document(
                 source_ref=resolved_source_ref,
@@ -49,9 +50,11 @@ class DocumentParseSkill:
                 pages=_list_of_dicts(native.get("pages")),
                 tables=_list_of_dicts(native.get("tables")),
                 fields=_extract_fields(native_text, native.get("fields")),
+                attempts=[native_attempt],
             )
 
         ocr_result = self._extract_ocr(str(path))
+        ocr_attempts = [{"stage": "ocr", "provider": str(item.get("provider", "ocr")), "status": str(item.get("status", "failed"))} for item in ocr_result.get("attempts", []) if isinstance(item, Mapping)]
         ocr_text = ocr_result.get("text") if isinstance(ocr_result.get("text"), str) else ""
         if ocr_result.get("status") == "success" and ocr_text.strip():
             return build_structured_document(
@@ -63,6 +66,7 @@ class DocumentParseSkill:
                 pages=_list_of_dicts(ocr_result.get("pages")),
                 tables=[],
                 fields=_extract_fields(ocr_text, None),
+                attempts=[native_attempt, *ocr_attempts],
             )
         return _review_result(
             path,
@@ -70,12 +74,13 @@ class DocumentParseSkill:
             str(ocr_result.get("reason") or "OCR.PROVIDERS_UNAVAILABLE"),
             content_hash=content_hash,
             media_type=media_type,
+            attempts=[native_attempt, *ocr_attempts],
         )
 
     def _extract_ocr(self, source_path: str) -> dict[str, Any]:
         extractor = getattr(self._ocr_chain, "extract", None)
         if not callable(extractor):
-            return {"status": "needs_review", "reason": "OCR.PROVIDERS_UNAVAILABLE"}
+            return {"status": "needs_review", "reason": "OCR.PROVIDERS_UNAVAILABLE", "attempts": [{"provider": "ocr_chain", "status": "unavailable"}]}
         try:
             result = extractor(source_path)
         except Exception:
@@ -143,6 +148,7 @@ def _review_result(
     *,
     content_hash: str = "",
     media_type: str = "",
+    attempts: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": "structured_document.v1",
@@ -156,6 +162,7 @@ def _review_result(
         "pages": [],
         "tables": [],
         "fields": {},
+        "attempts": list(attempts or []),
     }
 
 
