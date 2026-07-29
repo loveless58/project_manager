@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from contracts.artifact_reference import validate_artifact_reference
 from contracts.structured_document import validate_structured_document
 
 
@@ -244,6 +245,62 @@ class FileOrganizationRepository:
             (item_id, run_id, document_id, _json(proposal), _utc_now()),
         )
         return item_id
+
+    def record_artifact(
+        self, run_id: str, document_id: str, artifact: Mapping[str, Any]
+    ) -> str:
+        normalized = validate_artifact_reference(artifact)
+        existing = self._connection.execute(
+            "SELECT id, logical_uri, sha256, size_bytes FROM document_artifacts "
+            "WHERE run_id = ? AND document_id = ? AND artifact_kind = ?",
+            (run_id, document_id, normalized["kind"]),
+        ).fetchone()
+        if existing is not None:
+            if (
+                existing["logical_uri"] == normalized["logical_uri"]
+                and existing["sha256"] == normalized["sha256"]
+                and existing["size_bytes"] == normalized["size_bytes"]
+            ):
+                return str(existing["id"])
+            raise ValueError("artifact conflict for run/document/kind")
+        artifact_id = _new_id()
+        self._connection.execute(
+            "INSERT INTO document_artifacts "
+            "(id, run_id, document_id, artifact_kind, logical_uri, sha256, size_bytes, created_at_utc) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                artifact_id,
+                run_id,
+                document_id,
+                normalized["kind"],
+                normalized["logical_uri"],
+                normalized["sha256"],
+                normalized["size_bytes"],
+                _utc_now(),
+            ),
+        )
+        return artifact_id
+
+    def artifacts_for_run(self, run_id: str) -> list[dict[str, Any]]:
+        rows = self._connection.execute(
+            "SELECT id, run_id, document_id, artifact_kind, logical_uri, sha256, size_bytes, created_at_utc "
+            "FROM document_artifacts WHERE run_id = ? "
+            "ORDER BY document_id, artifact_kind, id",
+            (run_id,),
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "run_id": row["run_id"],
+                "document_id": row["document_id"],
+                "artifact_kind": row["artifact_kind"],
+                "logical_uri": row["logical_uri"],
+                "sha256": row["sha256"],
+                "size_bytes": row["size_bytes"],
+                "created_at_utc": row["created_at_utc"],
+            }
+            for row in rows
+        ]
 
     def confirm_item(self, item_id: str, target_location: Mapping[str, Any]) -> None:
         self._connection.execute(
