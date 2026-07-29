@@ -3,6 +3,7 @@
 > 状态：当前开发基线  
 > 日期：2026-07-30  
 > 历史平台方案：[多智能体项目数据平台（历史 PRD）](2026-07-30-historical-multi-agent-data-platform.md)
+> 架构规格：[文档管理 Agent 三层架构](../superpowers/specs/2026-07-30-document-management-agent-architecture.md)
 
 ## 1. 产品定义
 
@@ -22,6 +23,23 @@ Agent 处理了什么文件？
 源文件是否被修改？
 本次运行产生了哪些结果？
 ```
+
+## 架构基线
+
+本 PRD 必须遵循 [文档管理 Agent 三层架构](../superpowers/specs/2026-07-30-document-management-agent-architecture.md)：
+
+```text
+第一层：DocumentManagementAgent
+  - 目标理解、运行状态、Skill 选择、人工门控
+
+第二层：Skill
+  - 文档解析、字段事实、审核交付、后续业务查询与归档
+
+第三层：Connector
+  - 存储绑定、原生解析、OCR、SQLite、结果产物、后续 PageIndex
+```
+
+Agent 必须通过 Skill Catalog 按需加载领域方法；Skill 必须通过 Connector 执行确定性 I/O。任何新功能不得把 OCR、数据库、路径映射、产物写入或业务规则直接堆入 Agent 工作流函数。渐进式披露、逻辑 URI、版本化契约和人工确认门是第一阶段的强制约束。
 
 ## 2. 第一阶段范围
 
